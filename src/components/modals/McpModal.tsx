@@ -72,8 +72,8 @@ export const McpModal = ({ isOpen, onClose }: McpModalProps) => {
       JSON.stringify(
         {
           mcpServers: {
-            tabularis: {
-              command: selectedClient?.executable_path || "tabularis",
+            "tabularis-extended": {
+              command: selectedClient?.executable_path || "tabularis-extended",
               args: ["--mcp"],
             },
           },
@@ -87,7 +87,7 @@ export const McpModal = ({ isOpen, onClose }: McpModalProps) => {
   const cliCommand = useMemo(
     () =>
       selectedClient?.manual_command ||
-      `claude mcp add --scope user tabularis ${selectedClient?.executable_path || "tabularis"} -- --mcp`,
+      `claude mcp add --scope user tabularis-extended ${selectedClient?.executable_path || "tabularis-extended"} -- --mcp`,
     [selectedClient?.executable_path, selectedClient?.manual_command]
   );
 

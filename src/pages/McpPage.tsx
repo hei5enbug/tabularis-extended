@@ -149,8 +149,8 @@ function McpSetupPanel() {
       JSON.stringify(
         {
           mcpServers: {
-            tabularis: {
-              command: selectedClient?.executable_path || "tabularis",
+            "tabularis-extended": {
+              command: selectedClient?.executable_path || "tabularis-extended",
               args: ["--mcp"],
             },
           },
@@ -164,8 +164,8 @@ function McpSetupPanel() {
   const cliCommand = useMemo(
     () =>
       selectedClient?.manual_command ||
-      `claude mcp add --scope user tabularis ${
-        selectedClient?.executable_path || "tabularis"
+      `claude mcp add --scope user tabularis-extended ${
+        selectedClient?.executable_path || "tabularis-extended"
       } -- --mcp`,
     [selectedClient?.executable_path, selectedClient?.manual_command],
   );
