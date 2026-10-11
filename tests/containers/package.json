@@ -1,0 +1,7 @@
+{
+  "name": "tabularis-extended-container-tests",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test managed-query.test.mjs" },
+  "devDependencies": { "testcontainers": "12.2.0" }
+}

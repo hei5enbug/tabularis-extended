@@ -1,65 +1,25 @@
-import { readFileSync, writeFileSync, readdirSync } from "fs";
-import { resolve } from "path";
+import { readFileSync, writeFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { valid } from "semver";
 
-// File paths
-const paths = {
-  package: resolve("package.json"),
-  tauri: resolve("src-tauri/tauri.conf.json"),
-  cargo: resolve("src-tauri/Cargo.toml"),
-  appVersion: resolve("src/version.ts"),
-};
-
-// All README files in the repo root, including translations (README.it.md, README.zh-CN.md, ...)
-const readmeFiles = readdirSync(resolve("."))
-  .filter((name) => /^README(\..+)?\.md$/.test(name))
-  .map((name) => resolve(name));
-
-// 1. Read the new version from package.json (already updated by npm version)
-const pkg = JSON.parse(readFileSync(paths.package, "utf-8"));
-const newVersion = pkg.version;
-
-console.log(`🔄 Syncing version to ${newVersion}...`);
-
-// 2. Update tauri.conf.json
-const tauriConf = JSON.parse(readFileSync(paths.tauri, "utf-8"));
-tauriConf.version = newVersion;
-// Also update the version in the package node if present
-if (tauriConf.package) tauriConf.package.version = newVersion;
-writeFileSync(paths.tauri, JSON.stringify(tauriConf, null, 2));
-console.log("✅ Updated tauri.conf.json");
-
-// 3. Update Cargo.toml
-let cargo = readFileSync(paths.cargo, "utf-8");
-// Use a regex to replace only the version in the [package] block
-cargo = cargo.replace(/^version = ".*"/m, `version = "${newVersion}"`);
-writeFileSync(paths.cargo, cargo);
-console.log("✅ Updated Cargo.toml");
-
-// 4. Update src/version.ts
-const versionContent = `export const APP_VERSION = "${newVersion}";\n`;
-writeFileSync(paths.appVersion, versionContent);
-console.log("✅ Updated src/version.ts");
-
-// 5. Update download links in every README (all languages)
-for (const readmePath of readmeFiles) {
-  let readme = readFileSync(readmePath, "utf-8");
-
-  readme = readme.replace(
-    /releases\/download\/v.*?\//g,
-    `releases/download/v${newVersion}/`,
-  );
-
-  readme = readme.replace(
-    /tabularis_\d+\.\d+\.\d+_/g,
-    `tabularis_${newVersion}_`,
-  );
-
-  // .rpm assets use dashes: tabularis-X.Y.Z-1.x86_64.rpm
-  readme = readme.replace(
-    /tabularis-\d+\.\d+\.\d+-/g,
-    `tabularis-${newVersion}-`,
-  );
-
-  writeFileSync(readmePath, readme);
-  console.log(`✅ Updated ${readmePath.split("/").pop()}`);
+const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+if (pkg.name !== "tabularis-extended" || !valid(pkg.version)) {
+  throw new Error("Expected a valid Tabularis Extended package version.");
 }
+const version = pkg.version;
+const configPath = resolve("src-tauri/tauri.conf.json");
+const cargoPath = resolve("src-tauri/Cargo.toml");
+const lockPath = resolve("src-tauri/Cargo.lock");
+const config = JSON.parse(readFileSync(configPath, "utf8"));
+const cargo = readFileSync(cargoPath, "utf8");
+const lock = readFileSync(lockPath, "utf8");
+const rootPackage = /(\[\[package\]\]\r?\nname = "tabularis-extended"\r?\nversion = ")[^"]+("(?=\r?\n))/g;
+if ([...lock.matchAll(rootPackage)].length !== 1 || !/^name = "tabularis-extended"$/m.test(cargo)) {
+  throw new Error("Expected exactly one fork package in the Cargo manifests.");
+}
+config.version = version;
+writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+writeFileSync(cargoPath, cargo.replace(/^version = ".*"/m, `version = "${version}"`));
+writeFileSync(lockPath, lock.replace(rootPackage, (_, before, after) => `${before}${version}${after}`));
+writeFileSync(resolve("src/version.ts"), `export const APP_VERSION = "${version}";\n`);
+console.log(`Synchronized Tabularis Extended ${version}.`);

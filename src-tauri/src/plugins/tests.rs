@@ -175,18 +175,18 @@ fn returns_error_for_invalid_manifest() {
 }
 
 #[test]
-fn migrates_plugin_folders_into_empty_target() {
+fn copies_plugin_folders_into_empty_target_and_preserves_source() {
     let root = tempdir().expect("temp dir");
     let legacy = root.path().join("legacy/plugins");
     let target = root.path().join("new/plugins");
     fs::create_dir_all(legacy.join("my-plugin")).expect("legacy plugin dir");
     fs::write(legacy.join("my-plugin/manifest.json"), "{}").expect("manifest");
 
-    let moved = migrate_plugins_between(&legacy, &target);
+    let copied = migrate_plugins_between(&legacy, &target);
 
-    assert_eq!(moved, 1);
+    assert_eq!(copied, 1);
     assert!(target.join("my-plugin/manifest.json").exists());
-    assert!(!legacy.exists(), "empty legacy dir should be removed");
+    assert!(legacy.join("my-plugin/manifest.json").exists());
 }
 
 #[test]
@@ -197,9 +197,9 @@ fn skips_migration_when_target_already_populated() {
     fs::create_dir_all(legacy.join("old")).expect("legacy");
     fs::create_dir_all(target.join("already-there")).expect("target");
 
-    let moved = migrate_plugins_between(&legacy, &target);
+    let copied = migrate_plugins_between(&legacy, &target);
 
-    assert_eq!(moved, 0);
+    assert_eq!(copied, 0);
     assert!(legacy.join("old").exists(), "legacy left untouched");
     assert!(!target.join("old").exists());
 }
@@ -210,9 +210,9 @@ fn migration_is_a_no_op_when_legacy_equals_target() {
     let same = root.path().join("plugins");
     fs::create_dir_all(same.join("p")).expect("dir");
 
-    let moved = migrate_plugins_between(&same, &same);
+    let copied = migrate_plugins_between(&same, &same);
 
-    assert_eq!(moved, 0);
+    assert_eq!(copied, 0);
     assert!(same.join("p").exists());
 }
 
@@ -388,7 +388,7 @@ fn should_skip_rescan_does_not_skip_a_plugin_not_yet_registered() {
     assert!(!should_skip_rescan("postgresql", false));
 }
 
-/// Regression: built-in ids (mysql/postgres/sqlite) are registered before any
+/// Regression: built-in ids (mysql/sqlite) are registered before any
 /// plugin directory is ever scanned, so they always read as "already
 /// registered". Without this exclusion, a plugin manifest that claims one of
 /// those ids would be silently skipped here instead of reaching
@@ -397,8 +397,8 @@ fn should_skip_rescan_does_not_skip_a_plugin_not_yet_registered() {
 #[test]
 fn should_skip_rescan_never_skips_a_builtin_id_even_when_registered() {
     assert!(!should_skip_rescan("mysql", true));
-    assert!(!should_skip_rescan("postgres", true));
     assert!(!should_skip_rescan("sqlite", true));
+    assert!(should_skip_rescan("postgres", true));
 }
 
 /// The standalone MCP subprocess reruns plugin loading on every

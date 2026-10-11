@@ -8,6 +8,8 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Runtime};
 
+const MCP_SERVER_NAME: &str = "tabularis-extended";
+
 /// "file"  → standard mcpServers JSON config file
 /// "command" → installed via CLI (e.g. `claude mcp add`)
 #[derive(serde::Serialize, Clone)]
@@ -108,7 +110,7 @@ fn get_all_clients() -> Vec<McpClient> {
     ]
 }
 
-fn is_tabularis_in_mcp_servers(path: &PathBuf) -> bool {
+fn is_extended_in_mcp_servers(path: &PathBuf) -> bool {
     if !path.exists() {
         return false;
     }
@@ -116,21 +118,21 @@ fn is_tabularis_in_mcp_servers(path: &PathBuf) -> bool {
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|j| j.get("mcpServers").cloned())
-        .map(|s| s.get("tabularis").is_some())
+        .map(|servers| servers.get(MCP_SERVER_NAME).is_some())
         .unwrap_or(false)
 }
 
 /// Command-driven clients store MCP config in different formats; for status
-/// purposes, consider Tabularis installed when their config references it.
+/// purposes, consider Tabularis Extended installed when its entry is present.
 fn is_command_client_installed(path: &PathBuf) -> bool {
     if !path.exists() {
         return false;
     }
     fs::read_to_string(path)
         .map(|c| {
-            c.contains("\"tabularis\"")
-                || c.contains("[mcp_servers.tabularis]")
-                || c.contains("[mcp_servers.\"tabularis\"]")
+            c.contains("\"tabularis-extended\"")
+                || c.contains("[mcp_servers.tabularis-extended]")
+                || c.contains("[mcp_servers.\"tabularis-extended\"]")
         })
         .unwrap_or(false)
 }
@@ -147,7 +149,7 @@ fn build_command_client_invocation(
                 "add".to_string(),
                 "--scope".to_string(),
                 "user".to_string(),
-                "tabularis".to_string(),
+                MCP_SERVER_NAME.to_string(),
                 exe_str.to_string(),
                 "--".to_string(),
                 "--mcp".to_string(),
@@ -158,7 +160,7 @@ fn build_command_client_invocation(
             vec![
                 "mcp".to_string(),
                 "add".to_string(),
-                "tabularis".to_string(),
+                MCP_SERVER_NAME.to_string(),
                 "--".to_string(),
                 exe_str.to_string(),
                 "--mcp".to_string(),
@@ -170,7 +172,40 @@ fn build_command_client_invocation(
 
 fn build_manual_command(client_id: &str, exe_str: &str) -> Option<String> {
     let (program, args) = build_command_client_invocation(client_id, exe_str)?;
-    Some(format!("{} {}", program, args.join(" ")))
+    Some(
+        std::iter::once(program)
+            .chain(args)
+            .map(quote_manual_argument)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn quote_manual_argument(argument: String) -> String {
+    #[cfg(windows)]
+    {
+        let safe = !argument.is_empty()
+            && argument
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_./:\\-".contains(&byte));
+        if safe {
+            argument
+        } else {
+            format!("'{}'", argument.replace('\'', "''"))
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let safe = !argument.is_empty()
+            && argument
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_@%+=:,./-".contains(&byte));
+        if safe {
+            argument
+        } else {
+            format!("'{}'", argument.replace('\'', "'\\''"))
+        }
+    }
 }
 
 #[tauri::command]
@@ -195,7 +230,7 @@ pub async fn get_mcp_status<R: Runtime>(
                 _ => c
                     .config_path
                     .as_ref()
-                    .map(|p| is_tabularis_in_mcp_servers(p))
+                    .map(|p| is_extended_in_mcp_servers(p))
                     .unwrap_or(false),
             };
             McpClientStatus {
@@ -268,19 +303,29 @@ pub async fn install_mcp_config<R: Runtime>(
         json!({})
     };
 
-    if config.get("mcpServers").is_none() {
-        config["mcpServers"] = json!({});
-    }
-
-    config["mcpServers"]["tabularis"] = json!({
-        "command": exe_str,
-        "args": ["--mcp"]
-    });
+    write_extended_server_entry(&mut config, &exe_str)?;
 
     let new_content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(config_path, new_content).map_err(|e| e.to_string())?;
 
     Ok(client.name.to_string())
+}
+
+fn write_extended_server_entry(
+    config: &mut serde_json::Value,
+    exe_str: &str,
+) -> Result<(), String> {
+    if config.get("mcpServers").is_none() {
+        config["mcpServers"] = json!({});
+    }
+    if !config["mcpServers"].is_object() {
+        return Err("Invalid MCP client configuration".to_string());
+    }
+    config["mcpServers"][MCP_SERVER_NAME] = json!({
+        "command": exe_str,
+        "args": ["--mcp"]
+    });
+    Ok(())
 }
 
 #[cfg(test)]
@@ -310,7 +355,7 @@ mod tests {
     fn builds_codex_manual_command() {
         assert_eq!(
             build_manual_command("codex", "/Applications/Tabularis.app/tabularis").as_deref(),
-            Some("codex mcp add tabularis -- /Applications/Tabularis.app/tabularis --mcp")
+            Some("codex mcp add tabularis-extended -- /Applications/Tabularis.app/tabularis --mcp")
         );
     }
 
@@ -320,8 +365,40 @@ mod tests {
             build_manual_command("claude_code", "/Applications/Tabularis.app/tabularis")
                 .as_deref(),
             Some(
-                "claude mcp add --scope user tabularis /Applications/Tabularis.app/tabularis -- --mcp"
+                "claude mcp add --scope user tabularis-extended /Applications/Tabularis.app/tabularis -- --mcp"
             )
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn 주어진_공백과_아포스트로피가있는실행경로일때_posix명령을안전하게인용한다() {
+        // Given
+        let executable = "/Applications/Tabularis O'Brien.app/tabularis";
+
+        // When
+        let command = build_manual_command("codex", executable).unwrap();
+
+        // Then
+        assert_eq!(
+            command,
+            "codex mcp add tabularis-extended -- '/Applications/Tabularis O'\\''Brien.app/tabularis' --mcp"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn 주어진_공백과_아포스트로피가있는실행경로일때_powershell명령을안전하게인용한다() {
+        // Given
+        let executable = r"C:\Program Files\O'Brien\tabularis.exe";
+
+        // When
+        let command = build_manual_command("codex", executable).unwrap();
+
+        // Then
+        assert_eq!(
+            command,
+            "codex mcp add tabularis-extended -- 'C:\\Program Files\\O''Brien\\tabularis.exe' --mcp"
         );
     }
 
@@ -332,7 +409,7 @@ mod tests {
         fs::write(
             &config_path,
             r#"
-[mcp_servers.tabularis]
+[mcp_servers.tabularis-extended]
 command = "/Applications/Tabularis.app/tabularis"
 args = ["--mcp"]
 "#,
@@ -340,5 +417,39 @@ args = ["--mcp"]
         .unwrap();
 
         assert!(is_command_client_installed(&config_path));
+    }
+
+    #[test]
+    fn 주어진_원본과_확장서버가_있는_config일때_두_entry를_보존한다() {
+        // Given
+        let mut config = json!({
+            "mcpServers": {
+                "tabularis": { "command": "original-app", "args": ["--mcp"] },
+                "other": { "command": "other-tool", "args": [] }
+            }
+        });
+        // When
+        write_extended_server_entry(&mut config, "/tmp/tabularis-extended").unwrap();
+        // Then
+        assert_eq!(config["mcpServers"]["tabularis"]["command"], "original-app");
+        assert_eq!(config["mcpServers"]["other"]["command"], "other-tool");
+        assert_eq!(
+            config["mcpServers"]["tabularis-extended"]["command"],
+            "/tmp/tabularis-extended"
+        );
+    }
+
+    #[test]
+    fn 주어진_원본전용_entry일때_확장설치로_판정하지_않는다() {
+        // Given
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("mcp.json");
+        fs::write(
+            &config_path,
+            r#"{"mcpServers":{"tabularis":{"command":"original"}}}"#,
+        )
+        .unwrap();
+        // When / Then
+        assert!(!is_extended_in_mcp_servers(&config_path));
     }
 }

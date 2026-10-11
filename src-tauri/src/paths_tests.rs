@@ -26,10 +26,10 @@ fn unnested_app_dir_keeps_root_when_no_parent() {
 fn config_and_data_dirs_share_the_tabularis_folder_name() {
     assert_eq!(
         get_app_config_dir().file_name().and_then(|n| n.to_str()),
-        Some("tabularis")
+        Some("tabularis-extended")
     );
     assert_eq!(
         get_app_data_dir().file_name().and_then(|n| n.to_str()),
-        Some("tabularis")
+        Some("tabularis-extended")
     );
 }

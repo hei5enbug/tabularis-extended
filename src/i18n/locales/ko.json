@@ -1,4 +1,29 @@
 {
+  "profileImport": {
+    "title": "원본 Tabularis 프로필 가져오기",
+    "open": "원본 Tabularis 프로필 가져오기",
+    "description": "원본 Tabularis 앱과 MCP 프로세스를 종료한 뒤 아래 경로와 항목 수를 확인하세요. 원본 프로필을 Tabularis Extended로 복사하며 원본은 그대로 유지합니다.",
+    "credentials": "저장된 자격 증명은 원본 키체인에서 Extended 키체인으로 복사합니다. 원본 키체인 항목은 유지됩니다. 누락되었다고 표시된 자격 증명만 다시 입력하면 됩니다.",
+    "loading": "가져오기 미리보기를 읽는 중…",
+    "source": "원본 프로필",
+    "target": "Extended 프로필",
+    "counts": "연결 {{connections}}개 · 플러그인 패키지 {{plugins}}개",
+    "refused": "가져올 수 없습니다: {{reason}}",
+    "unavailable": "대상 프로필로 가져올 수 없습니다.",
+    "refresh": "미리보기 새로고침",
+    "import": "프로필 가져오기",
+    "complete": "연결 {{count}}개를 가져왔습니다.",
+    "restartRequired": "가져온 설정, 연결과 플러그인을 불러오려면 Tabularis Extended를 다시 시작하세요.",
+    "backup": "원본 백업",
+    "destinationBackup": "대상 백업",
+    "pluginBackup": "플러그인 백업",
+    "missingCredentials": "다시 시작한 뒤 다음 누락된 자격 증명을 입력하세요:",
+    "sourceUnavailable": "원본 프로필을 사용할 수 없습니다: {{path}}",
+    "destinationNotEmpty": "대상 경로를 사용할 수 없습니다: {{path}}. {{reason}}",
+    "sameSourceAndDestination": "원본과 대상 경로가 같을 수 없습니다: {{path}}",
+    "recoveryRequired": "{{operation}} 작업에 복구가 필요합니다: {{message}}. 복구를 완료한 뒤 다시 가져오세요.",
+    "failed": "프로필을 가져오지 못했습니다: {{message}}"
+  },
   "toolbar": {
     "filters": "필터",
     "toggleFilterPanel": "구조화된 필터 패널 토글",
@@ -926,6 +951,7 @@
     }
   },
   "update": {
+    "extendedManual": "Tabularis Extended는 Extended 릴리스를 직접 설치하여 업데이트합니다. 공식 Tabularis 코어 자동 업데이트는 사용하지 않습니다. 플러그인은 기존 방식으로 업데이트할 수 있습니다.",
     "badges": {
       "morePlugins": "{{count}}개 더 — 모든 업데이트를 보려면 플러그인을 여세요",
       "driverUpdate": "드라이버 업데이트 사용 가능",
@@ -979,6 +1005,11 @@
     "configError": "설정에서 AI 제공자를 구성하고 프롬프트를 입력하세요."
   },
   "newConnection": {
+    "revisionConflict": "편집을 시작한 뒤 연결 설정이 변경되었습니다. 작성 중인 내용은 유지됩니다. 저장하려면 최신 설정을 다시 불러오세요.",
+    "reloadLatest": "최신 설정 다시 불러오기",
+    "reloadFailed": "연결 설정을 다시 불러오지 못했습니다. 작성 중인 내용은 유지됩니다. 다시 시도하세요.",
+    "recoveryRequired": "이 저장 작업에는 복구가 필요합니다. 작성 중인 내용은 유지됩니다. 복구를 완료한 뒤 다시 저장하세요.",
+
     "ssmForwardHint": "{{document}}(으)로 확인됩니다. 관리형 노드를 통해 {{host}}:{{port}}(으)로 전달합니다. 대상 주소는 일반 탭에서 변경하세요. 루프백 호스트는 노드 자체를 의미합니다.",
     "ssmIamHint": "대상과 확인된 문서에 대한 ssm:StartSession 권한이 필요합니다.",
     "ssmNotAvailable": "이 드라이버에서는 AWS SSM을 사용할 수 없습니다.",
@@ -1785,7 +1816,7 @@
     "confirmRecreate": "트리거를 편집하려면 삭제 후 다시 생성해야 합니다. \"{{trigger}}\" 수정을 계속하시겠습니까?"
   },
   "community": {
-    "title": "커뮤니티에 참여하세요",
+    "title": "Tabularis Extended에 오신 것을 환영합니다",
     "subtitle": "tabularis의 성장을 도와주세요",
     "description": "Tabularis는 무료 오픈소스 프로젝트입니다. 유용하게 사용하고 계시다면 프로젝트를 응원하고 커뮤니티와 소통해 주세요.",
     "starTitle": "GitHub에서 스타 남기기",

@@ -55,10 +55,10 @@ fn dir_has_entries(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Move plugin folders from `legacy` into `target`. No-op when there is nothing
+/// Copy plugin folders from `legacy` into `target`. No-op when there is nothing
 /// to move, when the paths are identical (Linux), or when `target` already holds
 /// plugins (never clobber an existing install). Returns the number of folders
-/// moved. Best-effort: per-entry failures are logged and skipped.
+/// copied. Best-effort: per-entry failures are logged and skipped.
 pub(crate) fn migrate_plugins_between(legacy: &Path, target: &Path) -> usize {
     if legacy == target || !legacy.is_dir() || dir_has_entries(target) {
         return 0;
@@ -76,40 +76,62 @@ pub(crate) fn migrate_plugins_between(legacy: &Path, target: &Path) -> usize {
         return 0;
     }
 
-    let mut moved = 0;
+    let mut copied = 0;
     for entry in entries.flatten() {
         let dest = target.join(entry.file_name());
         if dest.exists() {
             continue;
         }
-        match fs::rename(entry.path(), &dest) {
-            Ok(()) => moved += 1,
+        match copy_plugin_tree(&entry.path(), &dest) {
+            Ok(()) => copied += 1,
             Err(e) => log::error!(
-                "Plugin migration: failed to move {:?} -> {:?}: {}",
+                "Plugin migration: failed to copy {:?} -> {:?}: {}",
                 entry.path(),
                 dest,
                 e
             ),
         }
     }
-    // Best-effort cleanup of the now-empty legacy directory.
-    let _ = fs::remove_dir(legacy);
-    moved
+    copied
 }
 
-/// One-time migration: relocate plugins from the legacy `com.debba.tabularis`
-/// project dir into the unified `tabularis` data dir. Safe to call on every
-/// startup — it only does work the first time after upgrading.
+fn copy_plugin_tree(source: &Path, target: &Path) -> std::io::Result<()> {
+    let metadata = fs::symlink_metadata(source)?;
+    if metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Plugin packages cannot contain top-level symlinks",
+        ));
+    }
+    if metadata.is_dir() {
+        fs::create_dir(target)?;
+        for entry in fs::read_dir(source)? {
+            let entry = entry?;
+            copy_plugin_tree(&entry.path(), &target.join(entry.file_name()))?;
+        }
+        Ok(())
+    } else if metadata.is_file() {
+        fs::copy(source, target).map(|_| ())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Unsupported file in plugin package",
+        ))
+    }
+}
+
+/// One-time migration: copy plugins from the original profile's project dir
+/// into the fork's data dir while leaving the original installation intact.
 pub fn migrate_legacy_plugins_dir() {
     let Some(legacy) = legacy_plugins_dir() else {
         return;
     };
     let target = crate::paths::get_plugins_dir();
-    let moved = migrate_plugins_between(&legacy, &target);
-    if moved > 0 {
+    let copied = migrate_plugins_between(&legacy, &target);
+    if copied > 0 {
         log::info!(
-            "Migrated {} plugin(s) from legacy directory {:?} to {:?}",
-            moved,
+            "Copied {} plugin(s) from legacy directory {:?} to {:?}",
+            copied,
             legacy,
             target
         );
@@ -136,7 +158,10 @@ pub fn read_manifest<T: serde::de::DeserializeOwned>(dir: &Path) -> Result<T, St
         // typed deserialization can discard it and before any plugin activation.
         if crate::plugins::compat::has_legacy_manifest(dir) {
             path = dir.join("manifest.json");
-            log::warn!("Using legacy manifest.json in {:?} — republish as .tabularium", dir);
+            log::warn!(
+                "Using legacy manifest.json in {:?} — republish as .tabularium",
+                dir
+            );
         } else {
             return Err(format!("No .tabularium manifest in {:?}", dir));
         }
@@ -435,7 +460,11 @@ pub async fn download_and_install(
     // Retire flat/renamed copies only after the kind-scoped install succeeds.
     for path in previous.into_iter().filter(|path| path != &final_dir) {
         if let Err(error) = fs::remove_dir_all(&path) {
-            log::warn!("Installed driver but could not remove fallback {:?}: {}", path, error);
+            log::warn!(
+                "Installed driver but could not remove fallback {:?}: {}",
+                path,
+                error
+            );
         }
     }
     log::info!("Plugin '{}' installed successfully", plugin_id);
@@ -446,7 +475,10 @@ pub fn uninstall(plugin_id: &str) -> Result<(), String> {
     let plugins_dir = get_plugins_dir()?;
     super::layout::resolve_driver(&plugins_dir, plugin_id)?;
     // Remove fallback copies first so uninstall cannot resurrect an older bundle.
-    for path in super::layout::driver_candidates(&plugins_dir)?.into_iter().rev() {
+    for path in super::layout::driver_candidates(&plugins_dir)?
+        .into_iter()
+        .rev()
+    {
         if super::layout::driver_identity(&path).as_deref() == Some(plugin_id) {
             fs::remove_dir_all(&path)
                 .map_err(|e| format!("Failed to remove plugin '{}': {}", plugin_id, e))?;

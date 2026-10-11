@@ -9,8 +9,9 @@
 //! The chosen folder is recorded in a small pointer file,
 //! `storage-location.json`, that always lives in the *default* config
 //! directory, so the app can find it before anything else is loaded. The
-//! `TABULARIS_DATA_DIR` environment variable takes precedence over the pointer
-//! file, which is handy for portable installs and for development.
+//! `TABULARIS_EXTENDED_DATA_DIR` takes precedence over the fork's pointer file.
+//! The original `TABULARIS_DATA_DIR` is reserved for resolving the source
+//! profile during an explicit import and is never used as a fork write target.
 //!
 //! The override is resolved once per process and cached: both the GUI and the
 //! standalone MCP subprocess (`tabularis --mcp`) read the same pointer file, so
@@ -29,7 +30,8 @@ use std::sync::OnceLock;
 pub const POINTER_FILE: &str = "storage-location.json";
 
 /// Environment variable that overrides both the pointer file and the default.
-pub const ENV_VAR: &str = "TABULARIS_DATA_DIR";
+pub const ENV_VAR: &str = "TABULARIS_EXTENDED_DATA_DIR";
+pub const ORIGINAL_ENV_VAR: &str = "TABULARIS_DATA_DIR";
 
 /// Files/folders inside the config directory that are runtime state of the
 /// local machine and must not be copied to a new storage location.
@@ -197,8 +199,10 @@ pub fn validate_target(target: &Path, current: &Path) -> Result<(), String> {
     if target.exists() && !target.is_dir() {
         return Err("The selected path is not a folder.".to_string());
     }
-    let target_c = canonical_or_self(target);
-    let current_c = canonical_or_self(current);
+    let target_c = crate::paths::canonicalize_with_missing(target)
+        .map_err(|error| format!("Failed to resolve the selected storage folder: {error}"))?;
+    let current_c = crate::paths::canonicalize_with_missing(current)
+        .map_err(|error| format!("Failed to resolve the current storage folder: {error}"))?;
     if target_c == current_c {
         return Err("This folder is already the current storage location.".to_string());
     }

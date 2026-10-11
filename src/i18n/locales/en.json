@@ -1,4 +1,29 @@
 {
+  "profileImport": {
+    "title": "Import original Tabularis profile",
+    "open": "Import original Tabularis profile",
+    "description": "Close the original Tabularis app and its MCP processes, then review the source, destination, and counts below. Import copies the original profile into Tabularis Extended and keeps the original profile unchanged.",
+    "credentials": "Saved credentials are copied from the original keychain to the Extended keychain. The original keychain entries are retained. Only credentials reported as missing need to be entered again.",
+    "loading": "Reading import preview…",
+    "source": "Original profile",
+    "target": "Extended profile",
+    "counts": "{{connections}} connections · {{plugins}} plugin packages",
+    "refused": "Import unavailable: {{reason}}",
+    "unavailable": "The destination cannot accept this import.",
+    "refresh": "Refresh preview",
+    "import": "Import profile",
+    "complete": "Imported {{count}} connections.",
+    "restartRequired": "Restart Tabularis Extended to load the imported settings, connections, and plugins.",
+    "backup": "Source backup",
+    "destinationBackup": "Destination backup",
+    "pluginBackup": "Plugin backup",
+    "missingCredentials": "Re-enter these missing credentials after restarting:",
+    "sourceUnavailable": "The original profile is unavailable: {{path}}",
+    "destinationNotEmpty": "The destination cannot be used: {{path}}. {{reason}}",
+    "sameSourceAndDestination": "Source and destination must be different: {{path}}",
+    "recoveryRequired": "Recovery is required for {{operation}}: {{message}}. Resolve it before importing again.",
+    "failed": "Profile import failed: {{message}}"
+  },
   "toolbar": {
     "filters": "Filters",
     "toggleFilterPanel": "Toggle structured filter panel",
@@ -995,6 +1020,7 @@
     }
   },
   "update": {
+    "extendedManual": "Tabularis Extended updates are installed manually from an Extended release. Official Tabularis core updates are disabled. Plugin updates remain available.",
     "badges": {
       "morePlugins": "{{count}} more — open Plugins to see all updates",
       "driverUpdate": "Driver update available",
@@ -1049,6 +1075,11 @@
     "configError": "Please configure AI provider in Settings and enter a prompt."
   },
   "newConnection": {
+    "revisionConflict": "This connection changed after you opened it. Your draft is preserved. Reload the latest settings before saving.",
+    "reloadLatest": "Reload latest settings",
+    "reloadFailed": "Could not reload the connection. Your draft has been preserved. Try again.",
+    "recoveryRequired": "This save requires recovery. Your draft is preserved. Resolve the pending recovery before saving again.",
+
     "ssmForwardHint": "Resolves to {{document}} - forwards to {{host}}:{{port}} through the managed node. Change the target address on the General tab; a loopback host means the node itself.",
     "ssmIamHint": "Requires ssm:StartSession on the target and on the resolved document.",
     "ssmNotAvailable": "AWS SSM is not available for this driver.",
@@ -1860,7 +1891,7 @@
     "confirmRecreate": "Editing a trigger requires dropping and recreating it. Continue modifying \"{{trigger}}\"?"
   },
   "community": {
-    "title": "Join the Community",
+    "title": "Welcome to Tabularis Extended",
     "subtitle": "Help tabularis grow",
     "description": "Tabularis is a free, open-source project. If you find it useful, consider supporting the project and connecting with the community.",
     "starTitle": "Star on GitHub",

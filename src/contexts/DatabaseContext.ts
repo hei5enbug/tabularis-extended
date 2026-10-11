@@ -39,6 +39,7 @@ export interface ConnectionAppearance {
 
 export interface SavedConnection {
   id: string;
+  revision: string;
   name: string;
   params: {
     driver: string;
@@ -57,6 +58,7 @@ export interface SavedConnection {
     /** SSL/TLS mode (e.g. "verify-ca"); empty/absent means SSL is off. Used
      * by findUnsupportedFeatures to detect a plugin capability gap. */
     ssl_mode?: string;
+    extra?: Record<string, string>;
     /** Raw driver-specific connection URI, when present at runtime (never
      * persisted to disk — see connection_uri_in_keychain below). */
     connection_uri?: string;

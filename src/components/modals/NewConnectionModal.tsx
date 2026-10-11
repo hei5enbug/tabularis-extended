@@ -170,6 +170,7 @@ interface ConnectionParams {
 
 interface SavedConnection {
   id: string;
+  revision: string;
   name: string;
   params: ConnectionParams;
   detect_json_in_text_columns?: boolean;
@@ -377,6 +378,13 @@ export const NewConnectionModal = ({
   const [dbSearchQuery, setDbSearchQuery] = useState("");
   const [detectJsonInTextColumns, setDetectJsonInTextColumns] = useState(false);
   const [passwordDirty, setPasswordDirty] = useState(false);
+  const [loadedRevision, setLoadedRevision] = useState(initialConnection?.revision ?? "");
+  const [revisionConflict, setRevisionConflict] = useState(false);
+  const [reloadingConnection, setReloadingConnection] = useState(false);
+  const [reloadSequence, setReloadSequence] = useState(0);
+  const initializedTargetRef = useRef<{ id: string | undefined; sequence: number } | null>(null);
+  const loadedConnectionRef = useRef(initialConnection);
+  const reloadedConnectionRef = useRef<SavedConnection | null>(null);
   const [sshPasswordDirty, setSshPasswordDirty] = useState(false);
   const [connectionString, setConnectionString] = useState("");
   const [connectionStringError, setConnectionStringError] = useState<
@@ -699,7 +707,7 @@ export const NewConnectionModal = ({
   const setExtraField = useCallback((key: string, value: string) => {
     setFormData((prev) => ({
       ...prev,
-      extra: updateExtraField(prev.extra, key, value),
+      extra: updateExtraField(prev.extra, key, value) ?? {},
     }));
   }, []);
   // A plugin whose driver authenticates without a database login (Windows
@@ -715,6 +723,11 @@ export const NewConnectionModal = ({
       setFormData((prev) => ({ ...prev, username: "", password: "" }));
     }
   }, []);
+  const [passwordFieldHidden, setPasswordFieldHiddenState] = useState(false);
+  const setPasswordFieldHidden = useCallback((hidden: boolean) => {
+    setPasswordFieldHiddenState(hidden);
+    if (hidden) setFormData((prev) => ({ ...prev, password: "" }));
+  }, []);
   const extraFieldsSlotContext = useMemo(
     () => ({
       driver,
@@ -722,6 +735,8 @@ export const NewConnectionModal = ({
       setExtraField,
       credentialFieldsHidden,
       setCredentialFieldsHidden,
+      passwordFieldHidden,
+      setPasswordFieldHidden,
     }),
     [
       driver,
@@ -729,6 +744,8 @@ export const NewConnectionModal = ({
       setExtraField,
       credentialFieldsHidden,
       setCredentialFieldsHidden,
+      passwordFieldHidden,
+      setPasswordFieldHidden,
     ],
   );
 
@@ -929,7 +946,8 @@ export const NewConnectionModal = ({
       effectiveK8sPort,
       isMultiDb,
       noConnectionRequired,
-      initialConnection,
+      initialConnectionId: initialConnection?.id,
+      loadedRevision,
       kubectlPath: pathOverrides.kubectlPath,
       kubeconfigPath: pathOverrides.kubeconfigPath,
       appliedK8sOptions,
@@ -941,7 +959,8 @@ export const NewConnectionModal = ({
       driver,
       effectiveK8sPort,
       formData,
-      initialConnection,
+      initialConnection?.id,
+      loadedRevision,
       isMultiDb,
       k8sMode,
       name,
@@ -1745,10 +1764,11 @@ export const NewConnectionModal = ({
       setAvailableDatabases(databases);
       if (initialConnection) {
         // Pre-select databases already associated with the connection
-        const existing = Array.isArray(initialConnection.params.database)
-          ? initialConnection.params.database
-          : initialConnection.params.database
-            ? [initialConnection.params.database as string]
+        const existingDatabase = loadedConnectionRef.current?.params.database;
+        const existing = Array.isArray(existingDatabase)
+          ? existingDatabase
+          : existingDatabase
+            ? [existingDatabase]
             : [];
         setSelectedDatabasesState((prev) => {
           const merged = Array.from(new Set([...existing, ...prev]));
@@ -1774,8 +1794,11 @@ export const NewConnectionModal = ({
   useEffect(() => {
     if (!isOpen) {
       initSequenceRef.current += 1;
+      initializedTargetRef.current = null;
       return;
     }
+    if (initializedTargetRef.current && initializedTargetRef.current.id === initialConnection?.id && initializedTargetRef.current.sequence === reloadSequence) return;
+    initializedTargetRef.current = { id: initialConnection?.id, sequence: reloadSequence };
     const initSequence = ++initSequenceRef.current;
     const isCurrentInit = () => initSequenceRef.current === initSequence;
     queueMicrotask(() => {
@@ -1792,6 +1815,9 @@ export const NewConnectionModal = ({
       setPasswordDirty(false);
       setSshPasswordDirty(false);
       setCredentialFieldsHiddenState(false);
+      setPasswordFieldHiddenState(false);
+      setRevisionConflict(false);
+      setLoadedRevision("");
       setDbSearchQuery("");
       setConnectionString("");
       setConnectionStringError(null);
@@ -1814,30 +1840,28 @@ export const NewConnectionModal = ({
       setK8sSelectionError(null);
 
       if (initialConnection) {
-        setName(initialConnection.name);
-        setDriver(initialConnection.params.driver);
-        setDetectJsonInTextColumns(
-          initialConnection.detect_json_in_text_columns === true,
-        );
-        setAppearance(initialConnection.appearance ?? {});
-        setTagIds(initialConnection.tag_ids ?? []);
-        setEnvironment(initialConnection.environment ?? "");
-        const db = initialConnection.params.database;
-        setSshMode(
-          initialConnection.params.ssh_connection_id ? "existing" : "inline",
-        );
-        let params = initialConnection.params;
+        let connection = reloadedConnectionRef.current ?? initialConnection;
+        setDriver(connection.params.driver);
+        const wasReloaded = reloadedConnectionRef.current !== null;
+        reloadedConnectionRef.current = null;
         try {
-          const fullConn = await fetchConnectionWithCredentials(
-            initialConnection.id,
-          );
-          // A response without params would blank the form, so keep the
-          // secret-less ones instead of overwriting them with nothing.
-          if (fullConn?.params) params = fullConn.params;
+          const fullConn = wasReloaded ? connection : await fetchConnectionWithCredentials(initialConnection.id);
+          if (fullConn?.params) connection = { ...connection, ...fullConn };
         } catch {
           // fallback: use params without secrets (backend will retrieve from keychain)
         }
         if (!isCurrentInit()) return;
+        loadedConnectionRef.current = connection;
+        setLoadedRevision(connection.revision);
+        setName(connection.name);
+        setDriver(connection.params.driver);
+        setDetectJsonInTextColumns(connection.detect_json_in_text_columns === true);
+        setAppearance(connection.appearance ?? {});
+        setTagIds(connection.tag_ids ?? []);
+        setEnvironment(connection.environment ?? "");
+        const params = connection.params;
+        const db = params.database;
+        setSshMode(params.ssh_connection_id ? "existing" : "inline");
 
         const isInlineK8s = !params.k8s_connection_id;
         const pathOptions: K8sCommandOptions = isInlineK8s
@@ -1857,7 +1881,7 @@ export const NewConnectionModal = ({
         setK8sMode(isInlineK8s ? "inline" : "existing");
         initializeK8sPathOverrides(pathOptions);
         const editDriverForDb = drivers.find(
-          (d) => d.id === initialConnection.params.driver,
+          (d) => d.id === connection.params.driver,
         );
         const editIsMultiDb = isMultiDatabaseCapable(
           editDriverForDb?.capabilities,
@@ -1956,11 +1980,29 @@ export const NewConnectionModal = ({
     };
     void init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, initialConnection]);
+  }, [isOpen, initialConnection, reloadSequence]);
+
+  const reloadLatestConnection = async () => {
+    if (!initialConnection || reloadingConnection) return;
+    const sequence = initSequenceRef.current;
+    setReloadingConnection(true);
+    try {
+      const latest = await fetchConnectionWithCredentials(initialConnection.id);
+      if (sequence !== initSequenceRef.current) return;
+      if (!latest?.params || !latest.revision) throw new Error(t("newConnection.reloadFailed"));
+      reloadedConnectionRef.current = latest;
+      setReloadSequence((value) => value + 1);
+    } catch {
+      if (sequence === initSequenceRef.current) setMessage(t("newConnection.reloadFailed"));
+    } finally {
+      setReloadingConnection(false);
+    }
+  };
 
   const handleDriverChange = (newDriver: string) => {
     setDriver(newDriver);
     setCredentialFieldsHiddenState(false);
+    setPasswordFieldHiddenState(false);
     setFormData({
       driver: newDriver,
       host: "",
@@ -2244,6 +2286,12 @@ export const NewConnectionModal = ({
   const liveTestStep = testLog.length > 0 ? testLog[testLog.length - 1] : null;
 
   const saveConnection = async () => {
+    if (revisionConflict || reloadingConnection) return;
+    if (initialConnection && !loadedRevision) {
+      setRevisionConflict(true);
+      setMessage(t("newConnection.revisionConflict"));
+      return;
+    }
     if (step === "catalogue") return;
     if (installStatus === "installing") return;
     if (activeDriverNotInstalled && activeCatalogueDriver) {
@@ -2365,12 +2413,13 @@ export const NewConnectionModal = ({
           // An omitted password means "keep the stored one". While a plugin
           // hides the login inputs the empty password is deliberate: it is
           // sent as-is so the backend drops the keychain entry too.
-          if (!params.password?.trim() && !credentialFieldsHidden) {
+          if (!params.password?.trim() && !credentialFieldsHidden && !passwordFieldHidden) {
             delete params.password;
           }
           if (!params.ssh_password?.trim()) delete params.ssh_password;
-          await invoke("update_connection", {
+          await invoke<SavedConnection>("update_connection", {
             id: initialConnection.id,
+            expectedRevision: loadedRevision,
             name,
             params,
             detectJsonInTextColumns: detectJsonInTextColumns ? true : null,
@@ -2450,6 +2499,19 @@ export const NewConnectionModal = ({
           activeActionRef.current === actionId &&
           actionSnapshotRef.current === startingSnapshot
         ) {
+          if (typeof err === "object" && err !== null && "kind" in err && err.kind === "revisionConflict") {
+            setRevisionConflict(true);
+            setStatus("error");
+            setErrorFeedback(null);
+            setMessage(t("newConnection.revisionConflict"));
+            return;
+          }
+          if (typeof err === "object" && err !== null && "kind" in err && err.kind === "recoveryRequired") {
+            setStatus("error");
+            setErrorFeedback(null);
+            setMessage(t("newConnection.recoveryRequired"));
+            return;
+          }
           setStatus("error");
           const classified = classifyConnectionError(toErrorMessage(err), {
             sshEnabled: formData.ssh_enabled === true,
@@ -2535,7 +2597,7 @@ export const NewConnectionModal = ({
         // A passthrough URI carries its own credentials, so the password field
         // is left untouched rather than blanked — writing "" here would
         // overwrite the password already stored for this connection.
-        if (!parsed.connection_uri) {
+        if (!parsed.connection_uri && (driverChanged || !passwordFieldHidden)) {
           parsedFields.password = parsed.password || "";
         }
       }
@@ -2555,6 +2617,7 @@ export const NewConnectionModal = ({
       if (driverChanged) {
         setDriver(newDriver);
         setCredentialFieldsHiddenState(false);
+        setPasswordFieldHiddenState(false);
       }
 
       setFormData((prev) => ({
@@ -2804,7 +2867,7 @@ export const NewConnectionModal = ({
             <div
               className={clsx(
                 "grid gap-3",
-                isUriPassthrough ? "grid-cols-1" : "grid-cols-2",
+                isUriPassthrough || passwordFieldHidden ? "grid-cols-1" : "grid-cols-2",
               )}
             >
               {!isUriPassthrough && (
@@ -2815,7 +2878,7 @@ export const NewConnectionModal = ({
                   placeholder={t("newConnection.usernamePlaceholder")}
                 />
               )}
-              <FieldInput
+              {!passwordFieldHidden && <FieldInput
                 label={t("newConnection.password")}
                 value={formData.password}
                 onChange={(v) => {
@@ -2828,7 +2891,7 @@ export const NewConnectionModal = ({
                     ? "••••••••"
                     : t("newConnection.passwordPlaceholder")
                 }
-              />
+              />}
             </div>
           )}
 
@@ -4549,6 +4612,13 @@ export const NewConnectionModal = ({
 
         {/* ── Footer: test status + actions (form step only) ── */}
         {step === "form" && !activeDriverNotInstalled && <div className="border-t border-default bg-base">
+          {revisionConflict && <div role="alert" className="px-5 py-3 flex items-center gap-3 text-sm text-accent-warning">
+            <p className="flex-1">{t("newConnection.revisionConflict")}</p>
+            <button type="button" disabled={reloadingConnection || isActionPending} onClick={() => void reloadLatestConnection()}
+              className="px-3 py-2 border border-strong rounded-lg text-primary disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus">
+              {t("newConnection.reloadLatest")}
+            </button>
+          </div>}
           <div className="px-5 py-3 flex items-center gap-3">
           {/* Test button */}
           <button
@@ -4647,7 +4717,7 @@ export const NewConnectionModal = ({
             </button>
             <button
               onClick={saveConnection}
-              disabled={isActionPending || status === "saving"}
+              disabled={isActionPending || status === "saving" || revisionConflict || reloadingConnection || (Boolean(initialConnection) && !loadedRevision)}
               className="flex items-center gap-1.5 px-4 py-1.5 bg-accent-primary hover:bg-accent-primary/90 disabled:opacity-50 text-inverse rounded-md text-sm font-medium transition-colors"
             >
               {status === "saving" && (

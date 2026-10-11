@@ -1345,6 +1345,10 @@ export const Connections = () => {
                 )}
                 {t("connections.newSqliteDatabase.menuLabel")}
               </button>
+              <button type="button" onClick={() => navigate("/settings?tab=storage#original-profile-import")}
+                className="flex items-center gap-2 bg-elevated border border-strong text-secondary px-4 py-2.5 rounded-xl text-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus">
+                <FolderInput size={14} />{t("profileImport.open")}
+              </button>
               <button
                 onClick={() => setIsImportAppModalOpen(true)}
                 className="flex items-center gap-2 bg-elevated border border-strong hover:border-accent-primary/50 text-secondary hover:text-accent px-4 py-2.5 rounded-xl font-semibold text-sm transition-all hover:-translate-y-px"

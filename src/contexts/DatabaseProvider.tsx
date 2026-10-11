@@ -92,6 +92,7 @@ export const DatabaseProvider = ({ children }: { children: ReactNode }) => {
   const connectionsLoadRef = useRef<Promise<void> | null>(null);
   const connectionsLoadedRef = useRef(false);
   const connectionsLoadVersionRef = useRef(0);
+  const connectionsSnapshotRef = useRef("");
   // Connection ids open anywhere in the app (shared backend, all windows).
   // Kept in sync via the `connections:active-changed` broadcast so each window
   // can show accurate cross-window connection status.
@@ -1071,26 +1072,45 @@ export const DatabaseProvider = ({ children }: { children: ReactNode }) => {
       if (connectionsLoadedRef.current) return Promise.resolve();
     }
     const version = ++connectionsLoadVersionRef.current;
+    const showLoading = !connectionsLoadedRef.current;
     connectionsLoadRef.current = (async () => {
-      setIsLoadingConnections(true);
+      if (showLoading) setIsLoadingConnections(true);
       try {
         const result = await invoke<ConnectionsFile>('get_connections_with_groups');
         if (version === connectionsLoadVersionRef.current) {
-          setConnections(result.connections);
-          setConnectionGroups(result.groups);
+          const snapshot = JSON.stringify(result);
+          if (snapshot !== connectionsSnapshotRef.current) {
+            connectionsSnapshotRef.current = snapshot;
+            setConnections(result.connections);
+            setConnectionGroups(result.groups);
+          }
           connectionsLoadedRef.current = true;
         }
       } catch (e) {
         console.error('Failed to load connections:', e);
       } finally {
         if (version === connectionsLoadVersionRef.current) {
-          setIsLoadingConnections(false);
+          if (showLoading) setIsLoadingConnections(false);
           connectionsLoadRef.current = null;
         }
       }
     })();
     return connectionsLoadRef.current;
   }, []);
+
+  useEffect(() => {
+    const refresh = () => {
+      if (document.visibilityState !== 'hidden' && !connectionsLoadRef.current) void loadConnections();
+    };
+    const interval = window.setInterval(refresh, 5_000);
+    window.addEventListener('focus', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [loadConnections]);
 
   const getConnectionData = useCallback((connectionId: string): ConnectionData | undefined => {
     return connectionDataMap[connectionId];
@@ -1159,6 +1179,7 @@ export const DatabaseProvider = ({ children }: { children: ReactNode }) => {
     const unlisten = listen<{ connectionId?: string; driverId?: string }>(
       'connection-metadata-invalidated',
       ({ payload }) => {
+        if (!connectionsLoadRef.current) void loadConnections();
         const ids = Object.entries(connectionDataMapRef.current)
           .filter(([id, data]) => data.usesConnectionMetadata &&
             (id === payload.connectionId || data.driver === payload.driverId))
@@ -1181,7 +1202,7 @@ export const DatabaseProvider = ({ children }: { children: ReactNode }) => {
       },
     );
     return () => { unlisten.then(fn => fn()); };
-  }, []);
+  }, [loadConnections]);
 
   // Listen for backend health-check failures and clean up dead connections.
   useEffect(() => {

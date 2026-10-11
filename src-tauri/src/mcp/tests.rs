@@ -10,7 +10,7 @@ fn every_tool_advertises_optional_json_or_toon_output() {
         handle_list_tools(&AppConfig::default()).expect("tool discovery should succeed");
     let tools = result["tools"].as_array().expect("tools must be an array");
 
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 11);
     for tool in tools {
         let output_format = &tool["inputSchema"]["properties"]["output_format"];
         assert_eq!(output_format["type"], "string");

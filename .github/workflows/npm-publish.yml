@@ -41,6 +41,7 @@ permissions:
 
 jobs:
   detect:
+    if: github.repository == 'TabularisDB/tabularis'
     name: Detect unpublished versions
     runs-on: ubuntu-24.04
     outputs:
@@ -104,7 +105,7 @@ jobs:
   publish:
     name: Publish ${{ matrix.package.name }}@${{ matrix.package.version }}
     needs: detect
-    if: needs.detect.outputs.packages != '[]'
+    if: github.repository == 'TabularisDB/tabularis' && (needs.detect.outputs.packages != '[]')
     runs-on: ubuntu-24.04
     permissions:
       contents: read

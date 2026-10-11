@@ -6,9 +6,7 @@ Comment={{comment}}
 Exec={{exec}} %u
 StartupWMClass={{exec}}
 Icon={{icon}}
-Name=Tabularis
+Name=Tabularis Extended
 Terminal=false
 Type=Application
-{{#if mime_type}}
-MimeType={{mime_type}}
-{{/if}}
+MimeType=x-scheme-handler/tabularis-extended

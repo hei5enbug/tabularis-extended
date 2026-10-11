@@ -13,6 +13,10 @@ pub struct Args {
     #[arg(long)]
     pub mcp: bool,
 
+    /// List installed driver manifests without loading database connections
+    #[arg(long, conflicts_with = "mcp")]
+    pub list_drivers: bool,
+
     /// Enable debug logging (including sqlx queries)
     #[arg(long)]
     pub debug: bool,
@@ -27,6 +31,7 @@ impl Args {
     fn defaults() -> Self {
         Self {
             mcp: false,
+            list_drivers: false,
             debug: false,
             explain: None,
         }

@@ -216,6 +216,16 @@ describe("Connections SQLite database action", () => {
     expect(invoke).not.toHaveBeenCalledWith("get_last_open_connections");
     expect(mocks.connect).not.toHaveBeenCalled();
   });
+  it("빈 연결 목록에서 원본 프로필 가져오기 설정으로 명시적으로 이동합니다.", () => {
+    // given
+    render(<Connections />);
+    // when
+    fireEvent.click(screen.getByRole("button", { name: "profileImport.open" }));
+    // then
+    expect(mocks.navigate).toHaveBeenCalledWith("/settings?tab=storage#original-profile-import");
+    expect(invoke).not.toHaveBeenCalledWith("import_original_profile");
+  });
+
 });
 
 describe("Connections ordering", () => {

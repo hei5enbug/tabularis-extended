@@ -66,6 +66,7 @@ impl RegistryServer {
                     }
                     Err(error) => panic!("Loopback fixture: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -123,6 +124,31 @@ impl RegistryServer {
             .cloned()
             .collect()
     }
+}
+
+#[test]
+fn 연결_직후_도착하지_않은_HTTP_요청도_처리한다() {
+    use std::io::Read;
+    use std::net::TcpStream;
+
+    // given
+    let server = RegistryServer::new(vec![]);
+    let mut stream = TcpStream::connect(server.base.trim_start_matches("http://")).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    thread::sleep(Duration::from_millis(50));
+
+    // when
+    stream
+        .write_all(b"GET /api/kinds/ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    stream.read_to_string(&mut response).unwrap();
+
+    // then
+    assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert_eq!(*server.requests.lock().unwrap(), vec!["/api/kinds/"]);
 }
 
 impl Drop for RegistryServer {

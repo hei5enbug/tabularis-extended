@@ -20,6 +20,8 @@
 
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
+import { toErrorMessage } from "../utils/errors";
 
 import { useDatabase } from "./useDatabase";
 import { useDrivers } from "./useDrivers";
@@ -105,6 +107,7 @@ export function useBuiltinDriverMigration(
   builtinId: string,
   pluginId: string,
 ): BuiltinDriverMigrationState {
+  const { t } = useTranslation();
   const { connections, loadConnections, connect, disconnect, openConnectionIds, connectionDataMap } =
     useDatabase();
   const { allDrivers, installedPlugins } = useDrivers();
@@ -255,6 +258,7 @@ export function useBuiltinDriverMigration(
       // exactly once regardless of which branch produced the outcome.
       const run = async (): Promise<MigrationOutcome> => {
         try {
+          if (!conn?.revision) throw new Error(t("newConnection.reloadFailed"));
           if (wasOpen) {
             await disconnect(connectionId);
             disconnected = true;
@@ -266,6 +270,7 @@ export function useBuiltinDriverMigration(
           // before the user ever gets here.
           await invoke("update_connection", {
             id: connectionId,
+            expectedRevision: conn.revision,
             name: conn?.name ?? connectionId,
             params: { ...conn?.params, driver: pluginId },
             detectJsonInTextColumns: conn?.detect_json_in_text_columns ? true : null,
@@ -274,7 +279,9 @@ export function useBuiltinDriverMigration(
           await loadConnections();
           await recordMigration(connectionId, fromDriver, pluginId);
         } catch (e) {
-          const error = e instanceof Error ? e.message : String(e);
+          const conflict = typeof e === "object" && e !== null && "kind" in e && e.kind === "revisionConflict";
+          if (conflict) await loadConnections();
+          const error = conflict ? t("newConnection.revisionConflict") : toErrorMessage(e);
           const outcome: MigrationOutcome = {
             connectionId,
             connectionName: name,
@@ -411,6 +418,7 @@ export function useBuiltinDriverMigration(
       disconnect,
       loadConnections,
       recordMigration,
+      t,
     ],
   );
 
@@ -453,12 +461,14 @@ export function useBuiltinDriverMigration(
 
       let outcome: UndoOutcome;
       try {
+        if (!conn?.revision) throw new Error(t("newConnection.reloadFailed"));
         if (wasOpen) {
           await disconnect(connectionId);
           disconnected = true;
         }
         await invoke("update_connection", {
           id: connectionId,
+          expectedRevision: conn.revision,
           name: conn?.name ?? connectionId,
           params: { ...conn?.params, driver: builtinId },
           detectJsonInTextColumns: conn?.detect_json_in_text_columns ? true : null,
@@ -467,7 +477,9 @@ export function useBuiltinDriverMigration(
         await loadConnections();
         outcome = { ok: true };
       } catch (e) {
-        const error = e instanceof Error ? e.message : String(e);
+        const conflict = typeof e === "object" && e !== null && "kind" in e && e.kind === "revisionConflict";
+        if (conflict) await loadConnections();
+        const error = conflict ? t("newConnection.revisionConflict") : toErrorMessage(e);
         outcome = { ok: false, error };
       }
 
@@ -486,7 +498,7 @@ export function useBuiltinDriverMigration(
 
       return outcome;
     },
-    [builtinId, pluginId, connect, disconnect, loadConnections],
+    [builtinId, pluginId, connect, disconnect, loadConnections, t],
   );
 
   return {

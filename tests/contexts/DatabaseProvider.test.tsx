@@ -933,3 +933,84 @@ describe('DatabaseProvider', () => {
     });
   });
 });
+
+describe('외부 연결 설정 새로고침', () => {
+  const wrapper = ({ children }: { children: React.ReactNode }) => <DatabaseProvider>{children}</DatabaseProvider>;
+  const initial = { id: 'external-connection', revision: 'revision-1', name: 'Original', params: { driver: 'mysql', database: 'fixture' } };
+  beforeEach(() => { vi.useFakeTimers(); vi.mocked(invoke).mockReset(); });
+  afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
+
+  it('표시 중인 창은 5초 뒤 외부에서 바뀐 revision을 읽습니다.', async () => {
+    // given
+    let connection = initial;
+    vi.mocked(invoke).mockImplementation(async command => command === 'get_connections_with_groups' ? { connections: [connection], groups: [] } : []);
+    const { result } = renderHook(() => useDatabase(), { wrapper });
+    await act(async () => { await result.current.loadConnections(); });
+    connection = { ...initial, revision: 'revision-2', name: 'External change' };
+    // when
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    // then
+    expect(result.current.connections[0].revision).toBe('revision-2');
+    expect(result.current.connections[0].name).toBe('External change');
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'get_connections_with_groups')).toHaveLength(2);
+  });
+
+  it('목록 값과 revision이 같으면 기존 목록 객체를 유지합니다.', async () => {
+    // given
+    vi.mocked(invoke).mockImplementation(async command => command === 'get_connections_with_groups' ? { connections: [{ ...initial }], groups: [] } : []);
+    const { result } = renderHook(() => useDatabase(), { wrapper });
+    await act(async () => { await result.current.loadConnections(); });
+    const previous = result.current.connections;
+    // when
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    // then
+    expect(result.current.connections).toBe(previous);
+  });
+
+  it('창이 포커스를 얻으면 외부 revision을 즉시 다시 읽습니다.', async () => {
+    // given
+    let connection = initial;
+    vi.mocked(invoke).mockImplementation(async command => command === 'get_connections_with_groups' ? { connections: [connection], groups: [] } : []);
+    const { result } = renderHook(() => useDatabase(), { wrapper });
+    await act(async () => { await result.current.loadConnections(); });
+    connection = { ...initial, revision: 'revision-2' };
+    // when
+    await act(async () => { window.dispatchEvent(new Event('focus')); });
+    // then
+    expect(result.current.connections[0].revision).toBe('revision-2');
+  });
+
+  it('목록 조회가 진행 중이면 주기 조회를 중복 실행하지 않습니다.', async () => {
+    // given
+    vi.mocked(invoke).mockImplementation(command => command === 'get_connections_with_groups' ? new Promise(() => {}) : Promise.resolve([]));
+    renderHook(() => useDatabase(), { wrapper });
+    act(() => { window.dispatchEvent(new Event('focus')); });
+    // when
+    await act(() => vi.advanceTimersByTimeAsync(15_000));
+    // then
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === 'get_connections_with_groups')).toHaveLength(1);
+  });
+
+  it('숨겨진 창에서는 주기 조회를 실행하지 않습니다.', async () => {
+    // given
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden');
+    vi.mocked(invoke).mockResolvedValue([]);
+    const view = renderHook(() => useDatabase(), { wrapper });
+    // when
+    await act(() => vi.advanceTimersByTimeAsync(5_000));
+    // then
+    expect(invoke).not.toHaveBeenCalledWith('get_connections_with_groups');
+    expect(view.result.current.connections).toEqual([]);
+  });
+  it('provider가 해제되면 주기 조회 타이머를 정리합니다.', async () => {
+    // given
+    vi.mocked(invoke).mockResolvedValue([]);
+    const view = renderHook(() => useDatabase(), { wrapper });
+    view.unmount();
+    // when
+    await act(() => vi.advanceTimersByTimeAsync(10_000));
+    // then
+    expect(invoke).not.toHaveBeenCalledWith('get_connections_with_groups');
+  });
+
+});

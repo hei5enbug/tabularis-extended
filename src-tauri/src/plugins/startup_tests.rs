@@ -2,10 +2,15 @@ use super::*;
 
 fn process_with_settings() -> (Arc<PluginProcess>, mpsc::Receiver<PluginCommand>) {
     let (sender, receiver) = mpsc::channel(8);
+    let (cancel_sender, _cancel_receiver) = mpsc::unbounded_channel();
     let process = PluginProcess {
         plugin_id: "test-plugin".to_string(),
         sender,
+        cancel_sender,
         next_id: AtomicU64::new(1),
+        generation: next_process_generation(),
+        ordinary_slots: None,
+        managed_slots: None,
         shutdown_tx: tokio::sync::Mutex::new(None),
         pid: None,
         initialization_settings: Some(HashMap::from([("region".into(), json!("eu"))])),
@@ -29,7 +34,7 @@ async fn concurrent_first_calls_wait_for_one_initialization() {
         let process = process.clone();
         async move { process.call("get_views", json!({})).await }
     });
-    let Some(PluginCommand::Call(initialize, response)) = requests.recv().await else {
+    let Some(PluginCommand::Call(initialize, response, ..)) = requests.recv().await else {
         panic!("expected initialization");
     };
     assert_eq!(initialize.method, "initialize");
@@ -41,7 +46,7 @@ async fn concurrent_first_calls_wait_for_one_initialization() {
     response.send(Ok(Value::Null)).unwrap();
     let mut methods = Vec::new();
     for _ in 0..2 {
-        let Some(PluginCommand::Call(request, response)) = requests.recv().await else {
+        let Some(PluginCommand::Call(request, response, ..)) = requests.recv().await else {
             panic!("expected operation");
         };
         methods.push(request.method);
@@ -61,7 +66,7 @@ async fn legacy_plugin_without_initialize_still_serves_operations() {
         process.call("get_tables", json!({})).await.unwrap();
         process.call("get_tables", json!({})).await.unwrap();
     });
-    let Some(PluginCommand::Call(request, response)) = requests.recv().await else {
+    let Some(PluginCommand::Call(request, response, ..)) = requests.recv().await else {
         panic!("expected initialization");
     };
     assert_eq!(request.method, "initialize");
@@ -69,7 +74,7 @@ async fn legacy_plugin_without_initialize_still_serves_operations() {
         .send(Err("Method not found (-32601)".to_string().into()))
         .unwrap();
     for _ in 0..2 {
-        let Some(PluginCommand::Call(request, response)) = requests.recv().await else {
+        let Some(PluginCommand::Call(request, response, ..)) = requests.recv().await else {
             panic!("expected operation");
         };
         assert_eq!(request.method, "get_tables");
@@ -108,7 +113,7 @@ async fn an_initializing_plugin_does_not_block_another_plugin() {
     let _pending_initialize = slow_requests.recv().await.expect("slow initialization");
     let fast_task = tokio::spawn(async move { fast.call("get_tables", json!({})).await });
     for method in ["initialize", "get_tables"] {
-        let Some(PluginCommand::Call(request, response)) = fast_requests.recv().await else {
+        let Some(PluginCommand::Call(request, response, ..)) = fast_requests.recv().await else {
             panic!("expected fast plugin request");
         };
         assert_eq!(request.method, method);

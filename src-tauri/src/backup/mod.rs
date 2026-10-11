@@ -16,7 +16,7 @@ use tauri::{AppHandle, Runtime};
 #[cfg(test)]
 mod tests;
 
-const SERVICE_NAME: &str = "tabularis";
+const SERVICE_NAME: &str = "tabularis-extended";
 const KEYCHAIN_USER: &str = "connections-backup";
 
 pub const FILE_PREFIX: &str = "tabularis-backup-";
@@ -37,7 +37,10 @@ fn set_keychain(user: &str, password: &str) -> Result<(), String> {
 }
 
 fn get_keychain(user: &str) -> Result<Option<String>, String> {
-    match Entry::new(SERVICE_NAME, user).map_err(|e| e.to_string())?.get_password() {
+    match Entry::new(SERVICE_NAME, user)
+        .map_err(|e| e.to_string())?
+        .get_password()
+    {
         Ok(pwd) => Ok(Some(pwd)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.to_string()),
@@ -45,7 +48,10 @@ fn get_keychain(user: &str) -> Result<Option<String>, String> {
 }
 
 fn delete_keychain(user: &str) -> Result<(), String> {
-    match Entry::new(SERVICE_NAME, user).map_err(|e| e.to_string())?.delete_credential() {
+    match Entry::new(SERVICE_NAME, user)
+        .map_err(|e| e.to_string())?
+        .delete_credential()
+    {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(e.to_string()),
     }
@@ -153,9 +159,7 @@ trait BackupTarget: Send + Sync {
 /// Builds the configured backup target. `"local"` is the default; unknown
 /// ids fall back to local so a config written by a newer version degrades
 /// gracefully instead of failing.
-fn target_from_config(
-    config: &crate::config::AppConfig,
-) -> Result<Box<dyn BackupTarget>, String> {
+fn target_from_config(config: &crate::config::AppConfig) -> Result<Box<dyn BackupTarget>, String> {
     match backup_target(config).as_str() {
         "webdav" => Ok(Box::new(WebdavTarget::from_config(config)?)),
         _ => {
@@ -336,7 +340,8 @@ pub async fn run_backup<R: Runtime>(app: AppHandle<R>, trigger: &str) -> Result<
     let config = crate::config::load_config_internal(&app);
     let password = get_password()?.ok_or("Backup password is not set")?;
 
-    let payload = crate::commands::export_connections_payload(app.clone(), Some(true), None).await?;
+    let payload =
+        crate::commands::export_connections_payload(app.clone(), Some(true), None).await?;
     let plaintext = serde_json::to_string(&payload).map_err(|e| e.to_string())?;
     let envelope = crate::export_crypto::encrypt(&plaintext, &password)?;
     let content = serde_json::to_string_pretty(&envelope).map_err(|e| e.to_string())?;
@@ -404,9 +409,12 @@ pub fn run_exit_backup(app: &AppHandle) {
         // Bound the backup so a hung network operation can never prevent the
         // process from exiting.
         tauri::async_runtime::block_on(async {
-            if tokio::time::timeout(std::time::Duration::from_secs(30), run_and_log(app, "on close"))
-                .await
-                .is_err()
+            if tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                run_and_log(app, "on close"),
+            )
+            .await
+            .is_err()
             {
                 log::error!("Exit backup timed out after 30s, exiting without it");
             }

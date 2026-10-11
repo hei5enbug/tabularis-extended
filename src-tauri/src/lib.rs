@@ -18,15 +18,15 @@ pub mod backup;
 pub mod cli;
 pub mod clipboard_import;
 pub mod commands;
+pub mod config;
 pub mod connection_appearance;
-pub mod connection_import;
-pub mod connection_import_commands;
 #[cfg(test)]
 pub mod connection_appearance_tests;
-pub mod config;
 pub mod connection_cache;
 #[cfg(test)]
 pub mod connection_cache_tests;
+pub mod connection_import;
+pub mod connection_import_commands;
 pub mod connection_migrations;
 #[cfg(test)]
 pub mod connection_migrations_tests;
@@ -35,6 +35,7 @@ pub mod connection_window;
 #[cfg(test)]
 pub mod connection_window_tests;
 pub mod credential_cache;
+pub mod credential_store;
 pub mod dump_commands; // Added
 #[cfg(test)]
 pub mod dump_commands_tests;
@@ -49,21 +50,17 @@ pub mod export_import_tests;
 pub mod fs_path;
 #[cfg(test)]
 pub mod fs_path_tests;
-pub mod health_check;
 #[cfg(test)]
 pub mod group_tree_tests;
+pub mod health_check;
 pub mod heartbeat;
 #[cfg(test)]
 pub mod heartbeat_tests;
 pub mod json_viewer;
+pub mod k8s_tunnel;
 pub mod keychain_utils;
 #[cfg(test)]
 pub mod keychain_utils_tests;
-pub mod results_window;
-pub mod sandbox;
-#[cfg(test)]
-pub mod sandbox_tests;
-pub mod k8s_tunnel;
 pub mod log_commands;
 pub mod logger;
 pub mod mcp;
@@ -74,9 +71,6 @@ pub mod notebooks;
 pub mod paths; // Added
 #[cfg(test)]
 pub mod paths_tests;
-pub mod storage_location;
-#[cfg(test)]
-pub mod storage_location_tests;
 pub mod persistence;
 #[cfg(test)]
 pub mod persistence_tests;
@@ -85,22 +79,30 @@ pub mod pool_manager;
 #[cfg(test)]
 pub mod pool_manager_tests;
 pub mod preferences;
+pub mod profile_migration;
 pub mod proxy;
 pub mod query_history;
 #[cfg(test)]
 pub mod query_history_tests;
+pub mod results_window;
+pub mod sandbox;
+#[cfg(test)]
+pub mod sandbox_tests;
+pub mod saved_queries;
+#[cfg(test)]
+pub mod saved_queries_tests;
 pub mod sql_database_statements;
 pub mod sql_file;
 #[cfg(test)]
 pub mod sql_file_tests;
-pub mod saved_queries;
-#[cfg(test)]
-pub mod saved_queries_tests;
-pub mod ssh_tunnel;
-pub mod ssm_tunnel;
 pub mod sqlite_database;
 #[cfg(test)]
 pub mod sqlite_database_tests;
+pub mod ssh_tunnel;
+pub mod ssm_tunnel;
+pub mod storage_location;
+#[cfg(test)]
+pub mod storage_location_tests;
 mod system_theme;
 pub mod task_manager;
 pub mod theme_commands;
@@ -189,6 +191,37 @@ pub fn run() {
 
     let args = cli::parse();
 
+    if args.list_drivers {
+        init_logger(create_log_buffer(1000), log::LevelFilter::Info);
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+        let manifests = rt.block_on(async {
+            drivers::registry::register_builtin_drivers().await;
+            let mut manifests = drivers::registry::list_drivers().await;
+            match plugins::manager::list_driver_manifests_from_disk() {
+                Ok(installed) => manifests.extend(installed),
+                Err(error) => log::warn!("Failed to read installed driver manifests: {error}"),
+            }
+            manifests.sort_by(|left, right| left.id.cmp(&right.id));
+            manifests
+        });
+        let summaries: Vec<_> = manifests
+            .iter()
+            .map(|manifest| {
+                serde_json::json!({
+                    "id": manifest.id,
+                    "name": manifest.name,
+                    "version": manifest.version,
+                    "is_builtin": manifest.is_builtin,
+                })
+            })
+            .collect();
+        println!(
+            "{}",
+            serde_json::to_string(&summaries).expect("Driver serialization failed")
+        );
+        return;
+    }
+
     if args.mcp {
         // Initialize the logger so plugin-loading and driver RPC errors (which
         // use the `log` crate) are visible. The custom logger writes to stderr
@@ -239,7 +272,9 @@ pub fn run() {
         // intercept duplicate launches before any heavy initialisation.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             log::info!("Duplicate launch detected — forwarded to existing instance");
-            if let Some(url) = argv.iter().find(|a| a.starts_with("tabularis:")) {
+            if let Some(url) = argv.iter().find(|a| {
+                a.starts_with("tabularis-extended:") || a.starts_with("tabularis:")
+            }) {
                 crate::plugins::deep_link::handle_url(app, url);
             }
             if let Some(win) = tauri::Manager::get_webview_window(app, "main") {
@@ -276,12 +311,17 @@ pub fn run() {
             // The asset protocol scope in tauri.conf.json only covers the
             // default data directory; when the user moved the storage folder
             // the connection icons live there instead.
-            if crate::storage_location::active_override().is_some() {
-                let icons_dir = crate::paths::get_connection_icons_dir();
+            let icons_dir = crate::paths::get_connection_icons_dir();
+            let custom_storage = crate::storage_location::active_override().is_some();
+            if custom_storage {
                 let _ = std::fs::create_dir_all(&icons_dir);
+            }
+            if icons_dir.is_dir() {
                 if let Err(e) = app.asset_protocol_scope().allow_directory(&icons_dir, true) {
                     log::warn!("Failed to allow asset access to {:?}: {}", icons_dir, e);
                 }
+            }
+            if custom_storage {
                 log::info!(
                     "Using custom storage location: {}",
                     crate::paths::get_app_config_dir().display()
@@ -306,9 +346,7 @@ pub fn run() {
 
             // Register built-in drivers
             tauri::async_runtime::block_on(async {
-                drivers::registry::register_driver(drivers::mysql::MysqlDriver::new()).await;
-                drivers::registry::register_driver(drivers::postgres::PostgresDriver::new()).await;
-                drivers::registry::register_driver(drivers::sqlite::SqliteDriver::new()).await;
+                drivers::registry::register_builtin_drivers().await;
 
                 // Load only enabled external plugins (or all if no preference saved).
                 crate::plugins::manager::load_plugins_with_configs(
@@ -349,7 +387,7 @@ pub fn run() {
                 });
             }
 
-            // Subscribe to `tabularis://` deep links so a registry's
+            // Subscribe to `tabularis-extended://` deep links so a registry's
             // "Open in App" button can hand us a plugin slug + version.
             // The handler emits a frontend event; the React side opens the
             // install confirmation modal. See `plugins::deep_link`.
@@ -357,13 +395,13 @@ pub fn run() {
             // On Linux/Windows the scheme is only auto-registered when the
             // app is installed from a bundled package. Under `tauri dev`
             // the binary lives in `target/debug/...`, so call
-            // `register("tabularis")` here — it writes the desktop / xdg-mime
+            // `register("tabularis-extended")` here — it writes the desktop / xdg-mime
             // entry pointing at the current binary so Firefox & friends can
-            // route `tabularis://...` to us. The call is a no-op on macOS
+            // route `tabularis-extended://...` to us. The call is a no-op on macOS
             // (handled by Info.plist) and idempotent across restarts.
             //
             // Inside Snap/Flatpak the exported `.desktop` entry already
-            // carries `MimeType=x-scheme-handler/tabularis`, and the sandbox
+            // carries `MimeType=x-scheme-handler/tabularis-extended`, and the sandbox
             // has neither `xdg-mime` nor write access to the host's
             // mimeapps.list — so skip the call instead of logging a failure.
             {
@@ -373,12 +411,12 @@ pub fn run() {
                 #[cfg(any(target_os = "linux", all(debug_assertions, target_os = "windows")))]
                 match crate::sandbox::current() {
                     Some(sandbox) => log::info!(
-                        "Skipping tabularis:// scheme registration: handled by the {} desktop entry",
+                        "Skipping tabularis-extended:// scheme registration: handled by the {} desktop entry",
                         sandbox.name()
                     ),
                     None => {
-                        if let Err(e) = deep_link.register("tabularis") {
-                            log::warn!("Failed to register tabularis:// scheme: {}", e);
+                        if let Err(e) = deep_link.register("tabularis-extended") {
+                            log::warn!("Failed to register tabularis-extended:// scheme: {}", e);
                         }
                     }
                 }
@@ -391,7 +429,7 @@ pub fn run() {
                     }
                 });
                 // Cold-start path: when the OS launched us *because of* a
-                // tabularis:// URL, on_open_url won't fire — the URL is
+                // tabularis-extended:// URL, on_open_url won't fire — the URL is
                 // already consumed by the launch handshake. Pull it out via
                 // get_current() and route it through the same handler.
                 if let Ok(Some(urls)) = deep_link.get_current() {
@@ -500,6 +538,8 @@ pub fn run() {
             // Connection Groups
             commands::get_connection_groups,
             commands::get_connections_with_groups,
+            profile_migration::preview_original_profile_import,
+            profile_migration::import_original_profile,
             commands::create_connection_group,
             commands::create_group_path,
             commands::update_connection_group,

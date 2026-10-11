@@ -182,20 +182,17 @@ describe("connectionStringParser", () => {
       }
     });
 
-    it("should resolve aliases against builtin drivers when no drivers are provided", () => {
-      const postgresql = parseConnectionString(
-        "postgresql://user@host/db",
-      );
-      expect(postgresql.success).toBe(true);
-      if (postgresql.success) {
-        expect(postgresql.params.driver).toBe("postgres");
-      }
-
-      const mariadb = parseConnectionString("mariadb://user@host/db");
-      expect(mariadb.success).toBe(true);
-      if (mariadb.success) {
-        expect(mariadb.params.driver).toBe("mysql");
-      }
+    it.each([
+      { uri: "postgresql://user@host/db", success: false, driver: undefined },
+      { uri: "mariadb://user@host/db", success: true, driver: "mysql" },
+    ])("등록된 드라이버가 없으면 $uri를 현재 내장 드라이버 목록으로 해석합니다.", ({ uri, success, driver }) => {
+      // given
+      const connectionString = uri;
+      // when
+      const result = parseConnectionString(connectionString);
+      // then
+      expect(result.success).toBe(success);
+      if (result.success) expect(result.params.driver).toBe(driver);
     });
 
     it("should parse sqlite3:// as sqlite via protocol alias", () => {
@@ -520,10 +517,15 @@ describe("connectionStringParser", () => {
       expect(protocols).toContain("sqlite3");
     });
 
-    it("should include aliases for builtin drivers when no drivers are provided", () => {
+    it("등록된 드라이버가 없으면 MySQL과 SQLite 별칭만 제공합니다.", () => {
+      // given
+      const expected = ["mysql", "mariadb", "sqlite", "sqlite3"];
+      // when
       const protocols = getSupportedConnectionStringProtocols();
-      expect(protocols).toContain("postgresql");
-      expect(protocols).toContain("mariadb");
+      // then
+      expect(protocols).toEqual(expect.arrayContaining(expected));
+      expect(protocols).not.toContain("postgresql");
+      expect(protocols).not.toContain("postgres");
     });
   });
   describe("URI passthrough drivers", () => {

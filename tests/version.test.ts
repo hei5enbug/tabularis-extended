@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { APP_VERSION } from '@/version';
+import { parse, valid } from 'semver';
 
 describe('version', () => {
   it('should export a version string', () => {
@@ -7,20 +8,26 @@ describe('version', () => {
     expect(APP_VERSION).toBeTruthy();
   });
 
-  it('should follow semantic versioning format', () => {
-    // Semantic versioning: MAJOR.MINOR.PATCH
-    const semverRegex = /^\d+\.\d+\.\d+$/;
-    expect(APP_VERSION).toMatch(semverRegex);
+  it('빌드 메타데이터를 포함한 정식 SemVer 버전을 제공한다', () => {
+    // given
+    const version = APP_VERSION;
+    // when
+    const normalized = valid(version);
+    // then
+    expect(normalized).not.toBeNull();
   });
 
-  it('should have numeric version components', () => {
-    const parts = APP_VERSION.split('.');
-    expect(parts).toHaveLength(3);
-    
-    parts.forEach(part => {
-      expect(Number.isInteger(Number(part))).toBe(true);
-      expect(Number(part)).toBeGreaterThanOrEqual(0);
-    });
+  it('주 버전과 부 버전과 패치 번호는 음수가 아닌 정수다', () => {
+    // given
+    const version = APP_VERSION;
+    // when
+    const parsed = parse(version);
+    // then
+    expect(parsed).not.toBeNull();
+    for (const part of [parsed!.major, parsed!.minor, parsed!.patch]) {
+      expect(Number.isInteger(part)).toBe(true);
+      expect(part).toBeGreaterThanOrEqual(0);
+    }
   });
 
   it('should not contain whitespace', () => {

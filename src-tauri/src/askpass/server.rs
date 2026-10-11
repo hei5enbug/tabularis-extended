@@ -7,11 +7,16 @@
 //! ssh command's environment, and drops it once the tunnel is up (or failed).
 
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+#[cfg(unix)]
+const MAX_SOCKET_PATH_BYTES: usize = 100;
 
 use super::client::SOCKET_ENV;
 #[cfg(windows)]
@@ -41,6 +46,8 @@ pub struct AskpassServer {
     stop: Arc<AtomicBool>,
     #[cfg(unix)]
     socket_path: std::path::PathBuf,
+    #[cfg(unix)]
+    _socket_dir: tempfile::TempDir,
 }
 
 impl AskpassServer {
@@ -54,10 +61,12 @@ impl AskpassServer {
             use std::os::unix::fs::PermissionsExt;
             use std::os::unix::net::UnixListener;
 
-            let socket_path = std::env::temp_dir().join(format!(
-                "tabularis-askpass-{}.sock",
-                uuid::Uuid::new_v4().simple()
-            ));
+            let fallback_root = std::fs::canonicalize("/tmp").map_err(|e| {
+                format!("Failed to resolve the short askpass socket directory: {e}")
+            })?;
+            let socket_dir = create_socket_dir(&std::env::temp_dir(), &fallback_root)
+                .map_err(|e| format!("Failed to create askpass socket directory: {e}"))?;
+            let socket_path = socket_dir.path().join("s");
             let listener = UnixListener::bind(&socket_path)
                 .map_err(|e| format!("Failed to bind askpass socket: {}", e))?;
             // The socket carries secrets: restrict it to the current user.
@@ -74,6 +83,7 @@ impl AskpassServer {
                 pending,
                 stop,
                 socket_path,
+                _socket_dir: socket_dir,
             })
         }
 
@@ -125,6 +135,74 @@ impl AskpassServer {
     /// pause connection timeouts while the user is typing a PIN.
     pub fn has_pending(&self) -> bool {
         self.pending.load(Ordering::Relaxed) > 0
+    }
+}
+
+#[cfg(unix)]
+fn create_socket_dir(
+    primary_root: &Path,
+    fallback_root: &Path,
+) -> std::io::Result<tempfile::TempDir> {
+    let primary = create_private_socket_dir(primary_root)?;
+    if socket_path_len(primary.path()) < MAX_SOCKET_PATH_BYTES {
+        return Ok(primary);
+    }
+    drop(primary);
+
+    let fallback = create_private_socket_dir(fallback_root)?;
+    if socket_path_len(fallback.path()) >= MAX_SOCKET_PATH_BYTES {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Askpass socket path is too long",
+        ));
+    }
+    Ok(fallback)
+}
+
+#[cfg(unix)]
+fn create_private_socket_dir(root: &Path) -> std::io::Result<tempfile::TempDir> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let directory = tempfile::Builder::new().prefix("ta-").tempdir_in(root)?;
+    std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))?;
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn socket_path_len(directory: &Path) -> usize {
+    use std::os::unix::ffi::OsStrExt;
+    directory.join("s").as_os_str().as_bytes().len()
+}
+
+#[cfg(all(test, unix))]
+mod socket_path_tests {
+    use super::{create_socket_dir, socket_path_len, MAX_SOCKET_PATH_BYTES};
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn 긴_임시_경로는_짧은_비공개_경로로_대체한다() {
+        // Given: 기본 임시 경로가 Unix 소켓 경로 제한을 넘는다.
+        let primary_root = tempfile::tempdir().unwrap();
+        let deep_root = primary_root.path().join("x".repeat(120));
+        fs::create_dir(&deep_root).unwrap();
+        let fallback_root = tempfile::tempdir().unwrap();
+
+        // When: 소켓 디렉터리를 선택한다.
+        let socket_dir = create_socket_dir(&deep_root, fallback_root.path()).unwrap();
+
+        // Then: 짧은 대체 경로 아래에만 private 디렉터리가 남는다.
+        assert!(socket_dir.path().starts_with(fallback_root.path()));
+        assert!(socket_path_len(socket_dir.path()) < MAX_SOCKET_PATH_BYTES);
+        assert_eq!(
+            fs::metadata(socket_dir.path())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+        assert_eq!(fs::read_dir(&deep_root).unwrap().count(), 0);
     }
 }
 

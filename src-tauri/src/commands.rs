@@ -8,15 +8,17 @@ use urlencoding::encode;
 use uuid::Uuid;
 
 use crate::credential_cache;
+use crate::credential_store::{self, CredentialChange, KeyringCredentialStore};
 use crate::keychain_utils;
 use crate::models::{
     BatchStatementResult, ColumnDefinition, ConnectionGroup, ConnectionParams, ConnectionsFile,
-    ExplainQueryOutput, ExportPayload, ForeignKey, Index, K8sConnection, K8sConnectionInput, QueryResult,
-    RoutineInfo, RoutineParameter, SavedConnection, SshConnection, SshConnectionInput, SshTestParams,
-    TableColumn, TableInfo, TestConnectionRequest, TriggerInfo,
+    ExplainQueryOutput, ExportPayload, ForeignKey, Index, K8sConnection, K8sConnectionInput,
+    QueryResult, RoutineInfo, RoutineParameter, SavedConnection, SshConnection, SshConnectionInput,
+    SshTestParams, TableColumn, TableInfo, TestConnectionRequest, TriggerInfo,
 };
 use crate::persistence;
 use crate::ssh_tunnel::{get_tunnels, SshTunnel};
+use serde::Serialize;
 
 // Constants
 /// Resolve the driver from the registry or return a descriptive error.
@@ -335,10 +337,7 @@ fn build_tunnel_map_key(
 
 /// Resolve K8s tunnel params synchronously (no saved-connection lookup; uses inline fields only).
 fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, String> {
-    let context = params
-        .k8s_context
-        .as_deref()
-        .ok_or("Missing K8s context")?;
+    let context = params.k8s_context.as_deref().ok_or("Missing K8s context")?;
     let namespace = params
         .k8s_namespace
         .as_deref()
@@ -381,7 +380,11 @@ fn resolve_k8s_params(params: &ConnectionParams) -> Result<ConnectionParams, Str
 
     log::info!(
         "Creating new K8s tunnel for {}/{} in {}:{} (context: {})",
-        resource_type, resource_name, namespace, port, context
+        resource_type,
+        resource_name,
+        namespace,
+        port,
+        context
     );
 
     let tunnel = crate::k8s_tunnel::K8sTunnel::new(
@@ -541,8 +544,7 @@ fn resolve_connection_transport(params: &ConnectionParams) -> Result<ConnectionP
             connection_id,
             proxy_override,
         );
-        let base_key =
-            build_tunnel_map_key(ssh_user, ssh_host, ssh_port, remote_host, remote_port);
+        let base_key = build_tunnel_map_key(ssh_user, ssh_host, ssh_port, remote_host, remote_port);
         let map_key = match &proxy {
             Some(p) => {
                 let proto = match p.protocol {
@@ -550,11 +552,7 @@ fn resolve_connection_transport(params: &ConnectionParams) -> Result<ConnectionP
                     crate::proxy::ProxyProtocol::Socks5 => "socks5",
                 };
                 let user = p.username.as_deref().unwrap_or("");
-                format!(
-                    "{base_key}|px:{proto}:{}:{}:{user}",
-                    p.host.trim(),
-                    p.port
-                )
+                format!("{base_key}|px:{proto}:{}:{}:{user}", p.host.trim(), p.port)
             }
             None => base_key,
         };
@@ -629,11 +627,7 @@ fn resolve_connection_transport(params: &ConnectionParams) -> Result<ConnectionP
         connection_id,
         proxy_override,
     ) {
-        let host = resolved
-            .host
-            .as_deref()
-            .unwrap_or("localhost")
-            .to_string();
+        let host = resolved.host.as_deref().unwrap_or("localhost").to_string();
         let port = resolved.port.unwrap_or(DEFAULT_MYSQL_PORT);
         if !is_loopback_host(&host) {
             let fwd_port = crate::proxy::ensure_forward(&proxy, &host, port)?;
@@ -783,6 +777,33 @@ fn params_for_persistence(
     persisted
 }
 
+struct PreparedConnectionUpdate {
+    params_to_persist: ConnectionParams,
+    params_to_save: ConnectionParams,
+    connection_uri: Option<String>,
+    preserve_stored_uri: bool,
+}
+
+fn prepare_connection_update_params(
+    original: &ConnectionParams,
+    requested: &ConnectionParams,
+) -> PreparedConnectionUpdate {
+    let same_driver = original.driver == requested.driver;
+    let connection_uri = runtime_connection_uri(requested).map(str::to_owned);
+    let preserve_stored_uri = connection_uri.is_none()
+        && same_driver
+        && requested.save_in_keychain.unwrap_or(false)
+        && original.connection_uri_in_keychain.unwrap_or(false)
+        && requested.connection_uri_in_keychain != Some(false);
+    let uri_is_stored = connection_uri.is_some() || preserve_stored_uri;
+    PreparedConnectionUpdate {
+        params_to_persist: requested.clone(),
+        params_to_save: params_for_persistence(requested, uri_is_stored),
+        connection_uri,
+        preserve_stored_uri,
+    }
+}
+
 /// Re-attach the URI a saved connection needs at runtime, from the session
 /// cache or the keychain.
 fn restore_runtime_connection_uri(
@@ -812,8 +833,7 @@ pub fn find_connection_by_id<R: Runtime>(
     app: &AppHandle<R>,
     id: &str,
 ) -> Result<SavedConnection, String> {
-    let conn_cache =
-        app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>();
+    let conn_cache = app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>();
 
     let mut conn = match conn_cache.lookup(id) {
         crate::connection_cache::CacheLookup::Hit(c) => c,
@@ -839,9 +859,7 @@ pub fn find_connection_by_id<R: Runtime>(
     // cold miss = keychain call + cache). Skip IAM-auth connections: their
     // 15-min tokens must come from the `password` field, never the keychain,
     // so a stale token from an older release can't be surfaced in the modal.
-    if conn.params.save_in_keychain.unwrap_or(false)
-        && !conn.params.use_iam_auth.unwrap_or(false)
-    {
+    if conn.params.save_in_keychain.unwrap_or(false) && !conn.params.use_iam_auth.unwrap_or(false) {
         match credential_cache::get_db_password_cached(&cache, &conn.id) {
             Ok(pwd) => conn.params.password = Some(pwd),
             Err(e) => eprintln!(
@@ -925,6 +943,74 @@ pub(crate) fn save_connections_and_invalidate<R: Runtime>(
     Ok(())
 }
 
+pub(crate) fn update_connections_and_invalidate<R: Runtime, T>(
+    app: &AppHandle<R>,
+    path: &std::path::Path,
+    update: impl FnOnce(&mut ConnectionsFile) -> Result<T, String>,
+) -> Result<T, String> {
+    let result = persistence::update_connections_file(path, update)?;
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    Ok(result)
+}
+
+pub(crate) fn update_connections_with_file_and_invalidate<R: Runtime, T>(
+    app: &AppHandle<R>,
+    path: &std::path::Path,
+    update: impl FnOnce(&mut ConnectionsFile) -> Result<T, String>,
+) -> Result<(T, ConnectionsFile), String> {
+    let result = persistence::update_connections_file_with_file(path, update)?;
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    Ok(result)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum ConnectionWriteError {
+    RevisionConflict {
+        connection_id: String,
+        current_revision: String,
+    },
+    RecoveryRequired {
+        operation: String,
+        message: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+fn require_expected_revision(
+    connection_id: &str,
+    expected_revision: Option<&str>,
+    current_revision: &str,
+) -> Result<(), ConnectionWriteError> {
+    if expected_revision == Some(current_revision) {
+        return Ok(());
+    }
+    Err(ConnectionWriteError::RevisionConflict {
+        connection_id: connection_id.to_string(),
+        current_revision: current_revision.to_string(),
+    })
+}
+
+impl From<credential_store::CredentialTransactionError> for ConnectionWriteError {
+    fn from(error: credential_store::CredentialTransactionError) -> Self {
+        match error {
+            credential_store::CredentialTransactionError::Failed { message } => {
+                Self::Failed { message }
+            }
+            credential_store::CredentialTransactionError::RecoveryRequired { message } => {
+                Self::RecoveryRequired {
+                    operation: "connectionCredentialUpdate".to_string(),
+                    message,
+                }
+            }
+        }
+    }
+}
+
 // --- Commands ---
 
 #[tauri::command]
@@ -990,21 +1076,19 @@ pub async fn set_selected_databases<R: Runtime>(
     );
 
     let path = get_config_path(&app)?;
-    let mut conn_file = persistence::load_connections_file(&path)?;
-
-    let conn = conn_file
-        .connections
-        .iter_mut()
-        .find(|c| c.id == connection_id)
-        .ok_or("Connection not found")?;
-
-    conn.params.database = if databases.len() == 1 {
-        crate::models::DatabaseSelection::Single(databases.remove(0))
-    } else {
-        crate::models::DatabaseSelection::Multiple(databases)
-    };
-
-    save_connections_and_invalidate(&app, &path, &conn_file)
+    update_connections_and_invalidate(&app, &path, |conn_file| {
+        let conn = conn_file
+            .connections
+            .iter_mut()
+            .find(|c| c.id == connection_id)
+            .ok_or("Connection not found")?;
+        conn.params.database = if databases.len() == 1 {
+            crate::models::DatabaseSelection::Single(databases.remove(0))
+        } else {
+            crate::models::DatabaseSelection::Multiple(databases)
+        };
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -1022,7 +1106,9 @@ pub async fn get_routines<R: Runtime>(
 
     let drv = driver_for_params(&params).await?;
     let result = drv.get_routines(&params, schema.as_deref()).await;
-    let database = schema.as_deref().unwrap_or_else(|| params.database.primary());
+    let database = schema
+        .as_deref()
+        .unwrap_or_else(|| params.database.primary());
 
     match &result {
         Ok(routines) => log::info!("Retrieved {} routines from {}", routines.len(), database),
@@ -1226,36 +1312,41 @@ pub async fn save_connection<R: Runtime>(
 ) -> Result<SavedConnection, String> {
     log::info!("Saving new connection: {}", name);
     validate_connection_uri_persistence(&params)?;
-
+    let environment = validate_environment(environment)?;
     let path = get_config_path(&app)?;
-    let mut conn_file = persistence::load_connections_file(&path).unwrap_or_default();
-
+    let lock = persistence::LockedConnectionsFile::open(&path)?;
+    let mut conn_file = lock.load()?;
     let id = Uuid::new_v4().to_string();
     let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
     let connection_uri = runtime_connection_uri(&params).map(str::to_owned);
     let mut params_to_save = params_for_persistence(&params, connection_uri.is_some());
-
+    let mut changes = Vec::new();
     if params.save_in_keychain.unwrap_or(false) {
-        log::debug!("Storing passwords in keychain for connection: {}", name);
         match keychain_utils::stored_password_change(params.password.as_deref()) {
             keychain_utils::StoredPasswordChange::Store(pwd) => {
-                keychain_utils::set_db_password(&id, pwd)?;
-                credential_cache::set_db_password_cached(&cache, &id, pwd);
+                changes.push(CredentialChange {
+                    account: format!("{id}:db"),
+                    value: Some(pwd.to_string()),
+                });
             }
-            // A fresh id has nothing to delete; an empty password is simply
-            // not stored (keyutils would reject it anyway).
             keychain_utils::StoredPasswordChange::Keep
             | keychain_utils::StoredPasswordChange::Delete => {}
         }
         if params.ssh_enabled.unwrap_or(false) {
             if let Some(ssh_pwd) = &params.ssh_password {
-                keychain_utils::set_ssh_password(&id, ssh_pwd)?;
-                credential_cache::set_ssh_password_cached(&cache, &id, ssh_pwd);
+                if !ssh_pwd.is_empty() {
+                    changes.push(CredentialChange {
+                        account: format!("{id}:ssh"),
+                        value: Some(ssh_pwd.clone()),
+                    });
+                }
             }
             if let Some(ssh_passphrase) = &params.ssh_key_passphrase {
                 if !ssh_passphrase.trim().is_empty() {
-                    keychain_utils::set_ssh_key_passphrase(&id, ssh_passphrase)?;
-                    credential_cache::set_ssh_key_passphrase_cached(&cache, &id, ssh_passphrase);
+                    changes.push(CredentialChange {
+                        account: format!("{id}:ssh_passphrase"),
+                        value: Some(ssh_passphrase.clone()),
+                    });
                 }
             }
         }
@@ -1266,6 +1357,7 @@ pub async fn save_connection<R: Runtime>(
 
     let new_conn = SavedConnection {
         id: id.clone(),
+        revision: String::new(),
         name: name.clone(),
         params: params_to_save,
         group_id: None,
@@ -1273,20 +1365,59 @@ pub async fn save_connection<R: Runtime>(
         detect_json_in_text_columns,
         appearance: None,
         tag_ids: None,
-        environment: validate_environment(environment)?,
+        environment,
     };
     conn_file.connections.push(new_conn.clone());
-    persist_connection_uri_change(
-        &cache,
-        &id,
-        false,
-        connection_uri.as_deref().map(Some),
-        || save_connections_and_invalidate(&app, &path, &conn_file),
-    )?;
+    if let Some(uri) = connection_uri.as_deref() {
+        changes.push(CredentialChange {
+            account: format!("{id}:connection_uri"),
+            value: Some(uri.to_string()),
+        });
+    }
+    let store = KeyringCredentialStore;
+    let undo = credential_store::apply_changes(&store, keychain_utils::SERVICE_NAME, &changes)
+        .map_err(|error| match ConnectionWriteError::from(error) {
+            ConnectionWriteError::Failed { message } => message,
+            ConnectionWriteError::RecoveryRequired { message, .. } => message,
+            ConnectionWriteError::RevisionConflict { .. } => unreachable!(),
+        })?;
+    if let Err(error) = lock.save(&mut conn_file) {
+        return match credential_store::rollback_changes(&store, &undo) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!(
+                "Recovery required after save failure: {error}; {rollback}"
+            )),
+        };
+    }
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    if let Some(uri) = connection_uri.as_deref() {
+        credential_cache::set_connection_uri_cached(&cache, &id, uri);
+    }
+    if let Some(password) = params.password.as_deref() {
+        if params.save_in_keychain.unwrap_or(false) {
+            credential_cache::set_db_password_cached(&cache, &id, password);
+        }
+    }
+    if let Some(password) = params.ssh_password.as_deref() {
+        if params.save_in_keychain.unwrap_or(false) {
+            credential_cache::set_ssh_password_cached(&cache, &id, password);
+        }
+    }
+    if let Some(passphrase) = params.ssh_key_passphrase.as_deref() {
+        if params.save_in_keychain.unwrap_or(false) {
+            credential_cache::set_ssh_key_passphrase_cached(&cache, &id, passphrase);
+        }
+    }
 
     log::info!("Connection saved successfully: {} (ID: {})", name, id);
 
-    let mut returned_conn = new_conn;
+    let mut returned_conn = conn_file
+        .connections
+        .iter()
+        .find(|connection| connection.id == id)
+        .cloned()
+        .ok_or_else(|| "Saved connection disappeared during persistence".to_string())?;
     returned_conn.params = params; // Return with password for frontend state
     Ok(returned_conn)
 }
@@ -1300,16 +1431,10 @@ pub async fn delete_connection<R: Runtime>(app: AppHandle<R>, id: String) -> Res
         return Ok(());
     }
 
-    let mut conn_file = persistence::load_connections_file(&path)?;
+    let lock = persistence::LockedConnectionsFile::open(&path)?;
+    let mut conn_file = lock.load()?;
 
     let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
-    let uri_stored_in_keychain = conn_file
-        .connections
-        .iter()
-        .find(|c| c.id == id)
-        .and_then(|c| c.params.connection_uri_in_keychain)
-        .unwrap_or(false);
-
     // Capture the appearance before retain so we can cascade-delete the icon file.
     let appearance_to_delete = conn_file
         .connections
@@ -1321,28 +1446,51 @@ pub async fn delete_connection<R: Runtime>(app: AppHandle<R>, id: String) -> Res
     conn_file.connections.retain(|c| c.id != id);
     let deleted = conn_file.connections.len() < initial_count;
 
-    // Attempt to remove passwords from keychain (ignore if not found)
-    keychain_utils::delete_db_password(&id).ok();
-    keychain_utils::delete_ssh_password(&id).ok();
-    keychain_utils::delete_ssh_key_passphrase(&id).ok();
-    persist_connection_uri_change(&cache, &id, uri_stored_in_keychain, Some(None), || {
-        save_connections_and_invalidate(&app, &path, &conn_file)
-    })?;
+    let changes = ["db", "ssh", "ssh_passphrase", "connection_uri"]
+        .into_iter()
+        .map(|slot| CredentialChange {
+            account: format!("{id}:{slot}"),
+            value: None,
+        })
+        .collect::<Vec<_>>();
+    let store = KeyringCredentialStore;
+    let undo = credential_store::apply_changes(&store, keychain_utils::SERVICE_NAME, &changes)
+        .map_err(|error| match ConnectionWriteError::from(error) {
+            ConnectionWriteError::Failed { message } => message,
+            ConnectionWriteError::RecoveryRequired { message, .. } => message,
+            ConnectionWriteError::RevisionConflict { .. } => unreachable!(),
+        })?;
+    if let Err(error) = lock.save(&mut conn_file) {
+        return match credential_store::rollback_changes(&store, &undo) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!(
+                "Recovery required after delete save failure: {error}; {rollback}"
+            )),
+        };
+    }
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    drop(lock);
     // Invalidate the in-memory cache for this connection
     credential_cache::invalidate_all_for_connection(&cache, &id);
 
     // Cascade-delete the custom icon file if the connection used one.
     {
-        let app_data = crate::paths::get_app_data_dir();
+        let icons_dir = crate::paths::get_connection_icons_dir();
+        let app_data = icons_dir.parent().unwrap_or(&icons_dir);
         let _ = crate::connection_appearance::cascade_delete_if_image(
-            &app_data,
+            app_data,
             appearance_to_delete.as_ref(),
         );
     }
 
     // Clean up query history for this connection
     if let Err(e) = crate::query_history::remove_history_for_connection(&app, &id).await {
-        log::warn!("Failed to remove query history for connection {}: {}", id, e);
+        log::warn!(
+            "Failed to remove query history for connection {}: {}",
+            id,
+            e
+        );
     }
 
     if deleted {
@@ -1360,117 +1508,125 @@ pub async fn update_connection<R: Runtime>(
     id: String,
     name: String,
     params: ConnectionParams,
+    expected_revision: Option<String>,
     detect_json_in_text_columns: Option<bool>,
     environment: Option<String>,
-) -> Result<SavedConnection, String> {
-    validate_connection_uri_persistence(&params)?;
-    let path = get_config_path(&app)?;
-    let mut conn_file = persistence::load_connections_file(&path)?;
-
+) -> Result<SavedConnection, ConnectionWriteError> {
+    validate_connection_uri_persistence(&params)
+        .map_err(|message| ConnectionWriteError::Failed { message })?;
+    let environment = validate_environment(environment)
+        .map_err(|message| ConnectionWriteError::Failed { message })?;
+    let path = get_config_path(&app).map_err(|message| ConnectionWriteError::Failed { message })?;
+    let lock = persistence::LockedConnectionsFile::open(&path)
+        .map_err(|message| ConnectionWriteError::Failed { message })?;
+    let mut conn_file = lock
+        .load()
+        .map_err(|message| ConnectionWriteError::Failed { message })?;
     let conn_idx = conn_file
         .connections
         .iter()
-        .position(|c| c.id == id)
-        .ok_or("Connection not found")?;
+        .position(|connection| connection.id == id)
+        .ok_or_else(|| ConnectionWriteError::Failed {
+            message: "Connection not found".to_string(),
+        })?;
+    let original = conn_file.connections[conn_idx].clone();
+    require_expected_revision(&id, expected_revision.as_deref(), &original.revision)?;
 
-    let existing_uri_in_keychain = conn_file.connections[conn_idx]
-        .params
-        .connection_uri_in_keychain
-        .unwrap_or(false);
-    // A stored URI belongs to the driver that produced it. Switching drivers
-    // must drop it rather than hand one driver's credentials to another.
-    let previous_driver_id = conn_file.connections[conn_idx].params.driver.clone();
-    let same_driver = previous_driver_id == params.driver;
-    let connection_uri = runtime_connection_uri(&params).map(str::to_owned);
-    // The frontend sends the URI back only when the user retyped it. An edit
-    // that leaves the field untouched must keep the stored secret; an edit that
-    // explicitly clears the marker must delete it.
-    let preserve_stored_uri = connection_uri.is_none()
-        && same_driver
-        && params.save_in_keychain.unwrap_or(false)
-        && existing_uri_in_keychain
-        && params.connection_uri_in_keychain != Some(false);
-    let uri_change = match connection_uri.as_deref() {
-        Some(value) => Some(Some(value)),
-        None if preserve_stored_uri => None,
-        None => Some(None),
+    let previous_driver_id = original.params.driver.clone();
+    let prepared = prepare_connection_update_params(&original.params, &params);
+    let connection_uri = prepared.connection_uri.clone();
+    let preserve_stored_uri = prepared.preserve_stored_uri;
+    let uri_change = if connection_uri.is_some() {
+        Some(connection_uri.clone())
+    } else if preserve_stored_uri {
+        None
+    } else {
+        Some(None)
     };
-    let mut params_to_save =
-        params_for_persistence(&params, connection_uri.is_some() || preserve_stored_uri);
 
-    let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
+    let params_to_persist = prepared.params_to_persist;
+    let mut params_to_save = prepared.params_to_save;
+
+    let mut changes = Vec::new();
+    let mut add_change = |account: &str, value: Option<String>| {
+        changes.push(CredentialChange {
+            account: format!("{id}:{account}"),
+            value,
+        });
+    };
     if params.save_in_keychain.unwrap_or(false) {
         match keychain_utils::stored_password_change(params.password.as_deref()) {
-            keychain_utils::StoredPasswordChange::Store(pwd) => {
-                keychain_utils::set_db_password(&id, pwd)?;
-                credential_cache::set_db_password_cached(&cache, &id, pwd);
-            }
-            // The frontend sends an explicit empty password when a plugin hid
-            // the login inputs. The previous secret must not survive, or the
-            // next connect would hand a stale login to the driver.
-            keychain_utils::StoredPasswordChange::Delete => {
-                keychain_utils::delete_db_password(&id)?;
-                credential_cache::invalidate_db_password(&cache, &id);
-            }
             keychain_utils::StoredPasswordChange::Keep => {}
+            keychain_utils::StoredPasswordChange::Delete => add_change("db", None),
+            keychain_utils::StoredPasswordChange::Store(value) => {
+                add_change("db", Some(value.to_string()))
+            }
         }
         if params.ssh_enabled.unwrap_or(false) {
-            if let Some(ssh_pwd) = &params.ssh_password {
-                keychain_utils::set_ssh_password(&id, ssh_pwd)?;
-                credential_cache::set_ssh_password_cached(&cache, &id, ssh_pwd);
+            if let Some(password) = params.ssh_password.as_deref() {
+                add_change("ssh", (!password.is_empty()).then(|| password.to_string()));
             }
-            if let Some(ssh_passphrase) = &params.ssh_key_passphrase {
-                if !ssh_passphrase.trim().is_empty() {
-                    keychain_utils::set_ssh_key_passphrase(&id, ssh_passphrase)?;
-                    credential_cache::set_ssh_key_passphrase_cached(&cache, &id, ssh_passphrase);
-                }
+            if let Some(passphrase) = params.ssh_key_passphrase.as_deref() {
+                add_change(
+                    "ssh_passphrase",
+                    (!passphrase.is_empty()).then(|| passphrase.to_string()),
+                );
             }
         } else {
-            keychain_utils::delete_ssh_password(&id).ok();
-            keychain_utils::delete_ssh_key_passphrase(&id).ok();
-            credential_cache::invalidate_ssh_password(&cache, &id);
-            credential_cache::invalidate_ssh_key_passphrase(&cache, &id);
+            add_change("ssh", None);
+            add_change("ssh_passphrase", None);
         }
+    } else {
+        add_change("db", None);
+        add_change("ssh", None);
+        add_change("ssh_passphrase", None);
+    }
+    if let Some(uri) = uri_change {
+        add_change("connection_uri", uri);
+    }
+    if params.save_in_keychain.unwrap_or(false) {
         params_to_save.password = None;
         params_to_save.ssh_password = None;
         params_to_save.ssh_key_passphrase = None;
-    } else {
-        keychain_utils::delete_db_password(&id).ok();
-        keychain_utils::delete_ssh_password(&id).ok();
-        keychain_utils::delete_ssh_key_passphrase(&id).ok();
-        // The connection URI is cleared by its own transaction below, which
-        // needs the previous cache entry intact to roll back.
-        credential_cache::invalidate_db_password(&cache, &id);
-        credential_cache::invalidate_ssh_password(&cache, &id);
-        credential_cache::invalidate_ssh_key_passphrase(&cache, &id);
     }
 
-    // Preserve existing group_id and sort_order from the original connection
-    let original_group_id = conn_file.connections[conn_idx].group_id.clone();
-    let original_sort_order = conn_file.connections[conn_idx].sort_order;
-    let original_db_selection = conn_file.connections[conn_idx].params.database.clone();
-    // Preserve user's appearance customization across edits
-    let original_appearance = conn_file.connections[conn_idx].appearance.clone();
-    // Tags are managed by set_connection_tags; preserve them across edits.
-    let original_tag_ids = conn_file.connections[conn_idx].tag_ids.clone();
-
-    let updated = SavedConnection {
+    let updated_without_revision = SavedConnection {
         id: id.clone(),
+        revision: original.revision.clone(),
         name,
         params: params_to_save,
-        group_id: original_group_id,
-        sort_order: original_sort_order,
+        group_id: original.group_id.clone(),
+        sort_order: original.sort_order,
         detect_json_in_text_columns,
-        appearance: original_appearance,
-        tag_ids: original_tag_ids,
-        environment: validate_environment(environment)?,
+        appearance: original.appearance.clone(),
+        tag_ids: original.tag_ids.clone(),
+        environment,
     };
+    conn_file.connections[conn_idx] = updated_without_revision;
 
-    conn_file.connections[conn_idx] = updated.clone();
+    let store = KeyringCredentialStore;
+    let undo = credential_store::apply_changes(&store, keychain_utils::SERVICE_NAME, &changes)
+        .map_err(ConnectionWriteError::from)?;
+    if let Err(error) = lock.save(&mut conn_file) {
+        return match credential_store::rollback_changes(&store, &undo) {
+            Ok(()) => Err(ConnectionWriteError::Failed { message: error }),
+            Err(rollback) => Err(ConnectionWriteError::RecoveryRequired {
+                operation: "connectionCredentialUpdate".to_string(),
+                message: format!("{error}; {rollback}"),
+            }),
+        };
+    }
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    drop(lock);
 
-    persist_connection_uri_change(&cache, &id, existing_uri_in_keychain, uri_change, || {
-        save_connections_and_invalidate(&app, &path, &conn_file)
-    })?;
+    let original_db_selection = original.params.database;
+    let updated = conn_file.connections[conn_idx].clone();
+    let cache = app.state::<std::sync::Arc<crate::credential_cache::CredentialCache>>();
+    credential_cache::invalidate_all_for_connection(&cache, &id);
+    if let Some(uri) = connection_uri.as_deref() {
+        credential_cache::set_connection_uri_cached(&cache, &id, uri);
+    }
 
     let mut metadata_changed = false;
     for driver_id in [&previous_driver_id, &updated.params.driver] {
@@ -1492,25 +1648,16 @@ pub async fn update_connection<R: Runtime>(
     // database set) to the original single database name.
     if let Some(previous_db) = crate::models::single_db_before_multi_transition(
         &original_db_selection,
-        &params.database,
+        &updated.params.database,
     ) {
-        if let Err(e) = crate::saved_queries::backfill_missing_database_for_connection(
-            &app,
-            &id,
-            &previous_db,
-        ) {
-            log::warn!(
-                "Failed to backfill saved query database for {}: {}",
-                id,
-                e
-            );
+        if let Err(e) =
+            crate::saved_queries::backfill_missing_database_for_connection(&app, &id, &previous_db)
+        {
+            log::warn!("Failed to backfill saved query database for {}: {}", id, e);
         }
-        if let Err(e) = crate::query_history::backfill_missing_database_for_connection(
-            &app,
-            &id,
-            &previous_db,
-        )
-        .await
+        if let Err(e) =
+            crate::query_history::backfill_missing_database_for_connection(&app, &id, &previous_db)
+                .await
         {
             log::warn!(
                 "Failed to backfill query history database for {}: {}",
@@ -1521,7 +1668,10 @@ pub async fn update_connection<R: Runtime>(
     }
 
     let mut returned_conn = updated;
-    returned_conn.params = params;
+    returned_conn.params = params_to_persist;
+    returned_conn.params.password = params.password;
+    returned_conn.params.ssh_password = params.ssh_password;
+    returned_conn.params.ssh_key_passphrase = params.ssh_key_passphrase;
     Ok(returned_conn)
 }
 
@@ -1548,9 +1698,9 @@ pub async fn set_connection_appearance<R: Runtime>(
     appearance: Option<crate::models::ConnectionAppearance>,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut conn_file = persistence::load_connections_file(&path)?;
-    set_appearance_impl(&mut conn_file, &id, appearance)?;
-    save_connections_and_invalidate(&app, &path, &conn_file)?;
+    update_connections_and_invalidate(&app, &path, |conn_file| {
+        set_appearance_impl(conn_file, &id, appearance)
+    })?;
     Ok(())
 }
 
@@ -1560,7 +1710,8 @@ pub async fn duplicate_connection<R: Runtime>(
     id: String,
 ) -> Result<SavedConnection, String> {
     let path = get_config_path(&app)?;
-    let mut conn_file = persistence::load_connections_file(&path)?;
+    let lock = persistence::LockedConnectionsFile::open(&path)?;
+    let mut conn_file = lock.load()?;
 
     let original_idx = conn_file
         .connections
@@ -1597,29 +1748,51 @@ pub async fn duplicate_connection<R: Runtime>(
 
     let new_id = Uuid::new_v4().to_string();
     let mut new_params = original.params.clone();
+    let original_uri = if original.params.connection_uri_in_keychain.unwrap_or(false) {
+        credential_cache::get_connection_uri_cached(&cache, &original.id, true)
+            .ok()
+            .flatten()
+    } else {
+        runtime_connection_uri(&original.params).map(str::to_owned)
+    };
+    let mut credential_changes = Vec::new();
 
     // Save passwords to new keychain entries if enabled
     if new_params.save_in_keychain.unwrap_or(false) {
         if let Some(pwd) = &new_params.password {
-            keychain_utils::set_db_password(&new_id, pwd)?;
-            credential_cache::set_db_password_cached(&cache, &new_id, pwd);
+            if !pwd.is_empty() {
+                credential_changes.push(CredentialChange {
+                    account: format!("{new_id}:db"),
+                    value: Some(pwd.clone()),
+                });
+            }
         }
         if new_params.ssh_enabled.unwrap_or(false) {
             if let Some(ssh_pwd) = &new_params.ssh_password {
-                keychain_utils::set_ssh_password(&new_id, ssh_pwd)?;
-                credential_cache::set_ssh_password_cached(&cache, &new_id, ssh_pwd);
+                if !ssh_pwd.is_empty() {
+                    credential_changes.push(CredentialChange {
+                        account: format!("{new_id}:ssh"),
+                        value: Some(ssh_pwd.clone()),
+                    });
+                }
             }
             if let Some(ssh_passphrase) = &new_params.ssh_key_passphrase {
                 if !ssh_passphrase.trim().is_empty() {
-                    keychain_utils::set_ssh_key_passphrase(&new_id, ssh_passphrase)?;
-                    credential_cache::set_ssh_key_passphrase_cached(
-                        &cache,
-                        &new_id,
-                        ssh_passphrase,
-                    );
+                    credential_changes.push(CredentialChange {
+                        account: format!("{new_id}:ssh_passphrase"),
+                        value: Some(ssh_passphrase.clone()),
+                    });
                 }
             }
         }
+        if let Some(uri) = &original_uri {
+            credential_changes.push(CredentialChange {
+                account: format!("{new_id}:connection_uri"),
+                value: Some(uri.clone()),
+            });
+            new_params.connection_uri_in_keychain = Some(true);
+        }
+        new_params.connection_uri = None;
         new_params.password = None;
         new_params.ssh_password = None;
         new_params.ssh_key_passphrase = None;
@@ -1634,8 +1807,10 @@ pub async fn duplicate_connection<R: Runtime>(
         let mut app_earance = original.appearance.clone();
         if let Some(ref mut a) = app_earance {
             if let Some(crate::models::IconOverride::Image { ref path }) = a.icon.clone() {
-                let app_data = crate::paths::get_app_data_dir();
-                match crate::connection_appearance::copy_icon_for_duplicate(&app_data, path, &new_id) {
+                let icons_dir = crate::paths::get_connection_icons_dir();
+                let app_data = icons_dir.parent().unwrap_or(&icons_dir);
+                match crate::connection_appearance::copy_icon_for_duplicate(app_data, path, &new_id)
+                {
                     Ok(new_path) => {
                         a.icon = Some(crate::models::IconOverride::Image { path: new_path });
                     }
@@ -1653,7 +1828,8 @@ pub async fn duplicate_connection<R: Runtime>(
     };
 
     let new_conn = SavedConnection {
-        id: new_id,
+        id: new_id.clone(),
+        revision: String::new(),
         name: format!("{} (Copy)", original.name),
         params: new_params,
         group_id: original.group_id.clone(), // Copy to same group as original
@@ -1667,10 +1843,31 @@ pub async fn duplicate_connection<R: Runtime>(
     };
 
     conn_file.connections.push(new_conn.clone());
+    let store = KeyringCredentialStore;
+    let undo =
+        credential_store::apply_changes(&store, keychain_utils::SERVICE_NAME, &credential_changes)
+            .map_err(|error| match ConnectionWriteError::from(error) {
+                ConnectionWriteError::Failed { message } => message,
+                ConnectionWriteError::RecoveryRequired { message, .. } => message,
+                ConnectionWriteError::RevisionConflict { .. } => unreachable!(),
+            })?;
+    if let Err(error) = lock.save(&mut conn_file) {
+        return match credential_store::rollback_changes(&store, &undo) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!(
+                "Recovery required after duplicate save failure: {error}; {rollback}"
+            )),
+        };
+    }
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    drop(lock);
+    credential_cache::invalidate_all_for_connection(&cache, &new_id);
+    if let Some(uri) = original_uri.as_deref() {
+        credential_cache::set_connection_uri_cached(&cache, &new_id, uri);
+    }
 
-    save_connections_and_invalidate(&app, &path, &conn_file)?;
-
-    let mut returned_conn = new_conn;
+    let mut returned_conn = conn_file.connections.last().cloned().unwrap_or(new_conn);
     // Return with passwords for frontend consistency
     if returned_conn.params.save_in_keychain.unwrap_or(false) {
         // We can just use the values from `original.params` as they are identical (unless we cleared them in new_params)
@@ -1704,65 +1901,66 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
     if !conn_path.exists() {
         return Ok(()); // Nothing to migrate
     }
-
-    // Load connections using persistence (handles both old and new formats)
-    let mut conn_file = persistence::load_connections_file(&conn_path)?;
-    let connections = &conn_file.connections;
-
-    // Check if any connections have old embedded SSH params
-    let needs_migration = connections
-        .iter()
-        .any(|c| c.params.ssh_enabled.unwrap_or(false) && c.params.ssh_connection_id.is_none());
-
-    if !needs_migration {
-        return Ok(()); // No migration needed
+    let lock = persistence::LockedConnectionsFile::open(&conn_path)?;
+    let mut conn_file = lock.load()?;
+    if !conn_file.connections.iter().any(|connection| {
+        connection.params.ssh_enabled.unwrap_or(false)
+            && connection.params.ssh_connection_id.is_none()
+    }) {
+        return Ok(());
     }
-
-    eprintln!("[Migration] Starting SSH connections migration...");
-
     let ssh_path = get_ssh_config_path(app)?;
-    let mut ssh_connections: Vec<SshConnection> = if ssh_path.exists() {
-        let ssh_content = fs::read_to_string(&ssh_path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&ssh_content).unwrap_or_default()
-    } else {
-        Vec::new()
+    let previous_ssh_content = match fs::read_to_string(&ssh_path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
     };
+    let mut ssh_connections: Vec<SshConnection> = previous_ssh_content
+        .as_deref()
+        .and_then(|content| serde_json::from_str(content).ok())
+        .unwrap_or_default();
 
-    let mut migrated_connections = Vec::new();
     let mut ssh_connection_map: HashMap<String, String> = HashMap::new(); // (ssh_key -> ssh_id)
-
-    for mut conn in conn_file.connections.clone() {
+    let mut changes = Vec::new();
+    for conn in &mut conn_file.connections {
         if conn.params.ssh_enabled.unwrap_or(false) && conn.params.ssh_connection_id.is_none() {
-            // Extract SSH params
             if let (Some(host), Some(user)) = (&conn.params.ssh_host, &conn.params.ssh_user) {
                 let port = conn.params.ssh_port.unwrap_or(22);
                 let key_file = conn.params.ssh_key_file.clone().unwrap_or_default();
-
-                // Create unique key for this SSH config
                 let ssh_key = format!("{}:{}:{}:{}", host, port, user, key_file);
-
-                // Check if we already created an SSH connection for this config
                 let ssh_id = if let Some(existing_id) = ssh_connection_map.get(&ssh_key) {
                     existing_id.clone()
                 } else {
-                    // Create new SSH connection
                     let new_ssh_id = Uuid::new_v4().to_string();
                     let ssh_name = format!("{}@{}", user, host);
-
-                    // Migrate credentials from connection keychain to SSH keychain
+                    let mut migrated_password = conn.params.ssh_password.clone();
+                    let mut migrated_passphrase = conn.params.ssh_key_passphrase.clone();
                     if conn.params.save_in_keychain.unwrap_or(false) {
-                        if let Ok(ssh_pwd) = keychain_utils::get_ssh_password(&conn.id, &conn.name)
-                        {
-                            if !ssh_pwd.trim().is_empty() {
-                                keychain_utils::set_ssh_password(&new_ssh_id, &ssh_pwd).ok();
-                            }
+                        if migrated_password.is_none() {
+                            migrated_password =
+                                keychain_utils::get_ssh_password(&conn.id, &conn.name).ok();
                         }
-                        if let Ok(ssh_pass) =
-                            keychain_utils::get_ssh_key_passphrase(&conn.id, &conn.name)
+                        if migrated_passphrase.is_none() {
+                            migrated_passphrase =
+                                keychain_utils::get_ssh_key_passphrase(&conn.id, &conn.name).ok();
+                        }
+                        if let Some(password) = migrated_password
+                            .as_deref()
+                            .filter(|value| !value.is_empty())
                         {
-                            if !ssh_pass.trim().is_empty() {
-                                keychain_utils::set_ssh_key_passphrase(&new_ssh_id, &ssh_pass).ok();
-                            }
+                            changes.push(CredentialChange {
+                                account: format!("{new_ssh_id}:ssh"),
+                                value: Some(password.to_string()),
+                            });
+                        }
+                        if let Some(passphrase) = migrated_passphrase
+                            .as_deref()
+                            .filter(|value| !value.is_empty())
+                        {
+                            changes.push(CredentialChange {
+                                account: format!("{new_ssh_id}:ssh_passphrase"),
+                                value: Some(passphrase.to_string()),
+                            });
                         }
                     }
 
@@ -1777,13 +1975,17 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
                         } else {
                             "password".to_string()
                         }),
-                        password: None,
+                        password: (!conn.params.save_in_keychain.unwrap_or(false))
+                            .then_some(migrated_password.clone())
+                            .flatten(),
                         key_file: if key_file.is_empty() {
                             None
                         } else {
                             Some(key_file.clone())
                         },
-                        key_passphrase: None,
+                        key_passphrase: (!conn.params.save_in_keychain.unwrap_or(false))
+                            .then_some(migrated_passphrase.clone())
+                            .flatten(),
                         allow_passphrase_prompt: None,
                         save_in_keychain: conn.params.save_in_keychain,
                     };
@@ -1793,9 +1995,7 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
                     new_ssh_id
                 };
 
-                // Update connection to reference the SSH connection
                 conn.params.ssh_connection_id = Some(ssh_id);
-                // Clear old embedded SSH params
                 conn.params.ssh_host = None;
                 conn.params.ssh_port = None;
                 conn.params.ssh_user = None;
@@ -1804,17 +2004,38 @@ async fn migrate_ssh_connections<R: Runtime>(app: &AppHandle<R>) -> Result<(), S
                 conn.params.ssh_key_passphrase = None;
             }
         }
-
-        migrated_connections.push(conn);
     }
-
-    // Save migrated SSH connections
     let ssh_json = serde_json::to_string_pretty(&ssh_connections).map_err(|e| e.to_string())?;
-    fs::write(ssh_path, ssh_json).map_err(|e| e.to_string())?;
-
-    // Save migrated connections using new format (preserving groups)
-    conn_file.connections = migrated_connections;
-    save_connections_and_invalidate(app, &conn_path, &conn_file)?;
+    let store = KeyringCredentialStore;
+    let undo = credential_store::apply_changes(&store, keychain_utils::SERVICE_NAME, &changes)
+        .map_err(|error| match ConnectionWriteError::from(error) {
+            ConnectionWriteError::Failed { message } => message,
+            ConnectionWriteError::RecoveryRequired { message, .. } => message,
+            ConnectionWriteError::RevisionConflict { .. } => unreachable!(),
+        })?;
+    if let Err(error) = persistence::atomic_write(&ssh_path, ssh_json.as_bytes()) {
+        return match credential_store::rollback_changes(&store, &undo) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!(
+                "Recovery required after SSH migration write failure: {error}; {rollback}"
+            )),
+        };
+    }
+    if let Err(error) = lock.save(&mut conn_file) {
+        let restore = restore_file_contents(&ssh_path, previous_ssh_content.as_deref());
+        let rollback = credential_store::rollback_changes(&store, &undo);
+        return match (restore, rollback) {
+            (Ok(()), Ok(())) => Err(error),
+            (restore, rollback) => Err(format!(
+                "Recovery required after connection migration commit failure: {error}; SSH restore: {}; credential rollback: {}",
+                restore.err().unwrap_or_default(),
+                rollback.err().unwrap_or_default()
+            )),
+        };
+    }
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    drop(lock);
 
     eprintln!(
         "[Migration] Successfully migrated {} SSH connections",
@@ -2196,9 +2417,7 @@ fn validate_k8s_connection_paths(k8s: &K8sConnectionInput) -> Result<(), String>
 }
 
 /// Load K8s connections synchronously from the config file.
-fn load_k8s_connections_sync<R: Runtime>(
-    app: &AppHandle<R>,
-) -> Result<Vec<K8sConnection>, String> {
+fn load_k8s_connections_sync<R: Runtime>(app: &AppHandle<R>) -> Result<Vec<K8sConnection>, String> {
     let path = get_k8s_config_path(app)?;
     if !path.exists() {
         return Ok(vec![]);
@@ -2228,8 +2447,7 @@ pub async fn get_k8s_connections<R: Runtime>(
         return Ok(vec![]);
     }
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let connections: Vec<K8sConnection> =
-        serde_json::from_str(&content).unwrap_or_default();
+    let connections: Vec<K8sConnection> = serde_json::from_str(&content).unwrap_or_default();
     Ok(connections)
 }
 
@@ -2261,8 +2479,7 @@ pub async fn save_k8s_connection<R: Runtime>(
     };
 
     connections.push(connection.clone());
-    let json =
-        serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())?;
 
     Ok(connection)
@@ -2301,8 +2518,7 @@ pub async fn update_k8s_connection<R: Runtime>(
     };
 
     connections[idx] = connection.clone();
-    let json =
-        serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())?;
 
     Ok(connection)
@@ -2322,8 +2538,7 @@ pub async fn delete_k8s_connection<R: Runtime>(
     };
 
     connections.retain(|c| c.id != id);
-    let json =
-        serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string_pretty(&connections).map_err(|e| e.to_string())?;
     fs::write(&path, json).map_err(|e| e.to_string())?;
 
     Ok(())
@@ -2504,10 +2719,7 @@ pub async fn expand_k8s_connection_params<R: Runtime>(
     {
         let tunnels = crate::k8s_tunnel::get_tunnels().lock().unwrap();
         if let Some(tunnel) = tunnels.get(&map_key) {
-            log::debug!(
-                "Reusing existing K8s tunnel on port {}",
-                tunnel.local_port
-            );
+            log::debug!("Reusing existing K8s tunnel on port {}", tunnel.local_port);
             let mut new_params = params.clone();
             new_params.k8s_enabled = Some(false);
             new_params.host = Some("127.0.0.1".to_string());
@@ -2564,8 +2776,7 @@ async fn get_k8s_connection_by_id<R: Runtime>(
         return Err(format!("K8s connection with ID {} not found", k8s_id));
     }
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    let connections: Vec<K8sConnection> =
-        serde_json::from_str(&content).unwrap_or_default();
+    let connections: Vec<K8sConnection> = serde_json::from_str(&content).unwrap_or_default();
     connections
         .into_iter()
         .find(|c| c.id == k8s_id)
@@ -2810,7 +3021,10 @@ mod tests {
 
         let resolved = resolve_connection_params(&params);
         crate::drivers::registry::set_local_path_driver(driver, false);
-        assert_eq!(resolved.expect("resolve").database.primary(), "/tmp/my data.db");
+        assert_eq!(
+            resolved.expect("resolve").database.primary(),
+            "/tmp/my data.db"
+        );
     }
 
     #[test]
@@ -2829,6 +3043,91 @@ mod tests {
         assert_eq!(persisted.connection_uri_in_keychain, Some(true));
         assert!(!json.contains(sentinel));
         assert!(!json.contains("fixture-password"));
+    }
+
+    #[test]
+    fn 누락되거나_오래된_revision은_현재값을_돌려주는_충돌이다() {
+        // given
+        let current_revision = "current-revision";
+
+        // when
+        let missing = require_expected_revision("fixture-id", None, current_revision);
+        let stale = require_expected_revision("fixture-id", Some("old-revision"), current_revision);
+        let matching =
+            require_expected_revision("fixture-id", Some(current_revision), current_revision);
+
+        // then
+        assert!(matches!(
+            missing,
+            Err(ConnectionWriteError::RevisionConflict {
+                connection_id,
+                current_revision: revision,
+            }) if connection_id == "fixture-id" && revision == current_revision
+        ));
+        assert!(matches!(
+            stale,
+            Err(ConnectionWriteError::RevisionConflict {
+                connection_id,
+                current_revision: revision,
+            }) if connection_id == "fixture-id" && revision == current_revision
+        ));
+        assert!(matching.is_ok());
+    }
+
+    #[test]
+    fn 엔트라에서_sql_인증으로_바꿀_때_명시적으로_지운_extra를_비운다() {
+        // given
+        let mut entra = base_params();
+        entra.driver = "sqlserver-plus".to_string();
+        entra.ssl_mode = Some("verify-full".to_string());
+        entra.extra.extend([
+            ("auth_mode".to_string(), "entra_user".to_string()),
+            ("auth_source".to_string(), "azure_cli".to_string()),
+            ("tenant_id".to_string(), "synthetic-tenant".to_string()),
+        ]);
+        let mut sql_password = entra.clone();
+        sql_password.extra.clear();
+        sql_password.username = Some("sql-user".to_string());
+        sql_password.password = Some("synthetic-password".to_string());
+
+        // when
+        let prepared = prepare_connection_update_params(&entra, &sql_password);
+
+        // then
+        assert!(prepared.params_to_persist.extra.is_empty());
+        assert!(prepared.params_to_save.extra.is_empty());
+        assert_eq!(
+            prepared.params_to_persist.username.as_deref(),
+            Some("sql-user")
+        );
+        assert_eq!(
+            prepared.params_to_persist.ssl_mode.as_deref(),
+            Some("verify-full")
+        );
+    }
+
+    #[test]
+    fn 비밀번호만_수정하면_불러온_인증_extra와_tls를_유지한다() {
+        // given
+        let mut entra = base_params();
+        entra.driver = "sqlserver-plus".to_string();
+        entra.ssl_mode = Some("verify-full".to_string());
+        entra.extra.extend([
+            ("auth_mode".to_string(), "entra_user".to_string()),
+            ("auth_source".to_string(), "azure_cli".to_string()),
+            ("tenant_id".to_string(), "synthetic-tenant".to_string()),
+        ]);
+        let mut password_only = entra.clone();
+        password_only.password = Some("synthetic-password".to_string());
+
+        // when
+        let prepared = prepare_connection_update_params(&entra, &password_only);
+
+        // then
+        assert_eq!(prepared.params_to_persist.extra, entra.extra);
+        assert_eq!(prepared.params_to_persist.ssl_mode, entra.ssl_mode);
+        assert_eq!(prepared.params_to_save.extra, entra.extra);
+        assert_eq!(prepared.params_to_save.ssl_mode, entra.ssl_mode);
     }
 
     #[test]
@@ -2919,6 +3218,7 @@ mod tests {
     fn saved_conn(id: &str, password: Option<&str>, save_in_keychain: bool) -> SavedConnection {
         SavedConnection {
             id: id.to_string(),
+            revision: String::new(),
             name: "Test".to_string(),
             params: ConnectionParams {
                 password: password.map(|p| p.to_string()),
@@ -2951,6 +3251,7 @@ mod tests {
 
         let existing = SavedConnection {
             id: "conn-1".to_string(),
+            revision: String::new(),
             name: "Old Name".to_string(),
             params: base_params(),
             group_id: Some("group-a".to_string()),
@@ -2958,7 +3259,9 @@ mod tests {
             detect_json_in_text_columns: None,
             appearance: Some(ConnectionAppearance {
                 accent_color: Some("#ff0000".to_string()),
-                icon: Some(IconOverride::Emoji { value: "🐘".to_string() }),
+                icon: Some(IconOverride::Emoji {
+                    value: "🐘".to_string(),
+                }),
             }),
             tag_ids: None,
             environment: None,
@@ -2969,6 +3272,7 @@ mod tests {
 
         let updated = SavedConnection {
             id: existing.id.clone(),
+            revision: String::new(),
             name: "New Name".to_string(),
             params: base_params(),
             group_id: existing.group_id.clone(),
@@ -2979,15 +3283,22 @@ mod tests {
             environment: None,
         };
 
-        let app = updated.appearance.as_ref().expect("appearance must be preserved");
+        let app = updated
+            .appearance
+            .as_ref()
+            .expect("appearance must be preserved");
         assert_eq!(app.accent_color.as_deref(), Some("#ff0000"));
         assert!(matches!(&app.icon, Some(IconOverride::Emoji { value }) if value == "🐘"));
     }
 
     /// Helper: build a minimal ConnectionsFile with one connection.
-    fn one_conn_file(id: &str, appearance: Option<crate::models::ConnectionAppearance>) -> ConnectionsFile {
+    fn one_conn_file(
+        id: &str,
+        appearance: Option<crate::models::ConnectionAppearance>,
+    ) -> ConnectionsFile {
         let conn = SavedConnection {
             id: id.to_string(),
+            revision: String::new(),
             name: "Test".to_string(),
             params: base_params(),
             group_id: None,
@@ -2998,6 +3309,7 @@ mod tests {
             environment: None,
         };
         ConnectionsFile {
+            revision: String::new(),
             groups: vec![],
             connections: vec![conn],
             tags: vec![],
@@ -3011,12 +3323,17 @@ mod tests {
         let mut file = one_conn_file("conn-1", None);
         let new_appearance = ConnectionAppearance {
             accent_color: Some("#00ff00".to_string()),
-            icon: Some(IconOverride::Emoji { value: "🦀".to_string() }),
+            icon: Some(IconOverride::Emoji {
+                value: "🦀".to_string(),
+            }),
         };
 
         set_appearance_impl(&mut file, "conn-1", Some(new_appearance)).unwrap();
 
-        let app = file.connections[0].appearance.as_ref().expect("appearance must be set");
+        let app = file.connections[0]
+            .appearance
+            .as_ref()
+            .expect("appearance must be set");
         assert_eq!(app.accent_color.as_deref(), Some("#00ff00"));
         assert!(matches!(&app.icon, Some(IconOverride::Emoji { value }) if value == "🦀"));
     }
@@ -3027,7 +3344,9 @@ mod tests {
 
         let existing_appearance = ConnectionAppearance {
             accent_color: Some("#ff0000".to_string()),
-            icon: Some(IconOverride::Pack { id: "server".to_string() }),
+            icon: Some(IconOverride::Pack {
+                id: "server".to_string(),
+            }),
         };
         let mut file = one_conn_file("conn-2", Some(existing_appearance));
 
@@ -3320,10 +3639,7 @@ mod tests {
     mod apply_inline_ssh_secret_fallback_tests {
         use super::*;
 
-        fn params_with_ssh(
-            password: Option<&str>,
-            passphrase: Option<&str>,
-        ) -> ConnectionParams {
+        fn params_with_ssh(password: Option<&str>, passphrase: Option<&str>) -> ConnectionParams {
             ConnectionParams {
                 ssh_password: password.map(|p| p.to_string()),
                 ssh_key_passphrase: passphrase.map(|p| p.to_string()),
@@ -3334,8 +3650,7 @@ mod tests {
         #[test]
         fn fills_both_secrets_from_saved_params() {
             let params = params_with_ssh(Some("pwd"), Some("phrase"));
-            let (password, passphrase) =
-                apply_inline_ssh_secret_fallback(None, None, &params);
+            let (password, passphrase) = apply_inline_ssh_secret_fallback(None, None, &params);
             assert_eq!(password, Some("pwd".to_string()));
             assert_eq!(passphrase, Some("phrase".to_string()));
         }
@@ -3355,8 +3670,7 @@ mod tests {
         #[test]
         fn blank_saved_secrets_are_ignored() {
             let params = params_with_ssh(Some("   "), Some(""));
-            let (password, passphrase) =
-                apply_inline_ssh_secret_fallback(None, None, &params);
+            let (password, passphrase) = apply_inline_ssh_secret_fallback(None, None, &params);
             assert_eq!(password, None);
             assert_eq!(passphrase, None);
         }
@@ -3364,11 +3678,8 @@ mod tests {
         #[test]
         fn fills_only_missing_secret() {
             let params = params_with_ssh(Some("saved_pwd"), Some("saved_phrase"));
-            let (password, passphrase) = apply_inline_ssh_secret_fallback(
-                Some("request_pwd".to_string()),
-                None,
-                &params,
-            );
+            let (password, passphrase) =
+                apply_inline_ssh_secret_fallback(Some("request_pwd".to_string()), None, &params);
             assert_eq!(password, Some("request_pwd".to_string()));
             assert_eq!(passphrase, Some("saved_phrase".to_string()));
         }
@@ -3734,7 +4045,9 @@ mod tests {
 
             {
                 let remaining = state.handles.lock().unwrap();
-                let slot = remaining.get("conn-1").expect("slot kept while B in flight");
+                let slot = remaining
+                    .get("conn-1")
+                    .expect("slot kept while B in flight");
                 assert_eq!(slot.len(), 1);
                 assert!(Arc::ptr_eq(&slot[0], &handle_b));
             }
@@ -3910,7 +4223,10 @@ mod tests {
             group("drop", Some("root")),
         ];
         let subtree = crate::models::collect_group_subtree(&groups, "drop");
-        assert_eq!(subtree, std::collections::HashSet::from(["drop".to_string()]));
+        assert_eq!(
+            subtree,
+            std::collections::HashSet::from(["drop".to_string()])
+        );
         assert!(!subtree.contains("root"));
         assert!(!subtree.contains("keep"));
     }
@@ -3919,7 +4235,10 @@ mod tests {
     fn collect_group_subtree_for_unknown_id_is_singleton() {
         let groups = vec![group("a", None)];
         let subtree = crate::models::collect_group_subtree(&groups, "missing");
-        assert_eq!(subtree, std::collections::HashSet::from(["missing".to_string()]));
+        assert_eq!(
+            subtree,
+            std::collections::HashSet::from(["missing".to_string()])
+        );
     }
 
     #[test]
@@ -4243,13 +4562,7 @@ pub async fn fetch_blob_as_data_url<R: Runtime>(
     let params = resolve_connection_params_with_id(&expanded_params, &connection_id)?;
     let drv = driver_for_params(&params).await?;
     let wire = drv
-        .fetch_blob_as_data_url(
-            &params,
-            &table,
-            &col_name,
-            &pk_map,
-            schema.as_deref(),
-        )
+        .fetch_blob_as_data_url(&params, &table, &col_name, &pk_map, schema.as_deref())
         .await?;
     // Convert the BLOB wire format to a data: URL
     // wire format: "BLOB:<size>:<mime>:<base64>"
@@ -4979,7 +5292,10 @@ pub(crate) async fn read_in_open_transaction(
         .await?;
     // With no transaction open (a stale badge) only the savepoint lines fail; the read still runs.
     match results.into_iter().nth(1) {
-        Some(BatchStatementResult { result: Some(result), .. }) => Ok(result),
+        Some(BatchStatementResult {
+            result: Some(result),
+            ..
+        }) => Ok(result),
         Some(BatchStatementResult { error: Some(e), .. }) => Err(e),
         _ => Err("The statement produced no result".to_string()),
     }
@@ -5486,7 +5802,10 @@ pub async fn get_materialized_views<R: Runtime>(
     connection_id: String,
     schema: Option<String>,
 ) -> Result<Vec<crate::models::ViewInfo>, String> {
-    log::info!("Fetching materialized views for connection: {}", connection_id);
+    log::info!(
+        "Fetching materialized views for connection: {}",
+        connection_id
+    );
 
     let saved_conn = find_connection_by_id(&app, &connection_id)?;
     let expanded_params = expand_ssh_connection_params(&app, &saved_conn.params).await?;
@@ -5821,7 +6140,9 @@ pub async fn set_db_user_password<R: Runtime>(
 ) -> Result<(), String> {
     log::info!("Changing password for database user '{user}'@'{host}'");
     let (drv, params) = user_mgmt_context(&app, &connection_id).await?;
-    let result = drv.set_db_user_password(&params, &user, &host, &password).await;
+    let result = drv
+        .set_db_user_password(&params, &user, &host, &password)
+        .await;
     if let Err(e) = &result {
         log::error!("Failed to change password for '{user}'@'{host}': {e}");
     }
@@ -6156,34 +6477,29 @@ pub async fn create_connection_group<R: Runtime>(
     parent_id: Option<String>,
 ) -> Result<ConnectionGroup, String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path).unwrap_or_default();
-
-    if let Some(pid) = &parent_id {
-        if !file.groups.iter().any(|g| &g.id == pid) {
-            return Err(format!("Parent group with ID {} not found", pid));
+    update_connections_and_invalidate(&app, &path, |file| {
+        if let Some(parent) = &parent_id {
+            if !file.groups.iter().any(|group| &group.id == parent) {
+                return Err(format!("Parent group with ID {} not found", parent));
+            }
         }
-    }
-
-    let max_order = file
-        .groups
-        .iter()
-        .filter(|g| g.parent_id == parent_id)
-        .map(|g| g.sort_order)
-        .max()
-        .unwrap_or(-1);
-
-    let group = ConnectionGroup {
-        id: Uuid::new_v4().to_string(),
-        name,
-        collapsed: false,
-        sort_order: max_order + 1,
-        parent_id,
-    };
-
-    file.groups.push(group.clone());
-    save_connections_and_invalidate(&app, &path, &file)?;
-
-    Ok(group)
+        let max_order = file
+            .groups
+            .iter()
+            .filter(|group| group.parent_id == parent_id)
+            .map(|group| group.sort_order)
+            .max()
+            .unwrap_or(-1);
+        let group = ConnectionGroup {
+            id: Uuid::new_v4().to_string(),
+            name,
+            collapsed: false,
+            sort_order: max_order + 1,
+            parent_id,
+        };
+        file.groups.push(group.clone());
+        Ok(group)
+    })
 }
 
 /// Splits a `/`-separated group path into trimmed, non-empty segments.
@@ -6227,46 +6543,41 @@ pub async fn create_group_path<R: Runtime>(
     parent_id: Option<String>,
 ) -> Result<ConnectionGroup, String> {
     let path_cfg = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path_cfg).unwrap_or_default();
-
-    if let Some(pid) = &parent_id {
-        if !file.groups.iter().any(|g| &g.id == pid) {
-            return Err(format!("Parent group with ID {} not found", pid));
-        }
-    }
-
     let segments = parse_group_path(&path)?;
-    let mut current_parent = parent_id;
-    let mut last_created: Option<ConnectionGroup> = None;
-
-    for seg in segments {
-        if let Some(g) = find_child_group(&file.groups, &seg, &current_parent).cloned() {
-            current_parent = Some(g.id.clone());
-            last_created = Some(g);
-            continue;
+    update_connections_and_invalidate(&app, &path_cfg, |file| {
+        if let Some(pid) = &parent_id {
+            if !file.groups.iter().any(|g| &g.id == pid) {
+                return Err(format!("Parent group with ID {} not found", pid));
+            }
         }
-        let max_order = file
-            .groups
-            .iter()
-            .filter(|g| g.parent_id == current_parent)
-            .map(|g| g.sort_order)
-            .max()
-            .unwrap_or(-1);
-        let new_group = ConnectionGroup {
-            id: Uuid::new_v4().to_string(),
-            name: seg,
-            collapsed: false,
-            sort_order: max_order + 1,
-            parent_id: current_parent.clone(),
-        };
-        current_parent = Some(new_group.id.clone());
-        last_created = Some(new_group.clone());
-        file.groups.push(new_group);
-    }
-
-    save_connections_and_invalidate(&app, &path_cfg, &file)?;
-
-    last_created.ok_or_else(|| "Group path resolved to an empty hierarchy".to_string())
+        let mut current_parent = parent_id.clone();
+        let mut last_created: Option<ConnectionGroup> = None;
+        for segment in &segments {
+            if let Some(group) = find_child_group(&file.groups, segment, &current_parent).cloned() {
+                current_parent = Some(group.id.clone());
+                last_created = Some(group);
+                continue;
+            }
+            let max_order = file
+                .groups
+                .iter()
+                .filter(|group| group.parent_id == current_parent)
+                .map(|group| group.sort_order)
+                .max()
+                .unwrap_or(-1);
+            let new_group = ConnectionGroup {
+                id: Uuid::new_v4().to_string(),
+                name: segment.clone(),
+                collapsed: false,
+                sort_order: max_order + 1,
+                parent_id: current_parent.clone(),
+            };
+            current_parent = Some(new_group.id.clone());
+            last_created = Some(new_group.clone());
+            file.groups.push(new_group);
+        }
+        last_created.ok_or_else(|| "Group path resolved to an empty hierarchy".to_string())
+    })
 }
 
 #[tauri::command]
@@ -6278,28 +6589,23 @@ pub async fn update_connection_group<R: Runtime>(
     sort_order: Option<i32>,
 ) -> Result<ConnectionGroup, String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-
-    let group = file
-        .groups
-        .iter_mut()
-        .find(|g| g.id == id)
-        .ok_or_else(|| format!("Group with ID {} not found", id))?;
-
-    if let Some(n) = name {
-        group.name = n;
-    }
-    if let Some(c) = collapsed {
-        group.collapsed = c;
-    }
-    if let Some(o) = sort_order {
-        group.sort_order = o;
-    }
-
-    let updated = group.clone();
-    save_connections_and_invalidate(&app, &path, &file)?;
-
-    Ok(updated)
+    update_connections_and_invalidate(&app, &path, |file| {
+        let group = file
+            .groups
+            .iter_mut()
+            .find(|group| group.id == id)
+            .ok_or_else(|| format!("Group with ID {} not found", id))?;
+        if let Some(name) = name {
+            group.name = name;
+        }
+        if let Some(collapsed) = collapsed {
+            group.collapsed = collapsed;
+        }
+        if let Some(sort_order) = sort_order {
+            group.sort_order = sort_order;
+        }
+        Ok(group.clone())
+    })
 }
 /// Re-parent a group. Pass `Some(id)` to make it a child of that group,
 /// or `None` to make it a top-level root. Cycles are rejected.
@@ -6310,33 +6616,27 @@ pub async fn move_group_to_parent<R: Runtime>(
     parent_id: Option<String>,
 ) -> Result<ConnectionGroup, String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-
-    if !file.groups.iter().any(|g| g.id == id) {
-        return Err(format!("Group with ID {} not found", id));
-    }
-
-    if let Some(pid) = &parent_id {
-        if pid == &id {
-            return Err("A group cannot be its own parent".to_string());
+    update_connections_and_invalidate(&app, &path, |file| {
+        if !file.groups.iter().any(|group| group.id == id) {
+            return Err(format!("Group with ID {} not found", id));
         }
-        if !file.groups.iter().any(|g| &g.id == pid) {
-            return Err(format!("Parent group with ID {} not found", pid));
+        if let Some(parent) = &parent_id {
+            if parent == &id {
+                return Err("A group cannot be its own parent".to_string());
+            }
+            if !file.groups.iter().any(|group| &group.id == parent) {
+                return Err(format!("Parent group with ID {} not found", parent));
+            }
         }
-    }
-
-    reject_if_would_create_cycle(&file.groups, &id, parent_id.as_deref())?;
-
-    let group = file
-        .groups
-        .iter_mut()
-        .find(|g| g.id == id)
-        .expect("group existence checked above");
-    group.parent_id = parent_id;
-    let updated = group.clone();
-
-    save_connections_and_invalidate(&app, &path, &file)?;
-    Ok(updated)
+        reject_if_would_create_cycle(&file.groups, &id, parent_id.as_deref())?;
+        let group = file
+            .groups
+            .iter_mut()
+            .find(|group| group.id == id)
+            .expect("group existence checked above");
+        group.parent_id = parent_id;
+        Ok(group.clone())
+    })
 }
 
 /// Reject re-parenting that would create a cycle: `target` must not be a
@@ -6376,7 +6676,10 @@ pub(crate) fn reject_if_would_create_cycle(
             None => return Ok(()),
         }
     }
-    Err("Connection-group tree is deeper than the number of groups; refusing to modify it".to_string())
+    Err(
+        "Connection-group tree is deeper than the number of groups; refusing to modify it"
+            .to_string(),
+    )
 }
 
 #[tauri::command]
@@ -6385,27 +6688,27 @@ pub async fn delete_connection_group<R: Runtime>(
     id: String,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
+    update_connections_and_invalidate(&app, &path, |file| {
+        if !file.groups.iter().any(|g| g.id == id) {
+            return Err(format!("Group with ID {} not found", id));
+        }
 
-    // Ensure the group exists before we walk the tree.
-    if !file.groups.iter().any(|g| g.id == id) {
-        return Err(format!("Group with ID {} not found", id));
-    }
+        // Cascade delete: collect the target group and all of its descendants
+        // (transitively) so the entire subtree is removed. The caller only
+        // needs to specify the top-level group — every nested child group is
+        // deleted along with it. Connections belonging to any group in the
+        // subtree are removed as well.
+        let to_delete = crate::models::collect_group_subtree(&file.groups, &id);
 
-    // Cascade delete: collect the target group and all of its descendants
-    // (transitively) so the entire subtree is removed. The caller only
-    // needs to specify the top-level group — every nested child group is
-    // deleted along with it. Connections belonging to any group in the
-    // subtree are removed as well.
-    let to_delete = crate::models::collect_group_subtree(&file.groups, &id);
+        file.groups.retain(|g| !to_delete.contains(&g.id));
+        file.connections.retain(|c| {
+            !c.group_id
+                .as_ref()
+                .is_some_and(|gid| to_delete.contains(gid))
+        });
 
-    file.groups.retain(|g| !to_delete.contains(&g.id));
-    file.connections
-        .retain(|c| !c.group_id.as_ref().is_some_and(|gid| to_delete.contains(gid)));
-
-    save_connections_and_invalidate(&app, &path, &file)?;
-
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -6416,23 +6719,22 @@ pub async fn move_connection_to_group<R: Runtime>(
     sort_order: Option<i32>,
 ) -> Result<SavedConnection, String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-
-    let conn = file
-        .connections
-        .iter_mut()
-        .find(|c| c.id == connection_id)
-        .ok_or_else(|| format!("Connection with ID {} not found", connection_id))?;
-
-    conn.group_id = group_id;
-    if let Some(order) = sort_order {
-        conn.sort_order = Some(order);
-    }
-
-    let updated = conn.clone();
-    save_connections_and_invalidate(&app, &path, &file)?;
-
-    Ok(updated)
+    let (_, file) = update_connections_with_file_and_invalidate(&app, &path, |file| {
+        let connection = file
+            .connections
+            .iter_mut()
+            .find(|connection| connection.id == connection_id)
+            .ok_or_else(|| format!("Connection with ID {} not found", connection_id))?;
+        connection.group_id = group_id;
+        if let Some(order) = sort_order {
+            connection.sort_order = Some(order);
+        }
+        Ok(())
+    })?;
+    file.connections
+        .into_iter()
+        .find(|connection| connection.id == connection_id)
+        .ok_or_else(|| format!("Connection with ID {} not found", connection_id))
 }
 
 #[tauri::command]
@@ -6441,16 +6743,14 @@ pub async fn reorder_groups<R: Runtime>(
     group_orders: Vec<(String, i32)>,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-
-    for (group_id, order) in group_orders {
-        if let Some(group) = file.groups.iter_mut().find(|g| g.id == group_id) {
-            group.sort_order = order;
+    update_connections_and_invalidate(&app, &path, |file| {
+        for (group_id, order) in group_orders {
+            if let Some(group) = file.groups.iter_mut().find(|group| group.id == group_id) {
+                group.sort_order = order;
+            }
         }
-    }
-
-    save_connections_and_invalidate(&app, &path, &file)?;
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -6459,16 +6759,18 @@ pub async fn reorder_connections_in_group<R: Runtime>(
     connection_orders: Vec<(String, i32)>,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-
-    for (conn_id, order) in connection_orders {
-        if let Some(conn) = file.connections.iter_mut().find(|c| c.id == conn_id) {
-            conn.sort_order = Some(order);
+    update_connections_and_invalidate(&app, &path, |file| {
+        for (connection_id, order) in connection_orders {
+            if let Some(connection) = file
+                .connections
+                .iter_mut()
+                .find(|connection| connection.id == connection_id)
+            {
+                connection.sort_order = Some(order);
+            }
         }
-    }
-
-    save_connections_and_invalidate(&app, &path, &file)?;
-    Ok(())
+        Ok(())
+    })
 }
 
 #[tauri::command]
@@ -6524,8 +6826,7 @@ pub async fn export_connections_payload<R: Runtime>(
     // before password resolution so unselected credentials never leave the
     // keychain.
     if let Some(ids) = &connection_ids {
-        let selected: std::collections::HashSet<&str> =
-            ids.iter().map(String::as_str).collect();
+        let selected: std::collections::HashSet<&str> = ids.iter().map(String::as_str).collect();
         conn_file
             .connections
             .retain(|c| selected.contains(c.id.as_str()));
@@ -6651,14 +6952,30 @@ pub async fn apply_export_payload<R: Runtime>(
 ) -> Result<(), String> {
     let conn_path = get_config_path(&app)?;
     let ssh_path = get_ssh_config_path(&app)?;
+    let k8s_path = get_k8s_config_path(&app)?;
 
-    let mut current_file = persistence::load_connections_file(&conn_path).unwrap_or_default();
-    let mut current_ssh = if ssh_path.exists() {
-        let content = fs::read_to_string(&ssh_path).map_err(|e| e.to_string())?;
+    let lock = persistence::LockedConnectionsFile::open(&conn_path)?;
+    let mut current_file = lock.load()?;
+    let previous_ssh_content = match fs::read_to_string(&ssh_path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut current_ssh = if let Some(content) = previous_ssh_content.as_deref() {
         serde_json::from_str::<Vec<SshConnection>>(&content).unwrap_or_default()
     } else {
         Vec::new()
     };
+    let previous_k8s_content = match fs::read_to_string(&k8s_path) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    let mut current_k8s: Vec<K8sConnection> = previous_k8s_content
+        .as_deref()
+        .and_then(|content| serde_json::from_str(content).ok())
+        .unwrap_or_default();
+    let mut changes = Vec::new();
 
     let cache = app
         .state::<std::sync::Arc<crate::credential_cache::CredentialCache>>()
@@ -6707,26 +7024,35 @@ pub async fn apply_export_payload<R: Runtime>(
         // Handle passwords in keychain
         if new_conn.params.save_in_keychain.unwrap_or(false) {
             if let Some(uri) = runtime_connection_uri(&new_conn.params) {
-                let uri = uri.to_string();
-                keychain_utils::set_connection_uri(&new_conn.id, &uri)?;
-                credential_cache::set_connection_uri_cached(&cache, &new_conn.id, &uri);
+                changes.push(CredentialChange {
+                    account: format!("{}:connection_uri", new_conn.id),
+                    value: Some(uri.to_string()),
+                });
             }
             if let Some(pwd) = &new_conn.params.password {
-                keychain_utils::set_db_password(&new_conn.id, pwd)?;
-                credential_cache::set_db_password_cached(&cache, &new_conn.id, pwd);
+                if !pwd.is_empty() {
+                    changes.push(CredentialChange {
+                        account: format!("{}:db", new_conn.id),
+                        value: Some(pwd.clone()),
+                    });
+                }
             }
             if new_conn.params.ssh_enabled.unwrap_or(false) {
                 if let Some(ssh_pwd) = &new_conn.params.ssh_password {
-                    keychain_utils::set_ssh_password(&new_conn.id, ssh_pwd)?;
-                    credential_cache::set_ssh_password_cached(&cache, &new_conn.id, ssh_pwd);
+                    if !ssh_pwd.is_empty() {
+                        changes.push(CredentialChange {
+                            account: format!("{}:ssh", new_conn.id),
+                            value: Some(ssh_pwd.clone()),
+                        });
+                    }
                 }
                 if let Some(ssh_passphrase) = &new_conn.params.ssh_key_passphrase {
-                    keychain_utils::set_ssh_key_passphrase(&new_conn.id, ssh_passphrase)?;
-                    credential_cache::set_ssh_key_passphrase_cached(
-                        &cache,
-                        &new_conn.id,
-                        ssh_passphrase,
-                    );
+                    if !ssh_passphrase.is_empty() {
+                        changes.push(CredentialChange {
+                            account: format!("{}:ssh_passphrase", new_conn.id),
+                            value: Some(ssh_passphrase.clone()),
+                        });
+                    }
                 }
             }
             // Clear passwords from struct before saving to disk
@@ -6755,12 +7081,20 @@ pub async fn apply_export_payload<R: Runtime>(
     for mut new_ssh in payload.ssh_connections {
         if new_ssh.save_in_keychain.unwrap_or(false) {
             if let Some(pwd) = &new_ssh.password {
-                keychain_utils::set_ssh_password(&new_ssh.id, pwd)?;
-                credential_cache::set_ssh_password_cached(&cache, &new_ssh.id, pwd);
+                if !pwd.is_empty() {
+                    changes.push(CredentialChange {
+                        account: format!("{}:ssh", new_ssh.id),
+                        value: Some(pwd.clone()),
+                    });
+                }
             }
             if let Some(passphrase) = &new_ssh.key_passphrase {
-                keychain_utils::set_ssh_key_passphrase(&new_ssh.id, passphrase)?;
-                credential_cache::set_ssh_key_passphrase_cached(&cache, &new_ssh.id, passphrase);
+                if !passphrase.is_empty() {
+                    changes.push(CredentialChange {
+                        account: format!("{}:ssh_passphrase", new_ssh.id),
+                        value: Some(passphrase.clone()),
+                    });
+                }
             }
             // Clear passwords from struct before saving to disk
             new_ssh.password = None;
@@ -6774,14 +7108,8 @@ pub async fn apply_export_payload<R: Runtime>(
         }
     }
 
-    // Save files
-    save_connections_and_invalidate(&app, &conn_path, &current_file)?;
     let ssh_json = serde_json::to_string_pretty(&current_ssh).map_err(|e| e.to_string())?;
-    fs::write(ssh_path, ssh_json).map_err(|e| e.to_string())?;
-
-    // Merge K8s connections
-    let k8s_path = get_k8s_config_path(&app)?;
-    let mut current_k8s = load_k8s_connections_sync(&app)?;
+    let ssh_json = ssh_json.into_bytes();
     for new_k8s in payload.k8s_connections {
         if let Some(existing) = current_k8s.iter_mut().find(|k| k.id == new_k8s.id) {
             *existing = new_k8s;
@@ -6790,7 +7118,66 @@ pub async fn apply_export_payload<R: Runtime>(
         }
     }
     let k8s_json = serde_json::to_string_pretty(&current_k8s).map_err(|e| e.to_string())?;
-    fs::write(k8s_path, k8s_json).map_err(|e| e.to_string())?;
+    let k8s_json = k8s_json.into_bytes();
+
+    let store = KeyringCredentialStore;
+    let undo = credential_store::apply_changes(&store, keychain_utils::SERVICE_NAME, &changes)
+        .map_err(|error| match ConnectionWriteError::from(error) {
+            ConnectionWriteError::Failed { message } => message,
+            ConnectionWriteError::RecoveryRequired { message, .. } => message,
+            ConnectionWriteError::RevisionConflict { .. } => unreachable!(),
+        })?;
+    if let Err(error) = persistence::atomic_write(&ssh_path, &ssh_json) {
+        return match credential_store::rollback_changes(&store, &undo) {
+            Ok(()) => Err(error),
+            Err(rollback) => Err(format!(
+                "Recovery required after SSH import write failure: {error}; {rollback}"
+            )),
+        };
+    }
+    if let Err(error) = persistence::atomic_write(&k8s_path, &k8s_json) {
+        let restore = restore_file_contents(&ssh_path, previous_ssh_content.as_deref());
+        let rollback = credential_store::rollback_changes(&store, &undo);
+        return match (restore, rollback) {
+            (Ok(()), Ok(())) => Err(error),
+            (restore, rollback) => Err(format!(
+                "Recovery required after Kubernetes import write failure: {error}; SSH restore: {}; credential rollback: {}",
+                restore.err().unwrap_or_default(),
+                rollback.err().unwrap_or_default()
+            )),
+        };
+    }
+    if let Err(error) = lock.save(&mut current_file) {
+        let restore_ssh = restore_file_contents(&ssh_path, previous_ssh_content.as_deref());
+        let restore_k8s = restore_file_contents(&k8s_path, previous_k8s_content.as_deref());
+        let rollback = credential_store::rollback_changes(&store, &undo);
+        return match (restore_ssh, restore_k8s, rollback) {
+            (Ok(()), Ok(()), Ok(())) => Err(error),
+            (restore_ssh, restore_k8s, rollback) => Err(format!(
+                "Recovery required after connection import commit failure: {error}; SSH restore: {}; Kubernetes restore: {}; credential rollback: {}",
+                restore_ssh.err().unwrap_or_default(),
+                restore_k8s.err().unwrap_or_default(),
+                rollback.err().unwrap_or_default()
+            )),
+        };
+    }
+    app.state::<std::sync::Arc<crate::connection_cache::ConnectionCache>>()
+        .invalidate();
+    drop(lock);
+    for connection in &current_file.connections {
+        credential_cache::invalidate_all_for_connection(&cache, &connection.id);
+    }
 
     Ok(())
+}
+
+fn restore_file_contents(path: &std::path::Path, previous: Option<&str>) -> Result<(), String> {
+    match previous {
+        Some(contents) => persistence::atomic_write(path, contents.as_bytes()),
+        None => match fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        },
+    }
 }

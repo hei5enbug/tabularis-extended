@@ -6,6 +6,7 @@ mod tests {
     fn make_connection(id: &str, name: &str) -> SavedConnection {
         SavedConnection {
             id: id.to_string(),
+            revision: String::new(),
             name: name.to_string(),
             params: ConnectionParams::default(),
             group_id: None,

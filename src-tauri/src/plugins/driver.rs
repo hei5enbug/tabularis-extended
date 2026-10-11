@@ -1,6 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,9 +8,11 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::{mpsc, oneshot, OnceCell};
+use tokio::sync::{mpsc, oneshot, OnceCell, OwnedSemaphorePermit, Semaphore};
 
-use crate::drivers::driver_trait::{BatchProgressFn, DatabaseDriver, PluginManifest};
+use crate::drivers::driver_trait::{
+    BatchProgressFn, DatabaseDriver, ManagedQueryFailure, ManagedQueryHandle, PluginManifest,
+};
 use crate::models::{
     AiSchemaContext, BatchStatementResult, ColumnDefinition, ConnectionParams, DataTypeInfo,
     DbPrivilegeCatalog, DbUserInfo, ExplainQueryOutput, ForeignKey, Index, QueryResult,
@@ -74,7 +76,9 @@ fn plugin_session_states() -> &'static Mutex<HashMap<String, bool>> {
 
 fn remember_session_state(session_id: Option<&str>, in_transaction: bool) {
     if let Some(id) = session_id {
-        let mut states = plugin_session_states().lock().unwrap_or_else(|e| e.into_inner());
+        let mut states = plugin_session_states()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         states.insert(id.to_string(), in_transaction);
     }
 }
@@ -117,18 +121,80 @@ enum PluginCommand {
     Call(
         JsonRpcRequest,
         oneshot::Sender<Result<Value, PluginCallError>>,
+        RequestPermits,
+        u64,
     ),
-    /// Drop the pending entry for `id` because the caller stopped waiting
-    /// (timed out), and send the plugin a `cancel` notification for it.
-    /// Prevents an unbounded leak of orphaned response senders.
-    Cancel(u64),
+}
+
+struct PluginCancel {
+    id: u64,
+    generation: u64,
+    #[cfg(test)]
+    processed: Option<oneshot::Sender<()>>,
+}
+
+struct CancellationOnDrop {
+    sender: mpsc::UnboundedSender<PluginCancel>,
+    id: u64,
+    generation: u64,
+    armed: bool,
+}
+
+impl CancellationOnDrop {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancellationOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = self.sender.send(PluginCancel {
+                id: self.id,
+                generation: self.generation,
+                #[cfg(test)]
+                processed: None,
+            });
+        }
+    }
+}
+
+#[derive(Default)]
+struct RequestPermits {
+    _ordinary: Option<OwnedSemaphorePermit>,
+    _managed: Option<OwnedSemaphorePermit>,
+}
+
+struct PendingRequest {
+    response: oneshot::Sender<Result<Value, PluginCallError>>,
+    _permits: RequestPermits,
+    generation: u64,
+}
+
+fn remember_completed_id(id: u64, completed: &mut HashSet<u64>, order: &mut VecDeque<u64>) {
+    completed.insert(id);
+    order.push_back(id);
+    while order.len() > 256 {
+        if let Some(expired) = order.pop_front() {
+            completed.remove(&expired);
+        }
+    }
+}
+
+fn next_process_generation() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 pub struct PluginProcess {
     /// Plugin id used to resolve the configured call timeout.
     plugin_id: String,
     sender: mpsc::Sender<PluginCommand>,
+    cancel_sender: mpsc::UnboundedSender<PluginCancel>,
     next_id: AtomicU64,
+    generation: u64,
+    ordinary_slots: Option<Arc<Semaphore>>,
+    managed_slots: Option<Arc<Semaphore>>,
     shutdown_tx: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
     pub pid: Option<u32>,
     initialization_settings: Option<HashMap<String, Value>>,
@@ -142,6 +208,7 @@ impl PluginProcess {
         interpreter: Option<String>,
     ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel::<PluginCommand>(100);
+        let (cancel_tx, mut cancel_rx) = mpsc::unbounded_channel::<PluginCancel>();
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
         // Spawn the child process directly in the async context so that any
@@ -176,6 +243,10 @@ impl PluginProcess {
             })?;
 
         let pid = child.id();
+        let generation = next_process_generation();
+        let ordinary_slots = (plugin_id == "postgresql").then(|| Arc::new(Semaphore::new(3)));
+        let managed_slots = matches!(plugin_id.as_str(), "postgresql" | "sqlserver-plus")
+            .then(|| Arc::new(Semaphore::new(2)));
 
         // Hand the running child off to the management task.
         tokio::spawn(async move {
@@ -185,13 +256,13 @@ impl PluginProcess {
 
             let mut stdin = child.stdin.take().expect("Failed to open stdin");
             let stdout = child.stdout.take().expect("Failed to open stdout");
-            let mut reader = BufReader::new(stdout);
+            let reader = BufReader::new(stdout);
 
-            let mut pending_requests: HashMap<
-                u64,
-                oneshot::Sender<Result<Value, PluginCallError>>,
-            > = HashMap::new();
-            let mut line_buf = String::new();
+            let mut pending_requests: HashMap<u64, PendingRequest> = HashMap::new();
+            let mut pending_cancels: HashSet<(u64, u64)> = HashSet::new();
+            let mut completed_ids = HashSet::new();
+            let mut completed_order = VecDeque::new();
+            let mut lines = reader.lines();
 
             loop {
                 tokio::select! {
@@ -202,34 +273,30 @@ impl PluginProcess {
                     }
                     msg = rx.recv() => {
                         match msg {
-                            Some(PluginCommand::Call(req, resp_tx)) => {
+                            Some(PluginCommand::Call(req, resp_tx, permits, request_generation)) => {
                                 let id = req.id;
-                                pending_requests.insert(id, resp_tx);
+                                if pending_cancels.remove(&(id, request_generation)) {
+                                    pending_cancels.retain(|(pending_id, _)| *pending_id != id);
+                                    remember_completed_id(id, &mut completed_ids, &mut completed_order);
+                                    let _ = resp_tx.send(Err(PluginCallError::Transport(
+                                        "REQUEST_CANCELLED_BEFORE_DISPATCH".to_string(),
+                                    )));
+                                    drop(permits);
+                                } else {
+                                    pending_requests.insert(id, PendingRequest {
+                                        response: resp_tx,
+                                        _permits: permits,
+                                        generation: request_generation,
+                                    });
 
-                                let mut req_str = serde_json::to_string(&req).unwrap();
-                                req_str.push('\n');
+                                    let mut req_str = serde_json::to_string(&req).unwrap();
+                                    req_str.push('\n');
 
-                                if let Err(e) = stdin.write_all(req_str.as_bytes()).await {
-                                    log::error!("Failed to write to plugin stdin: {}", e);
-                                    if let Some(tx) = pending_requests.remove(&id) {
-                                        let _ = tx.send(Err(format!("Plugin communication error: {}", e).into()));
-                                    }
-                                }
-                            }
-                            Some(PluginCommand::Cancel(id)) => {
-                                // Caller timed out; drop the orphaned sender so
-                                // pending_requests does not grow without bound.
-                                // If it was still pending, ask the plugin to stop
-                                // the work too, so e.g. a SQL statement does not
-                                // keep running on the server after the error.
-                                if pending_requests.remove(&id).is_some() {
-                                    let line = cancel_notification_line(id);
-                                    if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                                        log::warn!(
-                                            "Failed to send cancel for plugin request {}: {}",
-                                            id,
-                                            e
-                                        );
+                                    if let Err(e) = stdin.write_all(req_str.as_bytes()).await {
+                                        log::error!("Failed to write to plugin stdin: {}", e);
+                                        if let Some(entry) = pending_requests.remove(&id) {
+                                            let _ = entry.response.send(Err(format!("Plugin communication error: {}", e).into()));
+                                        }
                                     }
                                 }
                             }
@@ -241,29 +308,50 @@ impl PluginProcess {
                             }
                         }
                     }
-                    line_result = reader.read_line(&mut line_buf) => {
-                        match line_result {
-                            Ok(0) => {
-                                log::error!("Plugin process exited unexpectedly");
-                                break;
+                    Some(cancel) = cancel_rx.recv() => {
+                        if pending_requests
+                            .get(&cancel.id)
+                            .map(|entry| entry.generation == cancel.generation)
+                            .unwrap_or(false)
+                        {
+                            let line = cancel_notification_line(cancel.id);
+                            if let Err(error) = stdin.write_all(line.as_bytes()).await {
+                                log::warn!("Failed to send cancel for plugin request {}: {}", cancel.id, error);
                             }
-                            Ok(_) => {
-                                match serde_json::from_str::<JsonRpcResponse>(&line_buf) {
+                        } else if !completed_ids.contains(&cancel.id) {
+                            pending_cancels.insert((cancel.id, cancel.generation));
+                        }
+                        #[cfg(test)]
+                        if let Some(processed) = cancel.processed {
+                            let _ = processed.send(());
+                        }
+                    }
+                    line_result = lines.next_line() => {
+                        match line_result {
+                            Ok(Some(line)) => {
+                                match serde_json::from_str::<JsonRpcResponse>(&line) {
                                     Ok(JsonRpcResponse::Success { result, id, .. }) => {
-                                        if let Some(tx) = pending_requests.remove(&id) {
-                                            let _ = tx.send(Ok(result));
+                                        if let Some(entry) = pending_requests.remove(&id) {
+                                            let _ = entry.response.send(Ok(result));
+                                            remember_completed_id(id, &mut completed_ids, &mut completed_order);
+                                            pending_cancels.retain(|(pending_id, _)| *pending_id != id);
                                         }
                                     }
                                     Ok(JsonRpcResponse::Error { error, id, .. }) => {
-                                        if let Some(tx) = pending_requests.remove(&id) {
-                                            let _ = tx.send(Err(PluginCallError::Remote(error)));
+                                        if let Some(entry) = pending_requests.remove(&id) {
+                                            let _ = entry.response.send(Err(PluginCallError::Remote(error)));
+                                            remember_completed_id(id, &mut completed_ids, &mut completed_order);
+                                            pending_cancels.retain(|(pending_id, _)| *pending_id != id);
                                         }
                                     }
                                     Err(e) => {
                                         log::error!("Failed to parse plugin response: {}", e);
                                     }
                                 }
-                                line_buf.clear();
+                            }
+                            Ok(None) => {
+                                log::error!("Plugin process stdout closed");
+                                break;
                             }
                             Err(e) => {
                                 log::error!("Failed to read from plugin stdout: {}", e);
@@ -278,7 +366,11 @@ impl PluginProcess {
         Ok(Self {
             plugin_id,
             sender: tx,
+            cancel_sender: cancel_tx,
             next_id: AtomicU64::new(1),
+            generation,
+            ordinary_slots,
+            managed_slots,
             shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
             pid,
             initialization_settings: None,
@@ -290,6 +382,166 @@ impl PluginProcess {
         let mut guard = self.shutdown_tx.lock().await;
         if let Some(tx) = guard.take() {
             let _ = tx.send(());
+        }
+    }
+
+    async fn request_permits(
+        &self,
+        managed: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<RequestPermits, PluginCallError> {
+        async fn acquire(
+            slots: Arc<Semaphore>,
+            deadline: Option<tokio::time::Instant>,
+        ) -> Result<OwnedSemaphorePermit, PluginCallError> {
+            if let Some(deadline) = deadline {
+                tokio::time::timeout_at(deadline, slots.acquire_owned())
+                    .await
+                    .map_err(|_| PluginCallError::Transport("PLUGIN_CALL_TIMEOUT".to_string()))?
+                    .map_err(|_| PluginCallError::Transport("Plugin process stopped".to_string()))
+            } else {
+                slots
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| PluginCallError::Transport("Plugin process stopped".to_string()))
+            }
+        }
+        let managed_permit = match (&self.managed_slots, managed) {
+            (Some(slots), true) => Some(acquire(slots.clone(), deadline).await?),
+            (None, true) => {
+                return Err(PluginCallError::Transport(
+                    "CANCELLATION_UNSUPPORTED".to_string(),
+                ));
+            }
+            _ => None,
+        };
+        let ordinary_permit = match &self.ordinary_slots {
+            Some(slots) => Some(acquire(slots.clone(), deadline).await?),
+            None => None,
+        };
+        Ok(RequestPermits {
+            _ordinary: ordinary_permit,
+            _managed: managed_permit,
+        })
+    }
+
+    async fn dispatch_request(
+        &self,
+        method: &str,
+        params: Value,
+        managed: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(u64, oneshot::Receiver<Result<Value, PluginCallError>>), PluginCallError> {
+        let permits = self.request_permits(managed, deadline).await?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params,
+            id,
+        };
+        let (tx, rx) = oneshot::channel();
+        if let Some(deadline) = deadline {
+            tokio::time::timeout_at(
+                deadline,
+                self.sender
+                    .send(PluginCommand::Call(req, tx, permits, self.generation)),
+            )
+            .await
+            .map_err(|_| PluginCallError::Transport("PLUGIN_CALL_TIMEOUT".to_string()))?
+            .map_err(|_| PluginCallError::Transport("Plugin process channel closed".to_string()))?;
+        } else {
+            self.sender
+                .send(PluginCommand::Call(req, tx, permits, self.generation))
+                .await
+                .map_err(|_| {
+                    PluginCallError::Transport("Plugin process channel closed".to_string())
+                })?;
+        }
+        Ok((id, rx))
+    }
+
+    async fn acquire_managed_permit(
+        &self,
+        cancel: &mut tokio::sync::watch::Receiver<bool>,
+        deadline: tokio::time::Instant,
+    ) -> Result<RequestPermits, ManagedQueryFailure> {
+        async fn wait_for_cancel(cancel: &mut tokio::sync::watch::Receiver<bool>) {
+            loop {
+                if *cancel.borrow() {
+                    return;
+                }
+                if cancel.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+
+        let managed = if let Some(slots) = &self.managed_slots {
+            Some(tokio::select! {
+                permit = slots.clone().acquire_owned() => permit
+                    .map_err(|_| ManagedQueryFailure::Transport("Plugin process stopped".to_string()))?,
+                _ = wait_for_cancel(cancel) => return Err(ManagedQueryFailure::Cancelled { server_termination_confirmed: false }),
+                _ = tokio::time::sleep_until(deadline) => return Err(ManagedQueryFailure::Transport("QUERY_TIMEOUT".to_string())),
+            })
+        } else {
+            return Err(ManagedQueryFailure::Transport(
+                "CANCELLATION_UNSUPPORTED".to_string(),
+            ));
+        };
+        let ordinary = if let Some(slots) = &self.ordinary_slots {
+            Some(tokio::select! {
+                permit = slots.clone().acquire_owned() => permit
+                    .map_err(|_| ManagedQueryFailure::Transport("Plugin process stopped".to_string()))?,
+                _ = wait_for_cancel(cancel) => return Err(ManagedQueryFailure::Cancelled { server_termination_confirmed: false }),
+                _ = tokio::time::sleep_until(deadline) => return Err(ManagedQueryFailure::Transport("QUERY_TIMEOUT".to_string())),
+            })
+        } else {
+            None
+        };
+        if *cancel.borrow() {
+            return Err(ManagedQueryFailure::Cancelled {
+                server_termination_confirmed: false,
+            });
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ManagedQueryFailure::Transport("QUERY_TIMEOUT".to_string()));
+        }
+        Ok(RequestPermits {
+            _ordinary: ordinary,
+            _managed: managed,
+        })
+    }
+
+    async fn dispatch_managed_request(
+        &self,
+        method: &str,
+        params: Value,
+        cancel: &mut tokio::sync::watch::Receiver<bool>,
+        deadline: tokio::time::Instant,
+    ) -> Result<(u64, oneshot::Receiver<Result<Value, PluginCallError>>), ManagedQueryFailure> {
+        let permits = self.acquire_managed_permit(cancel, deadline).await?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: method.to_string(),
+            params,
+            id,
+        };
+        let (response_tx, response_rx) = oneshot::channel();
+        let command = PluginCommand::Call(request, response_tx, permits, self.generation);
+        tokio::select! {
+            result = self.sender.send(command) => {
+                result.map_err(|_| ManagedQueryFailure::Transport("Plugin process channel closed".to_string()))?;
+                Ok((id, response_rx))
+            }
+            _ = async {
+                loop {
+                    if *cancel.borrow() { return; }
+                    if cancel.changed().await.is_err() { return; }
+                }
+            } => Err(ManagedQueryFailure::Cancelled { server_termination_confirmed: false }),
+            _ = tokio::time::sleep_until(deadline) => Err(ManagedQueryFailure::Transport("QUERY_TIMEOUT".to_string())),
         }
     }
 
@@ -318,7 +570,11 @@ impl PluginProcess {
                         )
                         .await
                     {
-                        log::warn!("Plugin initialization failed (pid {:?}): {}", self.pid, error);
+                        log::warn!(
+                            "Plugin initialization failed (pid {:?}): {}",
+                            self.pid,
+                            error
+                        );
                     }
                 })
                 .await;
@@ -334,41 +590,58 @@ impl PluginProcess {
         params: Value,
         timeout: Option<Duration>,
     ) -> Result<Value, PluginCallError> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0".to_string(),
-            method: method.to_string(),
-            params,
-            id,
-        };
-
-        let (tx, rx) = oneshot::channel();
-        self.sender
-            .send(PluginCommand::Call(req, tx))
+        let deadline = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+        let (id, rx) = self
+            .dispatch_request(method, params, false, deadline)
             .await
-            .map_err(|_| "Plugin process channel closed".to_string())?;
+            .map_err(|error| {
+                if matches!(&error, PluginCallError::Transport(message) if message == "PLUGIN_CALL_TIMEOUT") {
+                    format!(
+                        "Plugin call '{}' timed out after {}s",
+                        method,
+                        timeout.unwrap_or_default().as_secs()
+                    )
+                    .into()
+                } else {
+                    error
+                }
+            })?;
+        let mut cancellation = CancellationOnDrop {
+            sender: self.cancel_sender.clone(),
+            id,
+            generation: self.generation,
+            armed: true,
+        };
 
         let Some(timeout) = timeout else {
-            return rx
+            let result = rx
                 .await
                 .unwrap_or_else(|_| Err("Plugin process did not respond".to_string().into()));
+            cancellation.disarm();
+            return result;
         };
 
-        match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("Plugin process did not respond".to_string().into()),
-            Err(_) => {
-                // Tell the management task to drop the now-orphaned pending
-                // entry so it does not leak one slot per timeout.
-                let _ = self.sender.send(PluginCommand::Cancel(id)).await;
-                Err(format!(
-                    "Plugin call '{}' timed out after {}s",
-                    method,
-                    timeout.as_secs()
-                )
-                .into())
-            }
+        let (result, timed_out) =
+            match tokio::time::timeout_at(deadline.expect("timeout has a deadline"), rx).await {
+                Ok(Ok(result)) => (result, false),
+                Ok(Err(_)) => (
+                    Err("Plugin process did not respond".to_string().into()),
+                    false,
+                ),
+                Err(_) => (
+                    Err(format!(
+                        "Plugin call '{}' timed out after {}s",
+                        method,
+                        timeout.as_secs()
+                    )
+                    .into()),
+                    true,
+                ),
+            };
+        if !timed_out {
+            cancellation.disarm();
         }
+        result
     }
 }
 
@@ -940,6 +1213,121 @@ impl DatabaseDriver for RpcDriver {
         serde_json::from_value(res).map_err(|e| e.to_string())
     }
 
+    async fn start_managed_query(
+        &self,
+        params: &ConnectionParams,
+        query: &str,
+        limit: u32,
+        schema: Option<&str>,
+        mut cancel_before_dispatch: tokio::sync::watch::Receiver<bool>,
+        deadline: tokio::time::Instant,
+    ) -> Result<ManagedQueryHandle, ManagedQueryFailure> {
+        if !matches!(self.manifest.id.as_str(), "postgresql" | "sqlserver-plus") {
+            return Err(ManagedQueryFailure::Transport(
+                "CANCELLATION_UNSUPPORTED".to_string(),
+            ));
+        }
+        let (request_id, response) = self
+            .process
+            .dispatch_managed_request(
+                "execute_query",
+                json!({
+                    "params": params,
+                    "query": query,
+                    "limit": Some(limit),
+                    "page": 1,
+                    "schema": schema
+                }),
+                &mut cancel_before_dispatch,
+                deadline,
+            )
+            .await?;
+
+        let generation = self.process.generation;
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_sent = cancelled.clone();
+        let sender = self.process.cancel_sender.clone();
+        let request_cancel = Arc::new(move || {
+            if cancel_sent.load(Ordering::Acquire) {
+                return true;
+            }
+            let sent = sender
+                .send(PluginCancel {
+                    id: request_id,
+                    generation,
+                    #[cfg(test)]
+                    processed: None,
+                })
+                .is_ok();
+            if sent {
+                cancel_sent.store(true, Ordering::Release);
+            }
+            sent
+        });
+        let plugin_id = self.manifest.id.clone();
+        let result = Box::pin(async move {
+            match response.await {
+                Ok(Ok(value)) => serde_json::from_value(value)
+                    .map_err(|error| ManagedQueryFailure::Transport(error.to_string())),
+                Ok(Err(PluginCallError::Remote(error))) => {
+                    let cancellation_confirmed = cancelled.load(Ordering::Acquire)
+                        && match plugin_id.as_str() {
+                            "postgresql" => {
+                                error.code == -32603 && error.message.contains("E57014")
+                            }
+                            "sqlserver-plus" => {
+                                error.code == -32800
+                                    && error.message == "Query cancelled"
+                                    && error
+                                        .data
+                                        .as_ref()
+                                        .map(|data| {
+                                            data.get("kind").and_then(Value::as_str)
+                                                == Some("query_cancelled")
+                                                && data.get("request_id").and_then(Value::as_u64)
+                                                    == Some(request_id)
+                                                && data
+                                                    .get("server_termination_confirmed")
+                                                    .and_then(Value::as_bool)
+                                                    == Some(true)
+                                        })
+                                        .unwrap_or(false)
+                            }
+                            _ => false,
+                        };
+                    if cancellation_confirmed {
+                        Err(ManagedQueryFailure::Cancelled {
+                            server_termination_confirmed: true,
+                        })
+                    } else {
+                        Err(ManagedQueryFailure::Remote {
+                            code: error.code,
+                            message: error.message,
+                            data: error.data,
+                        })
+                    }
+                }
+                Ok(Err(PluginCallError::Transport(error))) => {
+                    if error == "REQUEST_CANCELLED_BEFORE_DISPATCH" {
+                        Err(ManagedQueryFailure::NotDispatched)
+                    } else {
+                        Err(ManagedQueryFailure::Transport(error))
+                    }
+                }
+                Err(_) => Err(ManagedQueryFailure::Transport(
+                    "Plugin process stopped".to_string(),
+                )),
+            }
+        });
+
+        Ok(ManagedQueryHandle {
+            request_id,
+            process_generation: generation,
+            result,
+            request_cancel,
+        })
+    }
+
     async fn execute_batch(
         &self,
         params: &ConnectionParams,
@@ -1074,7 +1462,9 @@ impl DatabaseDriver for RpcDriver {
     }
 
     async fn session_in_transaction(&self, session_id: &str) -> Option<bool> {
-        let states = plugin_session_states().lock().unwrap_or_else(|e| e.into_inner());
+        let states = plugin_session_states()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         states.get(session_id).copied()
     }
 
@@ -1694,24 +2084,27 @@ where
     let (tx, mut rx) = mpsc::channel::<PluginCommand>(8);
     tokio::spawn(async move {
         while let Some(command) = rx.recv().await {
-            if let PluginCommand::Call(request, response_tx) = command {
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    handle_request(request)
-                }))
-                .map_err(|_| "request assertion failed".to_string())
-                .and_then(|outcome| outcome);
-                let _ = response_tx.send(result.map_err(PluginCallError::Transport));
-            }
+            let PluginCommand::Call(request, response_tx, _permits, _generation) = command;
+            let result =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handle_request(request)))
+                    .map_err(|_| "request assertion failed".to_string())
+                    .and_then(|outcome| outcome);
+            let _ = response_tx.send(result.map_err(PluginCallError::Transport));
         }
     });
 
     let (shutdown_tx, _shutdown_rx) = oneshot::channel();
+    let (cancel_sender, _cancel_receiver) = mpsc::unbounded_channel();
     RpcDriver {
         manifest: test_manifest(),
         process: Arc::new(PluginProcess {
             plugin_id: "test-plugin".to_string(),
             sender: tx,
+            cancel_sender,
             next_id: AtomicU64::new(1),
+            generation: next_process_generation(),
+            ordinary_slots: None,
+            managed_slots: None,
             shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
             pid: None,
             initialization_settings: None,
@@ -2179,7 +2572,8 @@ mod tests {
 
     #[test]
     fn parse_session_error_reads_a_failed_statement_and_its_state() {
-        let failed = serde_json::json!({ "error": "deferred FK violated", "in_transaction": false });
+        let failed =
+            serde_json::json!({ "error": "deferred FK violated", "in_transaction": false });
         assert_eq!(
             parse_session_error(&failed),
             Some(("deferred FK violated".to_string(), false))
@@ -2440,14 +2834,7 @@ mod tests {
 
         let pk_map = HashMap::new();
         let result = driver
-            .save_blob_to_file(
-                &test_connection_params(),
-                "t",
-                "c",
-                &pk_map,
-                None,
-                "/tmp/x",
-            )
+            .save_blob_to_file(&test_connection_params(), "t", "c", &pk_map, None, "/tmp/x")
             .await;
 
         assert!(result.is_err());
@@ -2545,11 +2932,7 @@ mod tests {
         });
 
         let cols = driver
-            .get_materialized_view_columns(
-                &test_connection_params(),
-                "mv_sales",
-                Some("public"),
-            )
+            .get_materialized_view_columns(&test_connection_params(), "mv_sales", Some("public"))
             .await
             .expect("get_materialized_view_columns");
 
@@ -2581,11 +2964,7 @@ mod tests {
         });
 
         let def = driver
-            .get_materialized_view_definition(
-                &test_connection_params(),
-                "mv_sales",
-                Some("public"),
-            )
+            .get_materialized_view_definition(&test_connection_params(), "mv_sales", Some("public"))
             .await
             .expect("get_materialized_view_definition");
 
@@ -2645,6 +3024,7 @@ mod tests {
     #[tokio::test]
     async fn rpc_driver_map_inferred_type_uses_manifest_mappings() {
         let (tx, _rx) = mpsc::channel::<PluginCommand>(1);
+        let (cancel_sender, _cancel_receiver) = mpsc::unbounded_channel();
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
 
         let mut manifest = test_manifest();
@@ -2660,7 +3040,11 @@ mod tests {
             process: Arc::new(PluginProcess {
                 plugin_id: "test-plugin".to_string(),
                 sender: tx,
+                cancel_sender,
                 next_id: AtomicU64::new(1),
+                generation: next_process_generation(),
+                ordinary_slots: None,
+                managed_slots: None,
                 shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
                 pid: None,
                 initialization_settings: None,
@@ -2685,6 +3069,7 @@ mod tests {
     #[tokio::test]
     async fn rpc_driver_map_inferred_type_passthrough_without_mappings() {
         let (tx, _rx) = mpsc::channel::<PluginCommand>(1);
+        let (cancel_sender, _cancel_receiver) = mpsc::unbounded_channel();
         let (shutdown_tx, _shutdown_rx) = oneshot::channel();
 
         let driver = RpcDriver {
@@ -2692,7 +3077,11 @@ mod tests {
             process: Arc::new(PluginProcess {
                 plugin_id: "test-plugin".to_string(),
                 sender: tx,
+                cancel_sender,
                 next_id: AtomicU64::new(1),
+                generation: next_process_generation(),
+                ordinary_slots: None,
+                managed_slots: None,
                 shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
                 pid: None,
                 initialization_settings: None,

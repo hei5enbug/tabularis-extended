@@ -31,9 +31,7 @@ concurrency:
 
 jobs:
   build:
-    if: |-
-      (github.event.action == 'labeled' && github.event.label.name == 'preview') ||
-      (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'preview'))
+    if: github.repository == 'TabularisDB/tabularis' && ((github.event.action == 'labeled' && github.event.label.name == 'preview') || (github.event.action == 'synchronize' && contains(github.event.pull_request.labels.*.name, 'preview')))
     permissions:
       contents: read # artifacts only, the token can't touch releases
     uses: ./.github/workflows/build.yml

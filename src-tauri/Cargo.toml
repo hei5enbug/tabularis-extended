@@ -1,8 +1,8 @@
 [package]
-name = "tabularis"
-version = "0.27.0"
-description = "tabularis - A database manager for developers"
-authors = ["Debba"]
+name = "tabularis-extended"
+version = "0.27.0+extended.1"
+description = "Tabularis Extended - A database manager for developers"
+authors = ["Hei5enbug"]
 edition = "2021"
 rust-version = "1.77.2"
 
@@ -33,6 +33,7 @@ log = "0.4"
 tauri = { version = "2.10.2", features = ["protocol-asset", "devtools"] }
 tauri-plugin-log = "2"
 sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite", "mysql", "postgres", "tls-rustls-ring-native-roots", "chrono", "uuid", "rust_decimal", "json"] }
+sqlparser = { version = "=0.63.0", features = ["visitor"] }
 tokio = { version = "1.49.0", features = ["full"] }
 openssl = { version = "0.10", features = ["vendored"] }
 uuid = { version = "1.20.0", features = ["v4", "serde"] }

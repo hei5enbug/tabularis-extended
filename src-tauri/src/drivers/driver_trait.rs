@@ -1,7 +1,11 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sqlx::any::AnyConnectOptions;
 use sqlx::{AnyConnection, Connection};
 use std::str::FromStr;
@@ -20,6 +24,27 @@ use crate::models::{
 /// way). Kept Tauri-agnostic so drivers stay decoupled from the event layer;
 /// the command layer supplies a closure that emits a Tauri event.
 pub type BatchProgressFn = dyn Fn(usize, &BatchStatementResult) + Send + Sync;
+
+pub struct ManagedQueryHandle {
+    pub request_id: u64,
+    pub process_generation: u64,
+    pub result: Pin<Box<dyn Future<Output = Result<QueryResult, ManagedQueryFailure>> + Send>>,
+    pub request_cancel: Arc<dyn Fn() -> bool + Send + Sync>,
+}
+
+#[derive(Debug)]
+pub enum ManagedQueryFailure {
+    Remote {
+        code: i32,
+        message: String,
+        data: Option<Value>,
+    },
+    Transport(String),
+    NotDispatched,
+    Cancelled {
+        server_termination_confirmed: bool,
+    },
+}
 
 /// SQL dialect declaration used by the frontend statement splitter
 /// (`src/utils/sqlSplitter/`) to pick per-dialect tokenizer rules:
@@ -655,6 +680,20 @@ pub trait DatabaseDriver: Send + Sync {
         schema: Option<&str>,
     ) -> Result<QueryResult, String>;
 
+    async fn start_managed_query(
+        &self,
+        _params: &ConnectionParams,
+        _query: &str,
+        _limit: u32,
+        _schema: Option<&str>,
+        _cancel_before_dispatch: tokio::sync::watch::Receiver<bool>,
+        _deadline: tokio::time::Instant,
+    ) -> Result<ManagedQueryHandle, ManagedQueryFailure> {
+        Err(ManagedQueryFailure::Transport(
+            "CANCELLATION_UNSUPPORTED".to_string(),
+        ))
+    }
+
     /// Runs a sequence of statements that may depend on connection-local
     /// session state (`SET @var`, `LAST_INSERT_ID()`, `BEGIN`/`COMMIT`,
     /// `TEMPORARY TABLE`, `PREPARE`/`EXECUTE`). Built-in drivers override
@@ -963,9 +1002,7 @@ pub trait DatabaseDriver: Send + Sync {
 
     /// Returns the privilege keywords accepted by `apply_db_user_privileges`,
     /// split by scope, so the frontend renders the dialect's own catalog.
-    async fn get_db_privilege_catalog(
-        &self,
-    ) -> Result<crate::models::DbPrivilegeCatalog, String> {
+    async fn get_db_privilege_catalog(&self) -> Result<crate::models::DbPrivilegeCatalog, String> {
         Err("User management is not supported by this driver".into())
     }
 

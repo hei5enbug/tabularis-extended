@@ -1,6 +1,6 @@
 # Tabularis Extended implementation plan
 
-This document defines future implementation work. This commit changes documentation only.
+This document records the implementation contract and its acceptance criteria.
 The approved scope is the existing working setup plus saved-result paging, query cancellation, and query history.
 The coordinator owns this plan and the cross-repository contracts.
 
@@ -39,7 +39,8 @@ Non-goals:
 
 The three new capabilities initially target PostgreSQL and SQL Server Plus. Other drivers retain the existing
 MCP path. Their managed-query support requires a separate verified capability adapter.
-All numerical limits and fork identities below are proposed implementation decisions, not current capabilities.
+The limits and identities below define the implementation contract. Verification records distinguish completed
+checks from deployment actions that require an existing user profile or cloud environment.
 
 ## Evidence and behavior to preserve
 
@@ -258,7 +259,7 @@ Do not claim that an advertised service-protocol capability is verified merely b
 Use fork versions such as `0.27.0+extended.1`, matching all host version files, with a fork-owned release tag.
 Disable the official update feed in the fork until a separately signed fork feed is configured. The first release
 uses explicit artifact installation; it must not silently replace the app with an official build.
-Publish no release in this documentation-only task. Future releases require passing gates below, artifact hashes,
+Publish no release during this local implementation task. Future releases require passing gates below, artifact hashes,
 and a rollback test using the original app/profile. Keep signing keys and production configuration out of Git.
 
 ## Execution slices
@@ -295,16 +296,19 @@ evidence instead of repeating the same checks in each repository.
 
 Run narrow Rust tests for changed modules, then the frontend component/type checks and plugin API sync check.
 Use the repository's `pnpm` version, `pnpm typecheck`, `pnpm lint`, `pnpm build`, and
-`cargo test --manifest-path src-tauri/Cargo.toml --locked --lib` as applicable to implemented changes.
+`pnpm test:rust` as applicable to implemented changes. The Rust wrapper isolates the fork profile and plugin directory.
 Use separate build directories for concurrent workers. Run broader suites only for cross-surface changes or failures.
 
-All live validation remains SELECT-only. Do not run seed scripts, database-creating integration suites,
+The user authorized disposable Testcontainers fixtures on 2026-10-11. Those owned containers may create
+their test data and are removed after the run. This exception does not authorize changes to existing databases.
+All existing-database validation remains SELECT-only. Do not run inherited seed scripts or database-creating suites,
 DDL/DML, KILL, or administrative termination commands. Use recorded/fake driver fixtures for destructive and
 failure scenarios. Real cancellation uses protocol cancellation of an owned SELECT on an approved nonproduction
-connection; production connectivity checks use only `SELECT 1`. Adding a write-based test requires a new user decision.
+connection; production connectivity checks use only `SELECT 1`. Writes outside the disposable fixtures require
+a new user decision.
 
 The existing 14-connection smoke evidence and 239 custom-driver unit-test result are reusable only while their
-covered inputs remain unchanged. They do not prove this future fork's migration, paging, or cancellation.
+covered inputs remain unchanged. They do not prove this fork's migration, paging, or cancellation.
 Invalidate affected evidence after changing source, manifests, authentication, profile routing, or packaging.
 
 Stop release work on missing credentials, a source/archive mismatch, stale profile conflicts, incompatible

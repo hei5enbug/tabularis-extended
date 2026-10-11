@@ -26,6 +26,7 @@ mod tests {
     fn saved_connection(driver: &str, ssl_mode: Option<&str>) -> SavedConnection {
         SavedConnection {
             id: "conn-1".to_string(),
+            revision: String::new(),
             name: "test".to_string(),
             params: ConnectionParams {
                 driver: driver.to_string(),
@@ -219,6 +220,7 @@ mod tests {
         let dir = TempDir::new().expect("create temp dir");
         let path = dir.path().join("connections.json");
         let file = ConnectionsFile {
+            revision: String::new(),
             groups: Vec::new(),
             // Builtin "postgres" is always skipped, regardless of ssl_mode.
             connections: vec![saved_connection("postgres", Some("required"))],

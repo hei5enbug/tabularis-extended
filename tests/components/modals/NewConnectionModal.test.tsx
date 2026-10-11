@@ -253,6 +253,7 @@ function createInitialConnection(
 ): InitialConnection {
   return {
     id: "connection-1",
+    revision: "revision-1",
     name: "Existing K8s database",
     params: {
       driver: "mysql",
@@ -1664,4 +1665,125 @@ describe("NewConnectionModal extra_fields slot credential toggle", () => {
     ).toBe(false);
     expect(screen.getByTestId("plugin-extra")).toHaveTextContent("{}");
   });
+});
+
+function PluginPasswordToggle({ context }: SlotComponentProps) {
+  return <button type="button" onClick={() => context.setPasswordFieldHidden?.(true)}>plugin-password-only</button>;
+}
+
+function renderPasswordOnlyModal(connection: InitialConnection) {
+  const registry = registryWith({ pluginId: "sqlserver-plus", slot: "connection-modal.extra_fields", component: PluginPasswordToggle });
+  return render(<PluginSlotContext.Provider value={registry}><NewConnectionModal isOpen onClose={vi.fn()} initialConnection={connection} /></PluginSlotContext.Provider>);
+}
+
+describe("연결 revision과 비밀번호 전용 입력 제어", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(invoke).mockImplementation(async command => command === "list_databases" ? [] : "ok");
+    sshMocks.loadSshConnections.mockResolvedValue([]);
+    k8sMocks.loadK8sConnections.mockResolvedValue([]);
+    eventMocks.listen.mockResolvedValue(eventMocks.unlisten);
+  });
+
+  it("외부 목록의 revision이 바뀌어도 초안과 편집 시작 시 revision으로 저장합니다.", async () => {
+    // given
+    const connection = createInitialConnection({ username: "expected-user", password: "current-password", ssl_mode: "verify-full", extra: { auth_mode: "entra_user", tenant_id: "expected-tenant" } });
+    const view = renderModal(connection);
+    await waitFor(() => expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("expected-user"));
+    fireEvent.change(screen.getByPlaceholderText("newConnection.namePlaceholder"), { target: { value: "unsaved draft" } });
+    view.rerender(<NewConnectionModal isOpen onClose={vi.fn()} initialConnection={{ ...connection, name: "external name", revision: "revision-2", params: { ...connection.params, host: "external-host" } }} />);
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+    // then
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("update_connection", expect.objectContaining({ expectedRevision: "revision-1", name: "unsaved draft", params: expect.objectContaining({ username: "expected-user", password: "current-password", ssl_mode: "verify-full", extra: connection.params.extra, database: "database", driver: "mysql" }) })));
+  });
+
+  it("저장 충돌은 초안을 보존하고 자동 재시도 없이 다시 불러오기 동작을 제공합니다.", async () => {
+    // given
+    const connection = createInitialConnection({ username: "expected-user" });
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "get_connection_by_id") return connection;
+      if (command === "update_connection") throw { kind: "revisionConflict", connectionId: connection.id, currentRevision: "revision-2" };
+      return "ok";
+    });
+    renderModal(connection);
+    await waitFor(() => expect(screen.getByPlaceholderText("newConnection.namePlaceholder")).toHaveValue(connection.name));
+    fireEvent.change(screen.getByPlaceholderText("newConnection.namePlaceholder"), { target: { value: "keep this draft" } });
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+    // then
+    await waitFor(() => expect(screen.getByRole("button", { name: "newConnection.reloadLatest" })).toBeInTheDocument());
+    expect(screen.getByPlaceholderText("newConnection.namePlaceholder")).toHaveValue("keep this draft");
+    expect(screen.getByRole("button", { name: "newConnection.save" })).toBeDisabled();
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "update_connection")).toHaveLength(1);
+    expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "get_connection_by_id")).toHaveLength(1);
+  });
+
+  it("명시적으로 최신 설정을 다시 불러온 뒤에는 최신 비밀번호와 TLS 및 extra를 새 revision으로 저장합니다.", async () => {
+    // given
+    const original = createInitialConnection({ username: "old-user", password: "old-password" });
+    const latest = { ...original, name: "latest name", revision: "revision-2", params: { ...original.params, username: "new-user", password: "new-password", database: "new-database", ssl_mode: "verify-full", extra: { auth_mode: "entra_user", tenant_id: "new-tenant", entra_object_id: "new-object" } } };
+    let current = original;
+    vi.mocked(invoke).mockImplementation(async command => {
+      if (command === "get_connection_by_id") return current;
+      if (command === "update_connection" && current === original) throw { kind: "revisionConflict", connectionId: original.id, currentRevision: latest.revision };
+      return latest;
+    });
+    renderModal(original);
+    await waitFor(() => expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("old-user"));
+    fireEvent.click(screen.getByText("newConnection.save"));
+    await screen.findByRole("button", { name: "newConnection.reloadLatest" });
+    current = latest;
+    fireEvent.click(screen.getByRole("button", { name: "newConnection.reloadLatest" }));
+    await waitFor(() => expect(screen.getByPlaceholderText("newConnection.namePlaceholder")).toHaveValue("latest name"));
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+    // then
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("update_connection", expect.objectContaining({ expectedRevision: "revision-2", name: "latest name", params: expect.objectContaining(latest.params) })));
+  });
+
+  it("비밀번호만 숨기면 사용자 이름을 유지하고 빈 비밀번호를 명시해 저장합니다.", async () => {
+    // given
+    const connection = createInitialConnection({ username: "expected-user", password: "fixture-password", ssl_mode: "verify-full", extra: { auth_mode: "entra_user" } });
+    renderPasswordOnlyModal(connection);
+    await waitFor(() => expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("expected-user"));
+    fireEvent.click(screen.getByRole("button", { name: "plugin-password-only" }));
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+    // then
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("update_connection", expect.objectContaining({ params: expect.objectContaining({ username: "expected-user", password: "", ssl_mode: "verify-full", extra: { auth_mode: "entra_user" } }) })));
+    expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("expected-user");
+    expect(screen.queryByText("newConnection.password")).not.toBeInTheDocument();
+  });
+
+  it("드라이버를 바꾸면 비밀번호 전용 숨김 상태도 초기화합니다.", async () => {
+    // given
+    const connection = createInitialConnection({ username: "expected-user", password: "fixture-password" });
+    renderPasswordOnlyModal(connection);
+    await waitFor(() => expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("expected-user"));
+    fireEvent.click(screen.getByRole("button", { name: "plugin-password-only" }));
+    // when
+    fireEvent.change(screen.getByPlaceholderText("newConnection.connectionStringPlaceholder"), { target: { value: "postgres://new-user:new-password@localhost:5432/new-db" } });
+    // then
+    await waitFor(() => expect(screen.getByText("newConnection.password")).toBeInTheDocument());
+    expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("new-user");
+    expect(screen.getByPlaceholderText("newConnection.passwordPlaceholder")).toHaveValue("new-password");
+  });
+  it("저장 중 목록이 갱신되어도 도착한 revision 충돌을 초안에 표시합니다.", async () => {
+    // given
+    const connection = createInitialConnection({ username: "expected-user" });
+    const pending = createDeferred<unknown>();
+    vi.mocked(invoke).mockImplementation(async command => command === "get_connection_by_id" ? connection : command === "update_connection" ? pending.promise : "ok");
+    const view = renderModal(connection);
+    await waitFor(() => expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("expected-user"));
+    fireEvent.click(screen.getByText("newConnection.save"));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("update_connection", expect.anything()));
+    view.rerender(<NewConnectionModal isOpen onClose={vi.fn()} initialConnection={{ ...connection, revision: "revision-2" }} />);
+    // when
+    await act(async () => { pending.reject({ kind: "revisionConflict", connectionId: connection.id, currentRevision: "revision-2" }); });
+    // then
+    expect(screen.getByRole("button", { name: "newConnection.reloadLatest" })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("newConnection.usernamePlaceholder")).toHaveValue("expected-user");
+  });
+
 });

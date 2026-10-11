@@ -33,23 +33,22 @@ pub fn preview(
         .map(|(index, conn)| {
             let driver_installed = registered_ids.iter().any(|r| r == &conn.params.driver);
             let key = dup_key_existing(conn);
-            let status = if let Some((_, id, name)) =
-                existing_keys.iter().find(|(k, _, _)| k == &key)
-            {
-                ImportItemStatus::Duplicate {
-                    existing_id: id.clone(),
-                    existing_name: name.clone(),
-                }
-            } else if !driver_installed {
-                ImportItemStatus::Warnings {
-                    warnings: vec![format!(
-                        "Database driver \"{}\" is not installed",
-                        conn.params.driver
-                    )],
-                }
-            } else {
-                ImportItemStatus::Ready
-            };
+            let status =
+                if let Some((_, id, name)) = existing_keys.iter().find(|(k, _, _)| k == &key) {
+                    ImportItemStatus::Duplicate {
+                        existing_id: id.clone(),
+                        existing_name: name.clone(),
+                    }
+                } else if !driver_installed {
+                    ImportItemStatus::Warnings {
+                        warnings: vec![format!(
+                            "Database driver \"{}\" is not installed",
+                            conn.params.driver
+                        )],
+                    }
+                } else {
+                    ImportItemStatus::Ready
+                };
 
             let group_name = conn
                 .group_id
@@ -231,6 +230,7 @@ mod tests {
     fn conn(id: &str, name: &str, host: &str, db: &str, group_id: Option<&str>) -> SavedConnection {
         SavedConnection {
             id: id.into(),
+            revision: String::new(),
             name: name.into(),
             params: ConnectionParams {
                 driver: "postgres".into(),
@@ -277,7 +277,13 @@ mod tests {
             vec![group("g1", "Work", None)],
             vec![conn("c1", "Prod", "db.example.com", "app", Some("g1"))],
         );
-        let existing = vec![conn("existing", "Existing Prod", "db.example.com", "app", None)];
+        let existing = vec![conn(
+            "existing",
+            "Existing Prod",
+            "db.example.com",
+            "app",
+            None,
+        )];
         let preview = preview(&p, &existing, &["postgres".into()]);
 
         assert_eq!(preview.source_name, "Tabularis");

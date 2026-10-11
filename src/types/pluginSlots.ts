@@ -56,6 +56,8 @@ export interface SlotContext {
   isInsertion?: boolean;
   /** Plugin identifier for the target plugin (settings slot) */
   targetPluginId?: string;
+  passwordFieldHidden?: boolean;
+  setPasswordFieldHidden?: (hidden: boolean) => void;
   /** Arbitrary extra data a host component provides */
   [key: string]: unknown;
 }

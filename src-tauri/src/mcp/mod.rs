@@ -9,22 +9,27 @@ use crate::config::{
 use crate::credential_cache;
 use crate::drivers::driver_trait::{DatabaseDriver, SqlDialect};
 use crate::drivers::registry as driver_registry;
+#[cfg(test)]
 use crate::drivers::{mysql, postgres, sqlite};
 use crate::heartbeat;
-use crate::models::{ConnectionParams, K8sConnection, SshConnection};
+use crate::models::{ConnectionParams, K8sConnection, SavedConnection, SshConnection};
 use crate::paths;
 use crate::persistence;
 use crate::plugins;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 mod cooldown;
 pub mod install;
+mod managed_tools;
 mod output;
 pub mod preflight;
 pub mod protocol;
+mod query_manager;
+mod sql_gate;
+mod stdio;
 use cooldown::{DISABLE_CHECK_COOLDOWN, RELOAD_COOLDOWN};
 use output::{OutputFormatError, ToolOutputFormat};
 use protocol::*;
@@ -314,15 +319,13 @@ async fn resolve_db_params(
     Ok((conn, db_params))
 }
 
-/// Populate the driver registry for the standalone MCP subprocess: the three
+/// Populate the driver registry for the standalone MCP subprocess: the two
 /// built-in drivers plus any installed plugin drivers, honoring the user's
 /// `active_external_drivers` preference. Without this, MCP can only reach
-/// mysql/postgres/sqlite connections — every other driver fails with
+/// mysql/sqlite connections — every other driver fails with
 /// "Unsupported driver".
 async fn register_drivers_for_mcp() {
-    driver_registry::register_driver(mysql::MysqlDriver::new()).await;
-    driver_registry::register_driver(postgres::PostgresDriver::new()).await;
-    driver_registry::register_driver(sqlite::SqliteDriver::new()).await;
+    driver_registry::register_builtin_drivers().await;
 
     plugins::manager::reload_plugins_from_disk_config().await;
 
@@ -455,56 +458,74 @@ fn resolve_default_schema<'a>(
     }
 }
 
-pub async fn run_mcp_server() {
-    eprintln!("[MCP] Starting Tabularis MCP Server...");
-
-    register_drivers_for_mcp().await;
-
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut iterator = stdin.lock().lines();
-
-    while let Some(line_result) = iterator.next() {
-        match line_result {
-            Ok(line) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                // Log input to stderr for debugging
-                eprintln!("[MCP] Received: {}", line);
-
-                match serde_json::from_str::<JsonRpcRequest>(&line) {
-                    Ok(request) => {
-                        let response = handle_request(request).await;
-                        if let Some(resp) = response {
-                            let json = serde_json::to_string(&resp)
-                                .expect("serializing a JsonRpcResponse cannot fail");
-                            // Log output to stderr
-                            eprintln!("[MCP] Sending: {}", json);
-                            // Stop cleanly if the client has gone away (BrokenPipe)
-                            // rather than panicking the whole server.
-                            if let Err(e) = stdout
-                                .write_all(json.as_bytes())
-                                .and_then(|_| stdout.write_all(b"\n"))
-                                .and_then(|_| stdout.flush())
-                            {
-                                eprintln!("[MCP] Failed to write response, stopping: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[MCP] Error parsing JSON: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[MCP] Error reading stdin: {}", e);
-                break;
-            }
+fn connection_fingerprint(
+    connection: &SavedConnection,
+    active_driver_id: &str,
+    active_driver_version: &str,
+) -> String {
+    let params = &connection.params;
+    let mut extra = std::collections::BTreeMap::new();
+    for (key, value) in &params.extra {
+        let normalized = key.to_ascii_lowercase().replace(['_', '-'], "");
+        if [
+            "password",
+            "secret",
+            "token",
+            "credential",
+            "privatekey",
+            "passphrase",
+        ]
+        .iter()
+        .any(|needle| normalized.contains(needle))
+        {
+            continue;
         }
+        extra.insert(key, value);
     }
+    let identity = json!({
+        "connection_id": connection.id,
+        "revision": connection.revision,
+        "driver_id": active_driver_id,
+        "driver_version": active_driver_version,
+        "driver": params.driver,
+        "host": params.host,
+        "port": params.port,
+        "username": params.username,
+        "database": params.database.primary(),
+        "ssl_mode": params.ssl_mode,
+        "ssl_ca": params.ssl_ca,
+        "ssl_cert": params.ssl_cert,
+        "ssl_key": params.ssl_key,
+        "ssh_enabled": params.ssh_enabled,
+        "ssh_connection_id": params.ssh_connection_id,
+        "ssh_host": params.ssh_host,
+        "ssh_port": params.ssh_port,
+        "ssh_user": params.ssh_user,
+        "ssh_key_file": params.ssh_key_file,
+        "ssh_allow_passphrase_prompt": params.ssh_allow_passphrase_prompt,
+        "k8s_enabled": params.k8s_enabled,
+        "k8s_connection_id": params.k8s_connection_id,
+        "k8s_context": params.k8s_context,
+        "k8s_namespace": params.k8s_namespace,
+        "k8s_resource_type": params.k8s_resource_type,
+        "k8s_resource_name": params.k8s_resource_name,
+        "k8s_port": params.k8s_port,
+        "k8s_kubectl_path": params.k8s_kubectl_path,
+        "k8s_kubeconfig_path": params.k8s_kubeconfig_path,
+        "ssm_enabled": params.ssm_enabled,
+        "ssm_target": params.ssm_target,
+        "ssm_profile": params.ssm_profile,
+        "ssm_region": params.ssm_region,
+        "startup_script": params.startup_script,
+        "extra": extra,
+        "proxy": params.proxy,
+    });
+    format!("{:x}", Sha256::digest(identity.to_string().as_bytes()))
+}
+
+pub async fn run_mcp_server() {
+    register_drivers_for_mcp().await;
+    stdio::serve().await;
 }
 
 async fn handle_request(req: JsonRpcRequest) -> Option<JsonRpcResponse> {
@@ -552,7 +573,12 @@ fn handle_initialize(params: Option<Value>) -> Result<Value, JsonRpcError> {
             .and_then(|c| c.get("name"))
             .and_then(|v| v.as_str())
         {
-            ai_activity::set_client_hint(Some(name.to_string()));
+            if config::load_config_from_disk()
+                .ai_audit_enabled
+                .unwrap_or(DEFAULT_AI_AUDIT_ENABLED)
+            {
+                ai_activity::set_client_hint(Some(bounded_audit_text(name, 256)));
+            }
         }
     }
 
@@ -564,8 +590,8 @@ fn handle_initialize(params: Option<Value>) -> Result<Value, JsonRpcError> {
             prompts: None,
         },
         server_info: ServerInfo {
-            name: "tabularis-mcp".to_string(),
-            version: "0.1.0".to_string(),
+            name: "tabularis-extended".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
         },
     };
     Ok(serde_json::to_value(result).unwrap())
@@ -695,7 +721,7 @@ async fn handle_read_resource(params: Option<Value>) -> Result<Value, JsonRpcErr
 
 fn handle_list_tools(config: &AppConfig) -> Result<Value, JsonRpcError> {
     let default_output_format = ToolOutputFormat::from_config(config).as_str();
-    let tools = vec![
+    let mut tools = vec![
         Tool {
             name: "list_connections".to_string(),
             description: Some("List all saved database connections".to_string()),
@@ -763,6 +789,7 @@ fn handle_list_tools(config: &AppConfig) -> Result<Value, JsonRpcError> {
         },
     ];
 
+    tools.extend(managed_tools::schemas(default_output_format));
     Ok(json!({
         "tools": tools
     }))
@@ -776,12 +803,17 @@ async fn handle_call_tool(params: Option<Value>) -> Result<Value, JsonRpcError> 
         .unwrap_or(DEFAULT_AI_AUDIT_ENABLED);
     let max_entries = app_config
         .ai_audit_max_entries
-        .unwrap_or(DEFAULT_AI_AUDIT_MAX_ENTRIES) as usize;
+        .unwrap_or(DEFAULT_AI_AUDIT_MAX_ENTRIES)
+        .clamp(1, 5000) as usize;
     let gap_minutes = app_config
         .ai_session_gap_minutes
         .unwrap_or(DEFAULT_AI_SESSION_GAP_MINUTES);
 
-    let session_id = ai_activity::compute_or_rotate_session_id(gap_minutes);
+    let session_id = if audit_enabled {
+        ai_activity::compute_or_rotate_session_id(gap_minutes)
+    } else {
+        ai_activity::new_uuid()
+    };
     let client_hint = ai_activity::get_client_hint();
 
     let params_value = match params {
@@ -829,11 +861,19 @@ async fn handle_call_tool(params: Option<Value>) -> Result<Value, JsonRpcError> 
         }
     }
 
-    if audit_enabled {
+    if audit_enabled && !managed_tools::is_managed(&name) {
         emit_audit(&session_id, &client_hint, &audit, start, max_entries);
     }
 
     result
+}
+
+fn bounded_audit_text(text: &str, max_bytes: usize) -> String {
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 fn emit_audit(
@@ -850,14 +890,22 @@ fn emit_audit(
         tool: audit.tool.clone(),
         connection_id: audit.connection_id.clone(),
         connection_name: audit.connection_name.clone(),
-        query: audit.query.clone(),
+        query: audit
+            .query
+            .as_deref()
+            .map(|query| bounded_audit_text(query, 4096)),
         query_kind: audit.query_kind.clone(),
         duration_ms: start.elapsed().as_millis() as u64,
         status: audit.status.clone(),
         rows: audit.rows,
-        error: audit.error.clone(),
+        error: audit
+            .error
+            .as_ref()
+            .map(|_| "MCP tool execution failed".to_string()),
         client_hint: client_hint.clone(),
         approval_id: audit.approval_id.clone(),
+        query_id: None,
+        event_phase: None,
     };
     if let Err(e) = ai_activity::append_and_rotate(&event, max_entries) {
         eprintln!("[MCP] Failed to write audit log: {}", e);
@@ -871,6 +919,9 @@ async fn dispatch_tool(
     session_id: &str,
     audit: &mut CallAudit,
 ) -> Result<Value, JsonRpcError> {
+    if managed_tools::is_managed(name) {
+        return managed_tools::dispatch(name, args, config, session_id).await;
+    }
     match name {
         "list_connections" => {
             let format = requested_output_format(args, config)?;
@@ -1128,10 +1179,7 @@ async fn tool_run_query(
             data: None,
         })?;
 
-    let max_rows = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(100) as u32;
+    let max_rows = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
 
     audit.connection_id = Some(conn_id.to_string());
     audit.query = Some(query.to_string());
@@ -1252,8 +1300,7 @@ async fn tool_run_query(
                         audit.query = Some(effective_query.clone());
                         audit.query_kind = Some(new_kind.to_string());
 
-                        if config::is_connection_readonly(config, &conn.id)
-                            && new_kind != "select"
+                        if config::is_connection_readonly(config, &conn.id) && new_kind != "select"
                         {
                             audit.status = "blocked_readonly".to_string();
                             let msg = "Edited query blocked by Tabularis read-only mode. Enable writes for this connection in Settings → MCP → Read-only mode.".to_string();
@@ -1332,4 +1379,3 @@ async fn tool_run_query(
 
     tool_result(&result, format)
 }
-

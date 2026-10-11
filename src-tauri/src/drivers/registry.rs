@@ -51,6 +51,11 @@ pub async fn register_driver(driver: impl DatabaseDriver + 'static) {
     reg.insert(id, Arc::new(driver));
 }
 
+pub async fn register_builtin_drivers() {
+    register_driver(crate::drivers::mysql::MysqlDriver::new()).await;
+    register_driver(crate::drivers::sqlite::SqliteDriver::new()).await;
+}
+
 /// Look up a driver by its `id` (matches `ConnectionParams.driver`).
 /// Returns `None` if no driver with that id is registered.
 pub async fn get_driver(id: &str) -> Option<Arc<dyn DatabaseDriver>> {

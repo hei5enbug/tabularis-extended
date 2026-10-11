@@ -29,6 +29,7 @@ interface ConnectionParams {
 
 export interface SavedConnectionWithCredentials {
   id: string;
+  revision: string;
   name: string;
   params: ConnectionParams;
 }

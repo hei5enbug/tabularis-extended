@@ -17,7 +17,7 @@ jobs:
     # Cancelled runs were superseded by a newer push; that one will comment.
     # Skipped builds (label event for another label) conclude "success" with
     # no artifacts and are filtered out below.
-    if: github.event.workflow_run.conclusion != 'cancelled'
+    if: github.repository == 'TabularisDB/tabularis' && (github.event.workflow_run.conclusion != 'cancelled')
     runs-on: ubuntu-latest
     permissions:
       actions: read # list artifacts

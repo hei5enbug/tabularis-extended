@@ -19,7 +19,10 @@ use crate::paths::get_app_config_dir;
 
 const ACTIVITY_FILENAME: &str = "ai_activity.jsonl";
 const SESSION_STATE_FILENAME: &str = ".mcp_session_state.json";
+const ACTIVITY_LOCK_FILENAME: &str = ".ai_activity.lock";
 const MAX_ROTATED_FILES: usize = 5;
+const MAX_QUERY_HISTORY_RECORDS: usize = 10_000;
+const MAX_QUERY_HISTORY_LINE_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -38,6 +41,10 @@ pub struct AiActivityEvent {
     pub error: Option<String>,
     pub client_hint: Option<String>,
     pub approval_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_phase: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,11 +102,39 @@ fn ensure_dir(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn with_activity_lock<T>(
+    dir: &Path,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    use fs2::FileExt;
+
+    ensure_dir(dir)?;
+    let lock_path = dir.join(ACTIVITY_LOCK_FILENAME);
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| error.to_string())?;
+    lock.lock_exclusive().map_err(|error| error.to_string())?;
+    let result = operation();
+    let unlock_result = lock.unlock().map_err(|error| error.to_string());
+    match (result, unlock_result) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Append + rotation (testable; take a directory)
 // ---------------------------------------------------------------------------
 
 pub fn append_event_in(dir: &Path, event: &AiActivityEvent) -> Result<(), String> {
+    with_activity_lock(dir, || append_event_unlocked(dir, event))
+}
+
+fn append_event_unlocked(dir: &Path, event: &AiActivityEvent) -> Result<(), String> {
     ensure_dir(dir)?;
     let path = activity_path_in(dir);
     let line = serde_json::to_string(event).map_err(|e| e.to_string())?;
@@ -121,6 +156,10 @@ fn count_lines(path: &Path) -> Result<usize, String> {
 }
 
 pub fn rotate_if_needed_in(dir: &Path, max_entries: usize) -> Result<bool, String> {
+    with_activity_lock(dir, || rotate_if_needed_unlocked(dir, max_entries))
+}
+
+fn rotate_if_needed_unlocked(dir: &Path, max_entries: usize) -> Result<bool, String> {
     if max_entries == 0 {
         return Ok(false);
     }
@@ -152,11 +191,13 @@ pub fn append_and_rotate_in(
     event: &AiActivityEvent,
     max_entries: usize,
 ) -> Result<(), String> {
-    append_event_in(dir, event)?;
-    if max_entries > 0 {
-        rotate_if_needed_in(dir, max_entries)?;
-    }
-    Ok(())
+    with_activity_lock(dir, || {
+        append_event_unlocked(dir, event)?;
+        if max_entries > 0 {
+            rotate_if_needed_unlocked(dir, max_entries)?;
+        }
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -202,39 +243,127 @@ fn read_all_events_in(dir: &Path) -> Result<Vec<AiActivityEvent>, String> {
     Ok(events)
 }
 
+fn read_bounded_line<R: BufRead>(reader: &mut R) -> std::io::Result<Option<Option<Vec<u8>>>> {
+    let mut line = Vec::new();
+    let mut oversized = false;
+    let mut read_any = false;
+    loop {
+        let available = reader.fill_buf()?;
+        if available.is_empty() {
+            return if read_any {
+                Ok(Some(if oversized { None } else { Some(line) }))
+            } else {
+                Ok(None)
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map(|index| index + 1).unwrap_or(available.len());
+        let content_len = newline.unwrap_or(available.len());
+        read_any = true;
+        if !oversized && line.len().saturating_add(content_len) <= MAX_QUERY_HISTORY_LINE_BYTES {
+            line.extend_from_slice(&available[..content_len]);
+        } else {
+            oversized = true;
+        }
+        reader.consume(consumed);
+        if newline.is_some() {
+            return Ok(Some(if oversized { None } else { Some(line) }));
+        }
+    }
+}
+
+fn read_query_history_events_in(
+    dir: &Path,
+    max_records: usize,
+) -> Result<Vec<AiActivityEvent>, String> {
+    with_activity_lock(dir, || {
+        let mut paths = Vec::new();
+        let active = activity_path_in(dir);
+        if active.exists() {
+            paths.push(active);
+        }
+        for index in 1..=MAX_ROTATED_FILES {
+            let path = rotated_path_in(dir, index);
+            if path.exists() {
+                paths.push(path);
+            }
+        }
+
+        let mut events = Vec::new();
+        let mut scanned = 0usize;
+        for path in paths {
+            if scanned >= max_records {
+                break;
+            }
+            let file = fs::File::open(&path).map_err(|error| error.to_string())?;
+            let mut reader = BufReader::new(file);
+            while scanned < max_records {
+                let Some(line) =
+                    read_bounded_line(&mut reader).map_err(|error| error.to_string())?
+                else {
+                    break;
+                };
+                scanned += 1;
+                let Some(line) = line else {
+                    continue;
+                };
+                let line = String::from_utf8_lossy(&line);
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Ok(event) = serde_json::from_str::<AiActivityEvent>(trimmed) {
+                    events.push(event);
+                }
+            }
+        }
+        Ok(events)
+    })
+}
+
 pub fn read_events_in(dir: &Path, filter: &EventFilter) -> Result<Vec<AiActivityEvent>, String> {
-    let events = read_all_events_in(dir)?;
-    Ok(events
-        .into_iter()
-        .filter(|e| matches_filter(e, filter))
-        .collect())
+    with_activity_lock(dir, || {
+        let events = read_all_events_in(dir)?;
+        Ok(events
+            .into_iter()
+            .filter(|e| matches_filter(e, filter))
+            .collect())
+    })
 }
 
 pub fn read_session_events_in(
     dir: &Path,
     session_id: &str,
 ) -> Result<Vec<AiActivityEvent>, String> {
-    let mut events = read_all_events_in(dir)?;
-    events.retain(|e| e.session_id == session_id);
-    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-    Ok(events)
+    with_activity_lock(dir, || {
+        let mut events = read_all_events_in(dir)?;
+        events.retain(|e| e.session_id == session_id);
+        events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        Ok(events)
+    })
 }
 
 pub fn read_sessions_in(dir: &Path) -> Result<Vec<SessionSummary>, String> {
-    let events = read_all_events_in(dir)?;
-    let mut by_session: BTreeMap<String, Vec<AiActivityEvent>> = BTreeMap::new();
-    for e in events {
-        by_session.entry(e.session_id.clone()).or_default().push(e);
-    }
-    let mut summaries: Vec<SessionSummary> = by_session
-        .into_iter()
-        .map(|(sid, evs)| build_summary(&sid, &evs))
-        .collect();
-    summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
-    Ok(summaries)
+    with_activity_lock(dir, || {
+        let events = read_all_events_in(dir)?;
+        let mut by_session: BTreeMap<String, Vec<AiActivityEvent>> = BTreeMap::new();
+        for e in events {
+            by_session.entry(e.session_id.clone()).or_default().push(e);
+        }
+        let mut summaries: Vec<SessionSummary> = by_session
+            .into_iter()
+            .map(|(sid, evs)| build_summary(&sid, &evs))
+            .collect();
+        summaries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        Ok(summaries)
+    })
 }
 
 pub fn clear_in(dir: &Path) -> Result<(), String> {
+    with_activity_lock(dir, || clear_unlocked(dir))
+}
+
+fn clear_unlocked(dir: &Path) -> Result<(), String> {
     let active = activity_path_in(dir);
     if active.exists() {
         fs::remove_file(&active).map_err(|e| e.to_string())?;
@@ -341,6 +470,10 @@ pub fn read_session_events(session_id: &str) -> Result<Vec<AiActivityEvent>, Str
     read_session_events_in(&get_app_config_dir(), session_id)
 }
 
+pub fn read_query_history_events() -> Result<Vec<AiActivityEvent>, String> {
+    read_query_history_events_in(&get_app_config_dir(), MAX_QUERY_HISTORY_RECORDS)
+}
+
 pub fn clear() -> Result<(), String> {
     clear_in(&get_app_config_dir())
 }
@@ -379,9 +512,7 @@ pub fn classify_query_kind(sql: &str) -> &'static str {
     // as one. We strip under both interpretations and fail closed if EITHER
     // reveals a trailing statement, so a payload cannot hide an injected
     // separator by exploiting whichever dialect we happen not to assume.
-    if has_trailing_statements(&stripped)
-        || has_trailing_statements(&strip_impl(sql, true))
-    {
+    if has_trailing_statements(&stripped) || has_trailing_statements(&strip_impl(sql, true)) {
         return "unknown";
     }
     // Peel any leading `(` (and surrounding whitespace) before reading the
@@ -462,8 +593,7 @@ fn has_complete_end_before_terminal_statement(upper_sql: &str) -> bool {
             continue;
         }
         cursor += 1;
-        while cursor < bytes.len()
-            && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b';')
+        while cursor < bytes.len() && (bytes[cursor].is_ascii_whitespace() || bytes[cursor] == b';')
         {
             cursor += 1;
         }
@@ -754,6 +884,10 @@ pub fn load_session_state_in(dir: &Path) -> Option<SessionState> {
 }
 
 pub fn save_session_state_in(dir: &Path, state: &SessionState) -> Result<(), String> {
+    with_activity_lock(dir, || save_session_state_unlocked(dir, state))
+}
+
+fn save_session_state_unlocked(dir: &Path, state: &SessionState) -> Result<(), String> {
     ensure_dir(dir)?;
     let path = session_state_path_in(dir);
     let content = serde_json::to_string_pretty(state).map_err(|e| e.to_string())?;
@@ -764,37 +898,42 @@ pub fn save_session_state_in(dir: &Path, state: &SessionState) -> Result<(), Str
 /// the gap since the last recorded activity exceeds `gap_minutes`.
 /// Updates `last_activity_at` on every call.
 pub fn compute_or_rotate_session_id_in(dir: &Path, gap_minutes: u32) -> String {
-    let now = chrono::Utc::now();
-    let now_str = now.to_rfc3339();
-    let mut state = load_session_state_in(dir).unwrap_or_else(|| SessionState {
-        session_id: new_uuid(),
-        last_activity_at: now_str.clone(),
-        client_hint: None,
-    });
+    with_activity_lock(dir, || {
+        let now = chrono::Utc::now();
+        let now_str = now.to_rfc3339();
+        let mut state = load_session_state_in(dir).unwrap_or_else(|| SessionState {
+            session_id: new_uuid(),
+            last_activity_at: now_str.clone(),
+            client_hint: None,
+        });
 
-    let gap_exceeded = chrono::DateTime::parse_from_rfc3339(&state.last_activity_at)
-        .map(|dt| {
-            let diff = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
-            diff.num_minutes() > gap_minutes as i64
-        })
-        .unwrap_or(true);
+        let gap_exceeded = chrono::DateTime::parse_from_rfc3339(&state.last_activity_at)
+            .map(|dt| {
+                let diff = now.signed_duration_since(dt.with_timezone(&chrono::Utc));
+                diff.num_minutes() > gap_minutes as i64
+            })
+            .unwrap_or(true);
 
-    if gap_exceeded {
-        state.session_id = new_uuid();
-    }
-    state.last_activity_at = now_str;
-    let _ = save_session_state_in(dir, &state);
-    state.session_id
+        if gap_exceeded {
+            state.session_id = new_uuid();
+        }
+        state.last_activity_at = now_str;
+        save_session_state_unlocked(dir, &state)?;
+        Ok(state.session_id)
+    })
+    .unwrap_or_else(|_| new_uuid())
 }
 
 pub fn set_client_hint_in(dir: &Path, hint: Option<String>) {
-    let mut state = load_session_state_in(dir).unwrap_or_else(|| SessionState {
-        session_id: new_uuid(),
-        last_activity_at: chrono::Utc::now().to_rfc3339(),
-        client_hint: None,
+    let _ = with_activity_lock(dir, || {
+        let mut state = load_session_state_in(dir).unwrap_or_else(|| SessionState {
+            session_id: new_uuid(),
+            last_activity_at: chrono::Utc::now().to_rfc3339(),
+            client_hint: None,
+        });
+        state.client_hint = hint;
+        save_session_state_unlocked(dir, &state)
     });
-    state.client_hint = hint;
-    let _ = save_session_state_in(dir, &state);
 }
 
 pub fn get_client_hint_in(dir: &Path) -> Option<String> {
@@ -838,3 +977,7 @@ pub fn to_local_rfc3339(ts: &str, tz: Option<&str>) -> String {
         None => dt.with_timezone(&chrono::Local).to_rfc3339(),
     }
 }
+
+#[cfg(test)]
+#[path = "ai_activity_history_tests.rs"]
+mod history_tests;

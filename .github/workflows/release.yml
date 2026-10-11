@@ -19,6 +19,7 @@ on:
 
 jobs:
   meta:
+    if: github.repository == 'TabularisDB/tabularis'
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.meta.outputs.ref }}
@@ -88,6 +89,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   publish-tauri:
+    if: github.repository == 'TabularisDB/tabularis'
     needs: meta
     permissions:
       contents: write

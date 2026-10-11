@@ -21,6 +21,7 @@ import {
   type StorageLocationInspection,
 } from "../../utils/storageLocation";
 import { SettingSection, SettingRow } from "./SettingControls";
+import { ProfileImportSection } from "./ProfileImportSection";
 
 const buttonClass =
   "flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-base border border-strong text-sm text-secondary hover:text-accent hover:border-accent-primary/50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:text-secondary disabled:hover:border-strong";
@@ -115,6 +116,7 @@ export function StorageTab() {
 
   return (
     <div>
+      <ProfileImportSection />
       <SettingSection title={t("settings.storage.locations")}>
         <SettingRow
           label={t("settings.storage.dataFolder")}

@@ -102,7 +102,7 @@ pub struct ConfigManifest {
 /// refusal (never silently skipped by the registered-plugin fast path below)
 /// so the collision is still surfaced as a logged `PluginLoadError`, not
 /// swallowed because the built-in of the same id is already registered.
-const BUILTIN_DRIVER_IDS: [&str; 3] = ["mysql", "postgres", "sqlite"];
+const BUILTIN_DRIVER_IDS: [&str; 2] = ["mysql", "sqlite"];
 
 /// Load installed plugins at startup.
 ///
@@ -133,6 +133,40 @@ pub async fn reload_plugins_from_disk_config() {
     load_plugins_with_configs(plugin_configs, enabled_ids.as_deref()).await;
 }
 
+pub fn list_driver_manifests_from_disk(
+) -> Result<Vec<crate::drivers::driver_trait::PluginManifest>, String> {
+    let root = crate::paths::get_plugins_dir();
+    let mut manifests = Vec::new();
+    for path in super::layout::driver_directories(&root)? {
+        let config: ConfigManifest = crate::plugins::installer::read_manifest(&path)?;
+        let id = config.id.clone().unwrap_or_else(|| config.name.clone());
+        if BUILTIN_DRIVER_IDS.contains(&id.as_str()) {
+            continue;
+        }
+        manifests.push(crate::drivers::driver_trait::PluginManifest {
+            id,
+            name: config.name,
+            version: config.version,
+            description: config.description,
+            default_port: config.default_port,
+            capabilities: config.capabilities,
+            is_builtin: false,
+            engine: config.engine,
+            paradigms: config.paradigms,
+            default_username: config.default_username.unwrap_or_default(),
+            color: config.color,
+            icon: config.icon,
+            settings: config.settings,
+            ui_extensions: config.ui_extensions,
+            explain_parsers: config.explain_parsers,
+            type_mappings: config.type_mappings,
+            deprecated: None,
+        });
+    }
+    manifests.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(manifests)
+}
+
 /// Variant of [`load_plugins`] that takes plugin configs directly. Used by the
 /// standalone `--mcp` subprocess which has no Tauri `AppHandle` but needs to
 /// register the same drivers so MCP tools can reach plugin-driven connections.
@@ -161,7 +195,6 @@ pub async fn load_plugins_with_configs(
     };
 
     for path in entries {
-
         if let Some(enabled) = enabled_ids {
             if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
                 if !enabled.iter().any(|id| id == dir_name) {

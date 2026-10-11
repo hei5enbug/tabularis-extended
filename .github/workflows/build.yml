@@ -63,6 +63,7 @@ on:
 
 jobs:
   publish-tauri:
+    if: github.repository == 'TabularisDB/tabularis'
     # Permissions are inherited from the caller: release/nightly grant
     # `contents: write` (release upload), preview grants only `contents: read`.
     # A called workflow can't request more than the caller grants, so they

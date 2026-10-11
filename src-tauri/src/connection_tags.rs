@@ -5,7 +5,7 @@
 use tauri::{AppHandle, Runtime};
 use uuid::Uuid;
 
-use crate::commands::{get_config_path, save_connections_and_invalidate};
+use crate::commands::{get_config_path, update_connections_and_invalidate};
 use crate::models::{ConnectionTag, ConnectionsFile};
 use crate::persistence;
 
@@ -46,11 +46,7 @@ pub fn create_tag_impl(
 ) -> Result<ConnectionTag, String> {
     validate_tag_input(name, color)?;
     let name = name.trim();
-    if file
-        .tags
-        .iter()
-        .any(|t| t.name.eq_ignore_ascii_case(name))
-    {
+    if file.tags.iter().any(|t| t.name.eq_ignore_ascii_case(name)) {
         return Err(format!("A tag named \"{name}\" already exists"));
     }
     let tag = ConnectionTag {
@@ -187,10 +183,7 @@ pub async fn create_connection_tag<R: Runtime>(
     color: String,
 ) -> Result<ConnectionTag, String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    let tag = create_tag_impl(&mut file, &name, &color)?;
-    save_connections_and_invalidate(&app, &path, &file)?;
-    Ok(tag)
+    update_connections_and_invalidate(&app, &path, |file| create_tag_impl(file, &name, &color))
 }
 
 #[tauri::command]
@@ -201,9 +194,9 @@ pub async fn update_connection_tag<R: Runtime>(
     color: String,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    update_tag_impl(&mut file, &id, &name, &color)?;
-    save_connections_and_invalidate(&app, &path, &file)
+    update_connections_and_invalidate(&app, &path, |file| {
+        update_tag_impl(file, &id, &name, &color)
+    })
 }
 
 #[tauri::command]
@@ -212,9 +205,7 @@ pub async fn delete_connection_tag<R: Runtime>(
     id: String,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    delete_tag_impl(&mut file, &id)?;
-    save_connections_and_invalidate(&app, &path, &file)
+    update_connections_and_invalidate(&app, &path, |file| delete_tag_impl(file, &id))
 }
 
 #[tauri::command]
@@ -224,9 +215,9 @@ pub async fn set_connection_tags<R: Runtime>(
     tag_ids: Vec<String>,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    set_connection_tags_impl(&mut file, &connection_id, &tag_ids)?;
-    save_connections_and_invalidate(&app, &path, &file)
+    update_connections_and_invalidate(&app, &path, |file| {
+        set_connection_tags_impl(file, &connection_id, &tag_ids)
+    })
 }
 
 #[cfg(test)]
@@ -237,6 +228,7 @@ mod tests {
     fn conn(id: &str, tag_ids: Option<Vec<&str>>) -> SavedConnection {
         SavedConnection {
             id: id.to_string(),
+            revision: String::new(),
             name: id.to_string(),
             params: ConnectionParams::default(),
             group_id: None,
@@ -250,6 +242,7 @@ mod tests {
 
     fn file_with_tags(tags: &[(&str, &str)]) -> ConnectionsFile {
         ConnectionsFile {
+            revision: String::new(),
             groups: vec![],
             connections: vec![],
             tags: tags
@@ -315,7 +308,10 @@ mod tests {
     #[test]
     fn delete_detaches_tag_from_connections() {
         let mut file = file_with_tags(&[("t1", "Prod"), ("t2", "Dev")]);
-        file.connections = vec![conn("c1", Some(vec!["t1", "t2"])), conn("c2", Some(vec!["t1"]))];
+        file.connections = vec![
+            conn("c1", Some(vec!["t1", "t2"])),
+            conn("c2", Some(vec!["t1"])),
+        ];
         delete_tag_impl(&mut file, "t1").unwrap();
         assert_eq!(file.tags.len(), 1);
         assert_eq!(file.connections[0].tag_ids, Some(vec!["t2".to_string()]));
@@ -341,8 +337,7 @@ mod tests {
         );
 
         // Unknown ids are dropped, not fatal (orphans after a partial import).
-        set_connection_tags_impl(&mut file, "c1", &["nope".to_string(), "t1".to_string()])
-            .unwrap();
+        set_connection_tags_impl(&mut file, "c1", &["nope".to_string(), "t1".to_string()]).unwrap();
         assert_eq!(file.connections[0].tag_ids, Some(vec!["t1".to_string()]));
         assert!(set_connection_tags_impl(&mut file, "missing", &[]).is_err());
 

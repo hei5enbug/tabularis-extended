@@ -108,10 +108,7 @@ pub fn build_payload(
         };
 
         let conn_id = match res.action.as_str() {
-            "replace" => res
-                .replace_existing_id
-                .clone()
-                .unwrap_or_else(new_id),
+            "replace" => res.replace_existing_id.clone().unwrap_or_else(new_id),
             _ => new_id(),
         };
 
@@ -217,6 +214,7 @@ fn build_connection(
 
     let saved = SavedConnection {
         id: conn_id.to_string(),
+        revision: String::new(),
         name: conn.name.clone(),
         params,
         group_id,
@@ -287,11 +285,11 @@ mod tests {
             connections: vec![base_conn()],
             ..Default::default()
         };
-        let payload = build_payload(&env, &[res(0, "import")], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[res(0, "import")], &["postgresql".into()], &[]);
         assert_eq!(payload.connections.len(), 1);
         assert_eq!(payload.groups.len(), 1);
         let c = &payload.connections[0];
-        assert_eq!(c.params.driver, "postgres");
+        assert_eq!(c.params.driver, "postgresql");
         assert_eq!(c.group_id.as_deref(), Some(payload.groups[0].id.as_str()));
         assert_eq!(c.params.save_in_keychain, Some(false));
     }
@@ -333,7 +331,10 @@ mod tests {
         assert_eq!(payload.ssh_connections.len(), 1);
         let ssh = &payload.ssh_connections[0];
         let conn = &payload.connections[0];
-        assert_eq!(conn.params.ssh_connection_id.as_deref(), Some(ssh.id.as_str()));
+        assert_eq!(
+            conn.params.ssh_connection_id.as_deref(),
+            Some(ssh.id.as_str())
+        );
         assert_eq!(conn.params.ssh_enabled, Some(true));
         assert_eq!(ssh.port, 2222);
         assert_eq!(ssh.save_in_keychain, Some(true));

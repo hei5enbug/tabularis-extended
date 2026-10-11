@@ -25,6 +25,8 @@ mod tests {
             error: None,
             client_hint: Some("claude-desktop".to_string()),
             approval_id: None,
+            query_id: None,
+            event_phase: None,
         }
     }
 

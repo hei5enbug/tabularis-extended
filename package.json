@@ -1,12 +1,12 @@
 {
-  "name": "tabularis",
+  "name": "tabularis-extended",
   "private": true,
-  "version": "0.27.0",
+  "version": "0.27.0+extended.1",
   "type": "module",
   "links": {
     "discord": "https://discord.com/invite/K2hmhfHRSt",
-    "github": "https://github.com/TabularisDB/tabularis",
-    "github-issues": "https://github.com/TabularisDB/tabularis/issues",
+    "github": "https://github.com/hei5enbug/tabularis-extended",
+    "github-issues": "https://github.com/hei5enbug/tabularis-extended/issues",
     "x": "https://x.com/tabularisdb",
     "bluesky": "https://bsky.app/profile/tabularis.bsky.social",
     "mastodon": "https://mastodon.social/@tabularis"
@@ -21,7 +21,9 @@
     "test": "vitest",
     "typecheck": "tsc --noEmit",
     "test:coverage": "vitest run --coverage",
-    "test:rust": "cd src-tauri && cargo test",
+    "test:rust": "node scripts/test-rust.mjs",
+    "test:containers": "npm --prefix tests/containers test",
+    "test:release": "node --test tests/release/*.test.mjs",
     "test:all": "pnpm test:rust && pnpm test:coverage",
     "tauri": "tauri",
     "build:explain": "pnpm --filter @tabularis/explain build",

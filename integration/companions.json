@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "sqlserverPlus": {
+    "repository": "hei5enbug/tabularis-sqlserver-plus",
+    "version": "1.0.0-beta.3+plus.1",
+    "tag": "plus-v1.0.0-beta.3+plus.1",
+    "sourceSha256": "c4ccbb02d17a476cd4f8b2b181298426f68ee0318d43161bb06a9454f525be04",
+    "platforms": {
+      "darwin-arm64": {
+        "archive": "sqlserver-plus-darwin-arm64.zip",
+        "sha256": "6b97e109e98f0dc1d4e59d4da8a8715b301532132071a15e8033dc4f778d5d77",
+        "bytes": 3027303,
+        "files": {
+          ".tabularium": "fd56aed13b302f86c8bdc56a0715984ecc4da97cbd055734678308d8cab4d514",
+          "LICENSE": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "README.md": "4052e3db99f87734720c9bd275c7451c29044ec79931bb9f8814a9782428a065",
+          "explain/dist/index.iife.js": "e4a0ac16a110c4c0fe21162becb17094fda92c549436daadfde65f5a21227dd9",
+          "licenses/mssql-tds-preview-MIT.txt": "32a86af620befcdd1a9c973ee653ac2bc0932a44224b1e1c2215ccd2e9ec9dc1",
+          "sqlserver-plugin": "e462713d0b6fd8ebd54e353eafcc35695340a3b3da8546b888410072c0a3a1af",
+          "ui/dist/index.js": "71d7fa869a588a8033e8d4577a3ac076f94c1e5bb951a2b41012c08a410dc791"
+        }
+      }
+    }
+  },
+  "postgresql": {
+    "repository": "TabularisDB/tabularis-postgresql-plugin",
+    "version": "1.0.0-rc.6",
+    "commit": "963f358e5de037014db37337db3dbaea560aee77"
+  }
+}

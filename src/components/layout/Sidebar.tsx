@@ -235,10 +235,10 @@ export const Sidebar = () => {
     <div className="flex h-full">
       {/* Primary Navigation Bar (Narrow) */}
       <aside className="w-16 bg-elevated border-r border-default flex flex-col items-center py-4 z-20">
-        <div className="mb-8" title="tabularis">
+        <div className="mb-8" title="Tabularis Extended">
           <img
             src="/logo.png"
-            alt="tabularis"
+            alt="Tabularis Extended"
             className="w-12 h-12 p-2 rounded-2xl mx-auto mb-4 shadow-lg shadow-accent-primary/30"
             style={{
               backgroundColor: isDarkTheme

@@ -6,7 +6,6 @@
 //! `connections.json` but has no Tauri context.
 
 use std::collections::HashMap;
-use std::fs;
 use std::path::Path;
 
 use crate::drivers::driver_trait::SqlDialect;
@@ -128,14 +127,13 @@ pub async fn migrate_postgres_ssl_mode_spelling_at_path(conn_path: &Path) -> Res
         return Ok(false); // Nothing to migrate
     }
 
-    let content_before = fs::read_to_string(conn_path).map_err(|e| e.to_string())?;
-    let mut conn_file = persistence::parse_connections_file(&content_before)?;
+    let initial_file = persistence::load_connections_file(conn_path)?;
 
     // Resolve each distinct non-builtin driver id's dialect once, not once
     // per connection — the registry lookup is async and connections commonly
     // share a driver.
     let mut dialects: HashMap<String, Option<SqlDialect>> = HashMap::new();
-    for conn in &conn_file.connections {
+    for conn in &initial_file.connections {
         let driver_id = &conn.params.driver;
         if driver_id == "postgres" || dialects.contains_key(driver_id) {
             continue; // builtin driver's own dropdown was always correct
@@ -148,6 +146,8 @@ pub async fn migrate_postgres_ssl_mode_spelling_at_path(conn_path: &Path) -> Res
         }
     }
 
+    let lock = persistence::LockedConnectionsFile::open(conn_path)?;
+    let mut conn_file = lock.load()?;
     let mut migrated_count = 0usize;
     for conn in conn_file.connections.iter_mut() {
         if migrate_connection_ssl_mode_in_place(conn, &dialects) {
@@ -156,16 +156,6 @@ pub async fn migrate_postgres_ssl_mode_spelling_at_path(conn_path: &Path) -> Res
     }
 
     if migrated_count == 0 {
-        return Ok(false); // No migration needed
-    }
-
-    // Bail if another process (e.g. the GUI) saved a concurrent edit while
-    // we were computing the migration above — don't blindly overwrite it.
-    let content_now = fs::read_to_string(conn_path).map_err(|e| e.to_string())?;
-    if connections_file_changed_concurrently(&content_before, &content_now) {
-        eprintln!(
-            "[Migration] connections.json changed concurrently — skipping this run, will retry next launch"
-        );
         return Ok(false);
     }
 
@@ -173,6 +163,6 @@ pub async fn migrate_postgres_ssl_mode_spelling_at_path(conn_path: &Path) -> Res
         "[Migration] Rewriting stale ssl_mode spelling on {} postgres-dialect connection(s)",
         migrated_count
     );
-    persistence::save_connections_file(conn_path, &conn_file)?;
+    lock.save(&mut conn_file)?;
     Ok(true)
 }

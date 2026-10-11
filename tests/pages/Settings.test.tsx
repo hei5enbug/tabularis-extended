@@ -189,7 +189,8 @@ describe("update navigation", () => {
     ).toBeNull();
   });
 
-  it("aggregates the rail counter and splits core/plugin counts in the settings navigation", () => {
+  it("탐색 배지는 공식 코어 업데이트를 제외하고 플러그인 업데이트만 셉니다.", () => {
+    // given
     vi.mocked(useUpdate).mockReturnValue({
       ...useUpdate(),
       availableUpdate: {
@@ -206,30 +207,13 @@ describe("update navigation", () => {
       ...usePluginRegistry(),
       updates: [plugin, { ...plugin, id: "redis", name: "Redis" }],
     });
+    // when
     renderApp();
-    const link = screen.getByRole("link", { name: /^Impostazioni:/ });
-    expect(link).not.toHaveAttribute("title");
-    expect(link.querySelector("[title]")).toBeNull();
-    const railBadge = within(link).getByLabelText("1 aggiornamento core disponibile, 2 aggiornamenti plugins disponibili");
-    expect(railBadge).toHaveTextContent("3");
-    expect(railBadge.style.backgroundColor).toContain("--accent-primary");
-    const pluginsButton = screen.getByRole("button", { name: /^Plugin/ });
-    const pluginBadge = within(pluginsButton).getByLabelText("2 aggiornamenti plugins disponibili");
-    fireEvent.mouseEnter(pluginBadge);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("PostgreSQL 1.0.0 → 2.0.0");
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Redis 1.0.0 → 2.0.0");
-    expect(within(screen.getByRole("tooltip")).getAllByRole("listitem")).toHaveLength(2);
-    fireEvent.mouseLeave(pluginBadge);
-    const infoButton = screen.getByRole("button", { name: /^Info/ });
-    const coreBadge = within(infoButton).getByText("1");
-    fireEvent.focus(infoButton);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Tabularis 0.25.0 è disponibile");
-    // Same pill everywhere: the rail, Info and Plugins counters share tone and shape.
-    for (const badge of [railBadge, coreBadge, pluginBadge]) {
-      expect(badge).toHaveClass("rounded-full");
-      expect(badge.style.backgroundColor).toBe(railBadge.style.backgroundColor);
-    }
-    expect(screen.getAllByRole("status")).toHaveLength(1);
+    // then
+    expect(within(screen.getByRole("link", { name: /^Impostazioni:/ })).getByLabelText("2 aggiornamenti plugins disponibili")).toHaveTextContent("2");
+    expect(within(screen.getByRole("button", { name: /^Plugin/ })).getByLabelText("2 aggiornamenti plugins disponibili")).toHaveTextContent("2");
+    expect(within(screen.getByRole("button", { name: /^Info/ })).queryByText("1")).toBeNull();
+    expect(screen.queryByLabelText("1 aggiornamento core disponibile, 2 aggiornamenti plugins disponibili")).toBeNull();
   });
 
   it("bounds a long plugin list and closes the tooltip with Escape", () => {

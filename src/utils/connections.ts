@@ -11,7 +11,7 @@ import { isMultiDatabaseCapable } from "./database";
 
 export type DatabaseDriver = string;
 
-export const BUILTIN_DRIVER_IDS = ["postgres", "mysql", "sqlite"] as const;
+export const BUILTIN_DRIVER_IDS = ["mysql", "sqlite"] as const;
 export type BuiltinDriverId = (typeof BUILTIN_DRIVER_IDS)[number];
 
 /** Which direction a per-connection migration action would go, or `null` if

@@ -119,6 +119,30 @@ fn validate_rejects_current_and_nested_folders() {
     let _ = fs::remove_dir_all(&current);
 }
 
+#[cfg(unix)]
+#[test]
+fn 검증은_소스_심볼릭_별칭의_누락된_자식_경로를_거부한다() {
+    use std::os::unix::fs::symlink;
+
+    // Given: 현재 경로에 대한 심볼릭 별칭과 아직 없는 자식 경로가 있다.
+    let current = temp_dir("validate-symlink-source");
+    let alias = current
+        .parent()
+        .unwrap()
+        .join("tabularis-storage-location-source-alias");
+    let _ = fs::remove_file(&alias);
+    symlink(&current, &alias).unwrap();
+
+    // When: 별칭 아래의 자식 경로를 새 저장 위치로 검증한다.
+    let missing_target = alias.join("not-created-yet");
+
+    // Then: 현재 위치 안쪽 경로로 판별해 거부한다.
+    assert!(validate_target(&missing_target, &current).is_err());
+
+    let _ = fs::remove_file(&alias);
+    let _ = fs::remove_dir_all(&current);
+}
+
 #[test]
 fn validate_accepts_sibling_folder_even_if_missing() {
     let current = temp_dir("validate-ok");
@@ -231,9 +255,13 @@ fn active_override_follows_the_environment_variable() {
             assert_ne!(active_source(), StorageLocationSource::Env);
         }
     }
-    // Plugins never follow the override.
-    assert_eq!(
-        crate::paths::get_plugins_dir(),
-        crate::paths::get_default_app_data_dir().join("plugins")
-    );
+    // Plugins use their own override independently of profile storage.
+    let plugin_override = std::env::var(crate::paths::EXTENDED_PLUGIN_DIR_ENV_VAR).ok();
+    let expected_plugins = plugin_override
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| crate::paths::get_default_app_data_dir().join("plugins"));
+    assert_eq!(crate::paths::get_plugins_dir(), expected_plugins);
 }
