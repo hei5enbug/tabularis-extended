@@ -710,8 +710,6 @@ dependencies = [
 [[package]]
 name = "mssql-tds-preview"
 version = "0.1.0-preview.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "454957bed59024ea56acb311e8c0b74369182f1a3256d9e036d4b46f687d0462"
 dependencies = [
  "async-trait",
  "bigdecimal",
@@ -1292,7 +1290,7 @@ dependencies = [
 
 [[package]]
 name = "sqlserver-plugin"
-version = "1.0.0-beta.3"
+version = "1.0.0-beta.3+plus.1"
 dependencies = [
  "base64",
  "chrono",

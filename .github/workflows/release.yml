@@ -3,53 +3,100 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "plus-v*"
 
 jobs:
   validate:
-    name: Validate release version
+    name: Validate fork release
     runs-on: ubuntu-latest
     steps:
+      - name: Require the fork repository
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ "$REPOSITORY" != "hei5enbug/tabularis-sqlserver-plus" ]; then
+            echo "::error::Release is permitted only from hei5enbug/tabularis-sqlserver-plus."
+            exit 1
+          fi
+
       - uses: actions/checkout@v7
 
-      - name: Check tag matches manifest and EXPLAIN package versions
-        run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          TABULARIUM_VERSION=$(jq -r .version .tabularium)
-          EXPLAIN_VERSION=$(jq -r .version explain/package.json)
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-          if [ "$TAG_VERSION" != "$TABULARIUM_VERSION" ]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match .tabularium version ($TABULARIUM_VERSION)"
-            exit 1
-          fi
-          # The plugin binaries and the npm parser package ship from the same
-          # tag, so their versions must agree before anything is built.
-          if [ "$TAG_VERSION" != "$EXPLAIN_VERSION" ]; then
-            echo "::error::Tag version ($TAG_VERSION) does not match explain/package.json version ($EXPLAIN_VERSION)"
-            exit 1
-          fi
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
 
-      # See ci.yml: pnpm comes from the pinned "packageManager" field, not
-      # from the Corepack copy bundled with Node.
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
           package_json_file: explain/package.json
 
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          # pnpm 11.23 requires Node 22.13 or newer.
-          node-version: "22.13"
-
-      # Typecheck and test the parser before any platform binary is built so a
-      # broken parser fails the whole release instead of only the npm half.
-      - name: Typecheck and test EXPLAIN parser
-        working-directory: explain
+      - name: Check tag and exact package versions
+        env:
+          TAG_NAME: ${{ github.ref_name }}
         run: |
-          pnpm install --frozen-lockfile
-          pnpm typecheck
-          pnpm test
+          case "$TAG_NAME" in
+            plus-v*) TAG_VERSION="${TAG_NAME#plus-v}" ;;
+            *) echo "::error::Expected a plus-v<version> tag."; exit 1 ;;
+          esac
+          node scripts/preflight.mjs --root . --metadata-only --expected-version "$TAG_VERSION"
+
+      - name: Build debug plugin
+        run: cargo build --locked --bin sqlserver-plugin
+
+      - name: Run Rust unit and conformance tests
+        run: cargo test --locked --bins --test conformance
+
+      - name: Run Rust lint and formatting checks
+        run: |
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo fmt --all -- --check
+
+      - name: Install UI dependencies
+        working-directory: ui
+        run: npx --yes npm@11.6.2 ci --ignore-scripts --no-audit --no-fund
+
+      - name: Typecheck UI
+        working-directory: ui
+        run: npm run typecheck
+
+      - name: Test UI
+        working-directory: ui
+        run: npm test
+
+      - name: Build UI bundle
+        working-directory: ui
+        run: npm run build
+
+      - name: Install EXPLAIN dependencies
+        working-directory: explain
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck EXPLAIN parser
+        working-directory: explain
+        run: pnpm typecheck
+
+      - name: Test EXPLAIN parser
+        working-directory: explain
+        run: pnpm test
+
+      - name: Build EXPLAIN bundle
+        working-directory: explain
+        run: pnpm build
+
+      - name: Run manifest preflight and packaging tests
+        run: |
+          node scripts/preflight.mjs --root . --asset-root .
+          node --test tests/packaging/*.test.mjs
+
+      - name: Install Testcontainers dependencies
+        run: npm --prefix tests/containers ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run owned SQL Server Testcontainers suite
+        run: npm --prefix tests/containers test
 
   build:
     name: ${{ matrix.platform-label }}
@@ -62,29 +109,28 @@ jobs:
           - platform-label: linux-x64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            archive: zip
             binary-suffix: ""
+            cross: false
           - platform-label: linux-arm64
             runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-            archive: zip
             binary-suffix: ""
             cross: true
           - platform-label: darwin-x64
-            runner: macos-latest
+            runner: macos-15-intel
             target: x86_64-apple-darwin
-            archive: zip
             binary-suffix: ""
+            cross: false
           - platform-label: darwin-arm64
-            runner: macos-14
+            runner: macos-15
             target: aarch64-apple-darwin
-            archive: zip
             binary-suffix: ""
+            cross: false
           - platform-label: win-x64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
-            archive: zip
             binary-suffix: ".exe"
+            cross: false
 
     steps:
       - uses: actions/checkout@v7
@@ -94,182 +140,69 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Check for UI extension
-        id: ui
-        shell: bash
-        run: |
-          if [ -f ui/package.json ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
 
-      - name: Check for EXPLAIN parser
-        id: explain
-        shell: bash
-        run: |
-          if [ -f explain/package.json ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      # See ci.yml: pnpm comes from the pinned "packageManager" field, not
-      # from the Corepack copy bundled with Node.
       - name: Setup pnpm
-        if: steps.explain.outputs.present == 'true'
         uses: pnpm/action-setup@v6
         with:
           package_json_file: explain/package.json
 
-      - name: Setup Node
-        if: steps.ui.outputs.present == 'true' || steps.explain.outputs.present == 'true'
-        uses: actions/setup-node@v7
-        with:
-          # pnpm 11.23 requires Node 22.13 or newer.
-          node-version: "22.13"
-
-      - name: Build UI
-        if: steps.ui.outputs.present == 'true'
-        shell: bash
+      - name: Build UI bundle
         working-directory: ui
         run: |
-          npm ci --no-audit --no-fund
+          npx --yes npm@11.6.2 ci --ignore-scripts --no-audit --no-fund
           npm run build
 
-      - name: Build EXPLAIN parser
-        if: steps.explain.outputs.present == 'true'
-        shell: bash
-        working-directory: explain
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
-
-      - name: Install cross (linux-arm64 only)
-        if: matrix.cross
-        run: cargo install cross --locked
-
-      - name: Build (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Build
-        if: ${{ !matrix.cross }}
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package (unix)
-        if: runner.os != 'Windows'
-        run: |
-          STAGE=staging
-          mkdir -p "$STAGE"
-          cp target/${{ matrix.target }}/release/sqlserver-plugin${{ matrix.binary-suffix }} "$STAGE/"
-          cp .tabularium "$STAGE/"
-          if [ -d assets ]; then
-            cp -r assets "$STAGE/"
-          fi
-          if [ -f ui/dist/index.js ]; then
-            mkdir -p "$STAGE/ui/dist"
-            cp ui/dist/index.js "$STAGE/ui/dist/"
-          fi
-          if [ -f explain/dist/index.iife.js ]; then
-            mkdir -p "$STAGE/explain/dist"
-            cp explain/dist/index.iife.js "$STAGE/explain/dist/"
-          fi
-          (cd "$STAGE" && zip -r ../sqlserver-plugin-${{ matrix.platform-label }}.zip .)
-
-      - name: Package (windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $stage = "staging"
-          New-Item -ItemType Directory -Force -Path $stage | Out-Null
-          Copy-Item "target\${{ matrix.target }}\release\sqlserver-plugin${{ matrix.binary-suffix }}" $stage
-          Copy-Item ".tabularium" $stage
-          if (Test-Path "assets") {
-            Copy-Item -Recurse "assets" "$stage\assets"
-          }
-          if (Test-Path "ui\dist\index.js") {
-            New-Item -ItemType Directory -Force -Path "$stage\ui\dist" | Out-Null
-            Copy-Item "ui\dist\index.js" "$stage\ui\dist"
-          }
-          if (Test-Path "explain\dist\index.iife.js") {
-            New-Item -ItemType Directory -Force -Path "$stage\explain\dist" | Out-Null
-            Copy-Item "explain\dist\index.iife.js" "$stage\explain\dist"
-          }
-          Compress-Archive -Path "$stage\*" -DestinationPath "sqlserver-plugin-${{ matrix.platform-label }}.zip"
-
-      - name: Stash artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: sqlserver-plugin-${{ matrix.platform-label }}
-          path: sqlserver-plugin-${{ matrix.platform-label }}.zip
-          retention-days: 1
-
-  publish-explain:
-    name: Publish EXPLAIN parser to npm
-    # Runs only once every platform binary has built, so the npm package and
-    # the GitHub release are cut from the same tag in the same run.
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          package_json_file: explain/package.json
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "22.13"
-          registry-url: "https://registry.npmjs.org"
-
-      # npm never accepts a second publish of an existing version, so a re-run
-      # of this workflow (or a recreated tag) must not fail the release on the
-      # npm half once the package is already out.
-      - name: Check whether this version is already on npm
-        id: npm
-        working-directory: explain
-        run: |
-          NAME=$(jq -r .name package.json)
-          VERSION=$(jq -r .version package.json)
-          if npm view "$NAME@$VERSION" version >/dev/null 2>&1; then
-            echo "::warning::$NAME@$VERSION is already published on npm; skipping publish"
-            echo "published=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "published=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Install and build
-        if: steps.npm.outputs.published == 'false'
+      - name: Build EXPLAIN bundle
         working-directory: explain
         run: |
           pnpm install --frozen-lockfile
           pnpm build
 
-      # Authenticates through npm Trusted Publishing (OIDC, `id-token: write`
-      # above) configured on npmjs.com for this repository and release.yml;
-      # no npm token secret is involved.
-      - name: Publish
-        if: steps.npm.outputs.published == 'false'
-        working-directory: explain
-        run: pnpm publish --access public --provenance --no-git-checks
+      - name: Install cross (linux-arm64 only)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build release binary (cross)
+        if: matrix.cross
+        run: cross build --locked --release --target ${{ matrix.target }} --bin sqlserver-plugin
+
+      - name: Build release binary
+        if: ${{ !matrix.cross }}
+        run: cargo build --locked --release --target ${{ matrix.target }} --bin sqlserver-plugin
+
+      - name: Create deterministic package and SHA-256 sidecar
+        shell: bash
+        run: |
+          node scripts/package.mjs \
+            --root . \
+            --binary "target/${{ matrix.target }}/release/sqlserver-plugin${{ matrix.binary-suffix }}" \
+            --platform "${{ matrix.platform-label }}" \
+            --output "sqlserver-plus-${{ matrix.platform-label }}.zip"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: sqlserver-plus-${{ matrix.platform-label }}
+          path: |
+            sqlserver-plus-${{ matrix.platform-label }}.zip
+            sqlserver-plus-${{ matrix.platform-label }}.zip.sha256
+          retention-days: 1
 
   release:
-    name: Publish GitHub release
+    name: Publish unsigned GitHub release assets
     needs: build
+    if: github.repository == 'hei5enbug/tabularis-sqlserver-plus'
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout (for the .tabularium manifest asset)
-        uses: actions/checkout@v7
+      - uses: actions/checkout@v7
 
-      - name: Download all build artifacts
+      - name: Download platform packages
         uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -280,7 +213,8 @@ jobs:
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$TAG_NAME" == *-* ]]; then
+          VERSION="${TAG_NAME#plus-v}"
+          if [[ "$VERSION" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -289,10 +223,9 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
-          # .tabularium ships as a standalone asset: the registry resolves the
-          # manifest from release assets, not the git ref.
           files: |
             artifacts/*.zip
+            artifacts/*.sha256
             .tabularium
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
           make_latest: ${{ steps.meta.outputs.prerelease == 'false' }}

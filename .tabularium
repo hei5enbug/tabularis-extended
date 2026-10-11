@@ -1,61 +1,62 @@
 {
   "$schema": "https://registry.tabularis.dev/manifest.schema.json?kind=driver",
-  "name": "sqlserver",
-  "version": "1.0.0-beta.3",
-  "description": "Full-featured Microsoft SQL Server driver for Tabularis with schema browsing, query execution, visual plans, type-aware row editing, DDL, routines, triggers, BLOBs, and database-user management.",
+  "id": "sqlserver-plus",
+  "name": "SQL Server Plus",
+  "version": "1.0.0-beta.3+plus.1",
+  "description": "Forked SQL Server driver for Tabularis Extended with SQL, Windows/Kerberos, and Entra user authentication.",
   "category": "database",
   "tags": ["driver", "sqlserver", "mssql", "sql", "relational", "database-driver"],
   "license": "Apache-2.0",
-  "icon": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/sqlserver-icon.svg",
+  "icon": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/sqlserver-icon.svg",
   "color": "#CC2927",
   "screenshots": [
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/01-fresh-install.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/01-fresh-install.png",
       "caption": "Database Manager on first launch",
       "alt": "Tabularis Database Manager showing no active connections"
     },
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/02-database-picker.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/02-database-picker.png",
       "caption": "SQL Server listed in the database picker",
       "alt": "Choose a database dialog showing SQL Server installed under SQL and Relational categories"
     },
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/03-connection-form.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/03-connection-form.png",
       "caption": "Connection configuration form",
       "alt": "SQL Server connection form with connection string, host, port, username, password, and database fields filled in"
     },
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/04-test-connection-success.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/04-test-connection-success.png",
       "caption": "Successful connection test",
       "alt": "SQL Server connection form showing a green Connection successful message"
     },
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/05-connections-list.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/05-connections-list.png",
       "caption": "Saved connection in the Database Manager",
       "alt": "Database Manager showing one saved SQL Server connection card"
     },
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/06-schema-browser.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/06-schema-browser.png",
       "caption": "Multi-schema browsing with tables, views, routines, and triggers",
       "alt": "Sidebar schema tree showing SQL Server schemas with tables, views, routines, and triggers"
     },
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/07-table-data.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/07-table-data.png",
       "caption": "Data grid with filtering and sorting",
       "alt": "SQL Server customer table data grid filtered to the West region"
     },
     {
-      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-sqlserver-plugin/main/assets/screenshots/08-visual-explain.png",
+      "url": "https://raw.githubusercontent.com/hei5enbug/tabularis-sqlserver-plus/main/assets/screenshots/08-visual-explain.png",
       "caption": "Visual EXPLAIN for a SQL Server SHOWPLAN",
       "alt": "Visual EXPLAIN graph showing SQL Server SELECT, hash match, clustered index scan, and index seek operators"
     }
   ],
   "readme": "README.md",
-  "homepage": "https://github.com/TabularisDB/tabularis-sqlserver-plugin",
-  "documentation_url": "https://github.com/TabularisDB/tabularis-sqlserver-plugin#readme",
-  "min_runtime_version": "0.25.1-5",
+  "homepage": "https://github.com/hei5enbug/tabularis-sqlserver-plus",
+  "documentation_url": "https://github.com/hei5enbug/tabularis-sqlserver-plus#readme",
+  "min_runtime_version": "0.27.0",
   "support": {
-    "issues_url": "https://github.com/TabularisDB/tabularis-sqlserver-plugin/issues"
+    "issues_url": "https://github.com/hei5enbug/tabularis-sqlserver-plus/issues"
   },
   "kind": "driver",
   "engine": "sqlserver",
@@ -85,7 +86,7 @@
     "connection_string": true,
     "connection_string_example": "sqlserver://sa:password@localhost:1433/master",
     "identifier_quote": "\"",
-    "sql_dialect": "mssql",
+          "sql_dialect": "mssql",
     "alter_primary_key": false,
     "auto_increment_keyword": "IDENTITY(1,1)",
     "serial_type": "",
@@ -101,7 +102,7 @@
     {
       "slot": "connection-modal.extra_fields",
       "module": "ui/dist/index.js",
-      "driver": "sqlserver"
+      "driver": "sqlserver-plus"
     }
   ],
   "type_mappings": {

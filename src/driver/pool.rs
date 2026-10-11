@@ -14,6 +14,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::connection::{custom_ca_error, resolve_connection_params};
+use crate::driver::azure_cli_auth::{self, AzureCliAuth, ConnectError};
 use crate::driver::error::{bridge_error_requires_discard, format_bridge_error};
 use crate::models::ConnectionParams;
 use crate::settings::PluginSettings;
@@ -80,7 +81,7 @@ impl BridgeConnection {
         self.format_result(result)
     }
 
-    fn discard_if_transaction_open(&mut self) {
+    pub(crate) fn discard_if_transaction_open(&mut self) {
         if self.client.inner_mut().has_active_transaction() {
             self.recyclable = false;
         }
@@ -108,15 +109,22 @@ impl BridgeConnection {
         self.query_timeout_seconds
     }
 
+    /// Prevents a client whose TDS stream may be incomplete from returning to
+    /// the pool when this object is dropped.
+    pub fn discard(&mut self) {
+        self.recyclable = false;
+    }
+
     pub fn ssl_mode(&self) -> &str {
         &self.ssl_mode
     }
 }
 
 /// Deadpool `Manager` for bridge connections.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct BridgeManager {
     config: Config,
+    entra_auth: Option<AzureCliAuth>,
     startup_script: Option<String>,
     ssl_mode: String,
     connect_timeout: Duration,
@@ -126,12 +134,14 @@ pub struct BridgeManager {
 impl BridgeManager {
     pub fn new(
         config: Config,
+        entra_auth: Option<AzureCliAuth>,
         startup_script: Option<String>,
         ssl_mode: &str,
         settings: &PluginSettings,
     ) -> Self {
         Self {
             config,
+            entra_auth,
             startup_script,
             ssl_mode: ssl_mode.to_owned(),
             connect_timeout: Duration::from_secs(u64::from(settings.connect_timeout_seconds)),
@@ -155,14 +165,21 @@ impl Manager for BridgeManager {
     type Error = Error;
 
     async fn create(&self) -> Result<Self::Type, Self::Error> {
-        let client = timeout(self.connect_timeout, Client::connect(&self.config))
-            .await
-            .map_err(|_| {
-                Error::Conversion(format!(
-                    "Connection timed out after {} seconds",
-                    self.connect_timeout.as_secs()
-                ))
-            })??;
+        let client = azure_cli_auth::connect_with_auth(
+            &self.config,
+            self.entra_auth.as_ref(),
+            self.connect_timeout,
+            |config| async move { Client::connect(&config).await },
+        )
+        .await
+        .map_err(|error| match error {
+            ConnectError::Authentication(message) => Error::Conversion(message.into()),
+            ConnectError::Timeout => Error::Conversion(format!(
+                "Connection timed out after {} seconds",
+                self.connect_timeout.as_secs()
+            )),
+            ConnectError::Connect(error) => error,
+        })?;
         let mut connection = BridgeConnection {
             client,
             query_timeout_seconds: self.query_timeout_seconds,
@@ -215,11 +232,17 @@ pub fn build_config(
     settings: &PluginSettings,
 ) -> Result<Config, String> {
     let params = resolve_connection_params(params)?;
+    let entra_auth = AzureCliAuth::from_params(&params)?;
+    if let Some(auth) = &entra_auth {
+        auth.validate_connection(&params, settings.trust_server_certificate)?;
+    }
     let mut cfg = Config::new();
     cfg.host(params.host.as_deref().unwrap_or("localhost"));
     cfg.port(params.port.unwrap_or(1433));
     cfg.database(params.database.primary());
-    if params.integrated_auth {
+    if entra_auth.is_some() {
+        cfg.authentication(AuthMethod::sql_server("", ""));
+    } else if params.integrated_auth {
         cfg.authentication(AuthMethod::Integrated);
     } else {
         cfg.authentication(AuthMethod::sql_server(
@@ -278,6 +301,27 @@ pub fn build_config(
     }
 
     Ok(cfg)
+}
+
+impl std::fmt::Debug for BridgeManager {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("BridgeManager")
+            .field("config", &"[redacted]")
+            .field(
+                "auth_mode",
+                &if self.entra_auth.is_some() {
+                    "entra_user"
+                } else {
+                    "existing"
+                },
+            )
+            .field("startup_script", &self.startup_script.is_some())
+            .field("ssl_mode", &self.ssl_mode)
+            .field("connect_timeout", &self.connect_timeout)
+            .field("query_timeout_seconds", &self.query_timeout_seconds)
+            .finish()
+    }
 }
 
 #[cfg(test)]

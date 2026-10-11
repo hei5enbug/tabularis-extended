@@ -4,6 +4,7 @@
 //! The driver supports schema introspection, table/view DDL, foreign keys,
 //! triggers, and stored-routine management.
 
+pub mod azure_cli_auth;
 pub mod blob;
 pub mod ddl;
 pub mod error;
@@ -21,9 +22,11 @@ pub mod users;
 pub mod version;
 
 use mssql_tds::connection::tds_client::{ResultSet, ResultSetClient};
+use mssql_tds::error::Error as TdsError;
 use mssql_tiberius_bridge::row::RowSchema;
 use mssql_tiberius_bridge::Row;
 
+use crate::cancellation::{QueryCancellation, QueryExecutionError};
 use crate::models::{ConnectionParams, Pagination, QueryResult};
 use crate::pool_manager::{self, get_sqlserver_pool};
 
@@ -84,24 +87,50 @@ fn empty_query_result(columns: Vec<String>) -> QueryResult {
 /// UI expects for empty SELECTs. This cannot be simulated faithfully without
 /// a TDS stream; SS-003 exercises zero-row headers here through simple,
 /// multi-result, batch-RPC, and paginated JSON-RPC calls.
-async fn run_query_collecting(
+#[derive(Debug)]
+enum QueryRunError {
+    CancelledBeforeDispatch,
+    Tds(TdsError),
+    Driver(String),
+}
+
+impl QueryRunError {
+    fn into_string(self, ssl_mode: &str) -> String {
+        match self {
+            Self::CancelledBeforeDispatch => "query cancelled before dispatch".to_string(),
+            Self::Tds(error) => error::format_tds_error(&error, Some(ssl_mode)),
+            Self::Driver(message) => message,
+        }
+    }
+}
+
+async fn run_query_collecting_raw(
     conn: &mut pool::BridgeConnection,
     query: &str,
     overflow_policy: OverflowPolicy,
-) -> Result<Vec<QueryResult>, String> {
+    cancellation: Option<&QueryCancellation>,
+) -> Result<Vec<QueryResult>, QueryRunError> {
     let query_timeout_seconds = conn.query_timeout_seconds();
-    let ssl_mode = conn.ssl_mode().to_owned();
     let client = conn.inner_mut();
     // Drain any leftover state from a prior query / dropped stream so we
     // don't hit "open batch" errors when re-using the client.
+    client.close_query().await.map_err(QueryRunError::Tds)?;
+    if cancellation.is_some_and(QueryCancellation::cancelled_before_dispatch) {
+        return Err(QueryRunError::CancelledBeforeDispatch);
+    }
+    let cancel_handle = match cancellation {
+        Some(control) if control.begin_query_dispatch() => Some(control.tds_child_handle()),
+        Some(_) => return Err(QueryRunError::CancelledBeforeDispatch),
+        None => None,
+    };
     client
-        .close_query()
+        .execute(
+            query.to_string(),
+            query_timeout_seconds,
+            cancel_handle.as_ref(),
+        )
         .await
-        .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?;
-    client
-        .execute(query.to_string(), query_timeout_seconds, None)
-        .await
-        .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?;
+        .map_err(QueryRunError::Tds)?;
 
     let mut results = Vec::new();
     let mut retained_rows = 0usize;
@@ -117,11 +146,7 @@ async fn run_query_collecting(
                 .map(|column| column.column_name.clone())
                 .collect(),
         );
-        while let Some(values) = result_set
-            .next_row()
-            .await
-            .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?
-        {
+        while let Some(values) = result_set.next_row().await.map_err(QueryRunError::Tds)? {
             if retained_rows >= MAX_RESULT_ROWS && !is_affected_rows_sentinel {
                 current.truncated = true;
                 if matches!(overflow_policy, OverflowPolicy::Stop) {
@@ -133,37 +158,28 @@ async fn run_query_collecting(
             }
 
             let row = Row::from_schema(schema.clone(), values);
-            current.rows.push(
-                metadata
-                    .iter()
-                    .enumerate()
-                    .map(|(index, column)| {
-                        let column_type = extract::normalized_column_type(
-                            column.data_type,
-                            column.type_info.length,
-                        );
-                        extract::extract_value_as(&row, index, column_type)
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-            );
+            let converted = metadata
+                .iter()
+                .enumerate()
+                .map(|(index, column)| {
+                    let column_type =
+                        extract::normalized_column_type(column.data_type, column.type_info.length);
+                    extract::extract_value_as(&row, index, column_type)
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(QueryRunError::Driver)?;
+            current.rows.push(converted);
             if !is_affected_rows_sentinel {
                 retained_rows += 1;
             }
         }
         results.push(current);
-        if !client
-            .move_to_next()
-            .await
-            .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?
-        {
+        if !client.move_to_next().await.map_err(QueryRunError::Tds)? {
             break;
         }
     }
     if stopped_early {
-        client
-            .close_query()
-            .await
-            .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?;
+        client.close_query().await.map_err(QueryRunError::Tds)?;
     }
     if results.iter().any(|result| result.truncated) {
         // `truncated` on the primary result is the statement-level signal the
@@ -174,6 +190,17 @@ async fn run_query_collecting(
         }
     }
     Ok(results)
+}
+
+async fn run_query_collecting(
+    conn: &mut pool::BridgeConnection,
+    query: &str,
+    overflow_policy: OverflowPolicy,
+) -> Result<Vec<QueryResult>, String> {
+    let ssl_mode = conn.ssl_mode().to_owned();
+    run_query_collecting_raw(conn, query, overflow_policy, None)
+        .await
+        .map_err(|error| error.into_string(&ssl_mode))
 }
 
 /// Pull the trailing [`helpers::AFFECTED_ROWS_COLUMN`] result set produced by
@@ -231,6 +258,67 @@ async fn execute_result_bearing_dml(
     )
 }
 
+fn map_cancelable_query_error(
+    conn: &mut pool::BridgeConnection,
+    error: QueryRunError,
+    cancellation: &QueryCancellation,
+    ssl_mode: &str,
+) -> QueryExecutionError {
+    match error {
+        QueryRunError::CancelledBeforeDispatch => QueryExecutionError::CancelledConfirmed,
+        QueryRunError::Tds(error) => {
+            let confirmed = cancellation.confirms_tds_cancellation(&error);
+            let bridge_error = mssql_tiberius_bridge::Error::Tds(error);
+            if cancellation.is_cancelled() && cancellation.query_was_dispatched()
+                || error::bridge_error_requires_discard(&bridge_error)
+            {
+                // Even an OperationCancelledError is not enough to reuse the
+                // session: only the exact ACK witness allows us to tell the
+                // host that SQL Server stopped the request.
+                conn.discard();
+            }
+            if confirmed {
+                QueryExecutionError::CancelledConfirmed
+            } else {
+                QueryExecutionError::Driver(error::format_bridge_error(
+                    &bridge_error,
+                    Some(ssl_mode),
+                ))
+            }
+        }
+        QueryRunError::Driver(message) => {
+            // Result conversion can fail before the collector drains the TDS
+            // stream, so this session is unsafe to recycle even if no cancel
+            // notification raced with the error.
+            conn.discard();
+            QueryExecutionError::Driver(message)
+        }
+    }
+}
+
+async fn run_query_collecting_with_cancellation(
+    conn: &mut pool::BridgeConnection,
+    query: &str,
+    overflow_policy: OverflowPolicy,
+    cancellation: &QueryCancellation,
+) -> Result<Vec<QueryResult>, QueryExecutionError> {
+    let ssl_mode = conn.ssl_mode().to_owned();
+    let result = run_query_collecting_raw(conn, query, overflow_policy, Some(cancellation)).await;
+    conn.discard_if_transaction_open();
+    match result {
+        Ok(results) => {
+            cancellation.finish_query_dispatch();
+            Ok(results)
+        }
+        Err(error) => Err(map_cancelable_query_error(
+            conn,
+            error,
+            cancellation,
+            &ssl_mode,
+        )),
+    }
+}
+
 pub async fn execute_on_connection(
     conn: &mut pool::BridgeConnection,
     query: &str,
@@ -270,6 +358,84 @@ pub async fn execute_on_connection(
         None => query.to_string(),
     };
     let mut results = run_query_collecting(conn, &final_query, OverflowPolicy::Stop).await?;
+    let mut first = if results.is_empty() {
+        empty_query_result(Vec::new())
+    } else {
+        results.remove(0)
+    };
+
+    if let Some(ref mut pagination) = pagination {
+        pagination.has_more = first.truncated || first.rows.len() > pagination.page_size as usize;
+        if first.rows.len() > pagination.page_size as usize {
+            first.rows.truncate(pagination.page_size as usize);
+            first.truncated = true;
+        }
+    }
+    first.pagination = pagination;
+    if !results.is_empty() {
+        first.additional_results = Some(results);
+    }
+    Ok(first)
+}
+
+/// Execute a query with a request-scoped cancellation handle. All query
+/// shapes use the TDS collector so the actual SQL_BATCH receives the child
+/// handle; successful completion still wins a cancellation race.
+pub async fn execute_on_connection_with_cancellation(
+    conn: &mut pool::BridgeConnection,
+    query: &str,
+    limit: Option<u32>,
+    page: u32,
+    cancellation: &QueryCancellation,
+) -> Result<QueryResult, QueryExecutionError> {
+    if cancellation.cancelled_before_dispatch() {
+        return Err(QueryExecutionError::CancelledConfirmed);
+    }
+
+    let returns_result_set = helpers::query_returns_result_set(query);
+    if helpers::query_reports_affected_rows(query) {
+        let wrapped = helpers::wrap_dml_with_rowcount(query);
+        let mut result = finish_result_bearing_dml(
+            run_query_collecting_with_cancellation(
+                conn,
+                &wrapped,
+                OverflowPolicy::DrainForAffectedRows,
+                cancellation,
+            )
+            .await?,
+        )
+        .map_err(QueryExecutionError::Driver)?;
+        if !returns_result_set {
+            result.columns = Vec::new();
+            result.rows = Vec::new();
+        }
+        return Ok(result);
+    }
+
+    if !returns_result_set {
+        run_query_collecting_with_cancellation(conn, query, OverflowPolicy::Stop, cancellation)
+            .await?;
+        return Ok(empty_query_result(Vec::new()));
+    }
+
+    let pagination_limit = limit.filter(|_| helpers::query_can_be_paginated(query));
+    let mut pagination = pagination_limit.map(|page_size| Pagination {
+        page,
+        page_size,
+        total_rows: None,
+        has_more: false,
+    });
+    let final_query = match pagination_limit {
+        Some(page_size) => helpers::build_paginated_query(query, page_size, page),
+        None => query.to_string(),
+    };
+    let mut results = run_query_collecting_with_cancellation(
+        conn,
+        &final_query,
+        OverflowPolicy::Stop,
+        cancellation,
+    )
+    .await?;
     let mut first = if results.is_empty() {
         empty_query_result(Vec::new())
     } else {

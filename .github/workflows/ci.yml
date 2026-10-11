@@ -24,16 +24,15 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build
-        run: cargo build
+        run: cargo build --locked
 
       - name: Run tests
-        # This crate has no library target, so --lib would fail. Select the
-        # fixture-only conformance target while keeping live_db in its
-        # dedicated SQL Server job below.
-        run: cargo test --bins --test conformance
+        # This crate has no library target; run binary unit and conformance tests.
+        # The real SQL Server suite runs in its owned Testcontainers job below.
+        run: cargo test --locked --bins --test conformance
 
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -44,10 +43,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # Installs the pnpm version pinned by "packageManager" in
-      # explain/package.json. Corepack is not used because the copy bundled
-      # with Node 22.13 carries stale npm registry signing keys and fails
-      # with "Cannot find matching keyid" when it resolves pnpm.
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
@@ -56,8 +51,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          # pnpm 11.23 requires Node 22.13 or newer.
-          node-version: "22.13"
+          node-version: "24.21.0"
 
       - name: Install dependencies
         working-directory: explain
@@ -84,11 +78,11 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
-          node-version: "22.13"
+          node-version: "24.21.0"
 
       - name: Install dependencies
         working-directory: ui
-        run: npm ci
+        run: npx --yes npm@11.6.2 ci --ignore-scripts --no-audit --no-fund
 
       - name: Typecheck
         working-directory: ui
@@ -103,57 +97,61 @@ jobs:
         run: npm run build
 
   validate-manifest:
-    name: Validate .tabularium manifest
+    name: Validate manifest and packaging
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
-      # registry.tabularis.dev serves the driver-kind schema including the
-      # additive explain_parsers field from core PR #688, so the whole
-      # manifest is validated against the live validator.
-      - name: Validate manifest against the live registry schema
-        run: |
-          npx --yes @tabularium/cli validate .tabularium \
-            --registry https://registry.tabularis.dev --kind driver
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: explain/package.json
 
-  live-db-integration:
-    name: Live SQL Server integration
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
+
+      - name: Build UI bundle
+        working-directory: ui
+        run: |
+          npx --yes npm@11.6.2 ci --ignore-scripts --no-audit --no-fund
+          npm run build
+
+      - name: Build EXPLAIN bundle
+        working-directory: explain
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Run manifest preflight
+        run: node scripts/preflight.mjs --root . --asset-root .
+
+      - name: Run packaging tests
+        run: node --test tests/packaging/*.test.mjs
+
+  testcontainers:
+    name: SQL Server Testcontainers integration
     runs-on: ubuntu-latest
-    # SQL Server needs more startup time and memory than PostgreSQL. GitHub's
-    # hosted runner has sufficient memory; generous health retries wait for
-    # readiness without a fixed sleep.
-    services:
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        ports:
-          - 1433:1433
-        env:
-          ACCEPT_EULA: Y
-          MSSQL_SA_PASSWORD: "Str0ng!Passw0rd"
-        options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Str0ng!Passw0rd' -C -Q 'SELECT 1' -b"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-start-period 20s
-          --health-retries 30
     steps:
       - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build
-        run: cargo build
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24.21.0"
 
-      - name: Run live-database integration test
-        env:
-          SQLSERVER_PLUGIN_BIN: ${{ github.workspace }}/target/debug/sqlserver-plugin
-          SQLSERVER_TEST_HOST: 127.0.0.1
-          SQLSERVER_TEST_PORT: 1433
-          SQLSERVER_TEST_USER: sa
-          SQLSERVER_TEST_PASSWORD: "Str0ng!Passw0rd"
-          SQLSERVER_TEST_DATABASE: tabularis_test
-        run: cargo test --test live_db -- --test-threads=1
+      - name: Build plugin
+        run: cargo build --locked --bin sqlserver-plugin
+
+      - name: Install Testcontainers dependencies
+        run: npm --prefix tests/containers ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run isolated SQL Server suite
+        run: npm --prefix tests/containers test
 
   pr-title:
     name: PR title (Conventional Commits)
@@ -235,12 +233,10 @@ jobs:
         id: baseline
         run: |
           git fetch origin main --tags --quiet
-          # Only plugin release tags (v*) are a baseline. The npm parser
-          # package ships from the same v* tag; legacy explain-v* tags must
-          # not be picked up here.
-          TAG=$(git -C . describe --tags --abbrev=0 --match 'v[0-9]*' origin/main 2>/dev/null || true)
+          # Only fork plugin tags (plus-v*) are a baseline.
+          TAG=$(git -C . describe --tags --abbrev=0 --match 'plus-v[0-9]*' origin/main 2>/dev/null || true)
           if [ -n "$TAG" ]; then
-            BASELINE="${TAG#v}"
+            BASELINE="${TAG#plus-v}"
           else
             BASELINE=$(git show origin/main:.tabularium | jq -r .version)
           fi
@@ -258,19 +254,21 @@ jobs:
             const marker = "<!-- version-suggestion-bot";
 
             function parseVersion(v) {
-              const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-([a-zA-Z]+)\.(\d+))?$/);
+              const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-([a-zA-Z]+)\.(\d+))?(?:\+([a-zA-Z0-9.-]+))?$/);
               if (!m) throw new Error(`Cannot parse version: ${v}`);
               return {
                 major: Number(m[1]), minor: Number(m[2]), patch: Number(m[3]),
-                stage: m[4] || null, stageNum: m[5] ? Number(m[5]) : null,
+                stage: m[4] || null, stageNum: m[5] ? Number(m[5]) : null, build: m[6] || null,
               };
             }
             function formatVersion(v) {
               const base = `${v.major}.${v.minor}.${v.patch}`;
-              return v.stage ? `${base}-${v.stage}.${v.stageNum}` : base;
+              const prerelease = v.stage ? `-${v.stage}.${v.stageNum}` : "";
+              const build = v.build ? `+${v.build}` : "";
+              return `${base}${prerelease}${build}`;
             }
             function bumpStable(v, cls) {
-              const out = { major: v.major, minor: v.minor, patch: v.patch, stage: null, stageNum: null };
+              const out = { major: v.major, minor: v.minor, patch: v.patch, stage: null, stageNum: null, build: v.build };
               if (cls === "major") { out.major += 1; out.minor = 0; out.patch = 0; }
               else if (cls === "minor") { out.minor += 1; out.patch = 0; }
               else if (cls === "patch") { out.patch += 1; }
@@ -280,17 +278,17 @@ jobs:
               const baseline = parseVersion(baselineStr);
               if (channelLabel === "stable") {
                 if (baseline.stage) {
-                  return formatVersion({ major: baseline.major, minor: baseline.minor, patch: baseline.patch, stage: null, stageNum: null });
+                  return formatVersion({ major: baseline.major, minor: baseline.minor, patch: baseline.patch, stage: null, stageNum: null, build: baseline.build });
                 }
                 return formatVersion(bumpStable(baseline, classification));
               }
               if (baseline.stage === channelLabel) {
                 return formatVersion({ ...baseline, stageNum: baseline.stageNum + 1 });
               }
-              let base = { major: baseline.major, minor: baseline.minor, patch: baseline.patch };
+              let base = { major: baseline.major, minor: baseline.minor, patch: baseline.patch, build: baseline.build };
               if (!baseline.stage) {
                 const bumped = bumpStable(baseline, classification);
-                base = { major: bumped.major, minor: bumped.minor, patch: bumped.patch };
+                base = { major: bumped.major, minor: bumped.minor, patch: bumped.patch, build: bumped.build };
               }
               return formatVersion({ ...base, stage: channelLabel, stageNum: 1 });
             }
@@ -347,7 +345,7 @@ jobs:
             }
 
             const suggested = computeNextVersion(baselineStr, classification, channel);
-            const tag = `v${suggested}`;
+            const tag = `plus-v${suggested}`;
 
             await minimizePrevious();
 

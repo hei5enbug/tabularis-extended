@@ -72,22 +72,36 @@ fn manager_is_clone_send_sync() {
 }
 
 #[test]
+/// 풀 관리자의 디버그 표현은 복사된 설정을 동일하게 표시한다.
 fn manager_new_stores_config() {
+    // given
     let settings = PluginSettings::default();
     let cfg = build_config(
         &base_params(Some("example.com"), Some(1433), "master"),
         &settings,
     )
     .expect("config builds");
-    let mgr = BridgeManager::new(cfg, Some("SET NOCOUNT ON".into()), "prefer", &settings);
+    let mgr = BridgeManager::new(
+        cfg,
+        None,
+        Some("SET NOCOUNT ON".into()),
+        "prefer",
+        &settings,
+    );
+
+    // when
     let cloned = mgr.clone();
     let original = format!("{:?}", mgr);
     let cloned_dbg = format!("{:?}", cloned);
+
+    // then
     assert_eq!(original, cloned_dbg);
 }
 
 #[test]
+/// 연결 설정은 애플리케이션 이름과 인증서 신뢰 설정을 반영한다.
 fn build_config_applies_application_name_and_certificate_override() {
+    // given
     let settings = PluginSettings {
         application_name: "Tabularis Test".into(),
         trust_server_certificate: true,
@@ -96,16 +110,21 @@ fn build_config_applies_application_name_and_certificate_override() {
     let mut params = base_params(Some("localhost"), Some(1433), "master");
     params.ssl_mode = Some("verify-full".into());
 
+    // when
     let debug = format!(
         "{:?}",
         build_config(&params, &settings).expect("config builds")
     );
+
+    // then
     assert!(debug.contains("Tabularis Test"));
     assert!(debug.contains("trust_cert: true"));
 }
 
 #[test]
+/// 풀 관리자는 생성 시 연결 제한 시간을 저장한다.
 fn manager_snapshots_timeout_settings() {
+    // given
     let settings = PluginSettings {
         connect_timeout_seconds: 8,
         query_timeout_seconds: 42,
@@ -116,8 +135,10 @@ fn manager_snapshots_timeout_settings() {
         &settings,
     )
     .expect("config builds");
-    let manager = BridgeManager::new(cfg, None, "prefer", &settings);
+    // when
+    let manager = BridgeManager::new(cfg, None, None, "prefer", &settings);
 
+    // then
     assert_eq!(manager.connect_timeout, Duration::from_secs(8));
     assert_eq!(manager.query_timeout_seconds, Some(42));
 }

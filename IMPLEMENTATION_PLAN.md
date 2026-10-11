@@ -1,6 +1,21 @@
 # SQL Server Plus implementation plan
 
-This document defines future implementation work. This commit changes documentation only.
+This document records the implementation contract and its acceptance criteria.
+
+## Verification update — 2026-10-11
+
+D1–D4 are implemented: Azure CLI authentication, request-scoped native cancellation, auth UI, and complete
+fork packaging. The locked Rust suite passed 250 unit tests and three conformance tests; clippy and formatting
+checks passed. UI tests (17), EXPLAIN tests (13), their type/build checks, and packaging tests (13) passed.
+Seven Testcontainers tests exercised actual SQL Server results and cancellation, including an independent
+server activity check and survival of neighboring requests. The installer was checked in disposable profiles.
+
+Host-managed query acceptance is recorded in the companion host's verification results. The fourteen original
+connections were not imported or contacted in this run. Entra acceptance by Azure and deployment into the user's
+existing profile remain separate opt-in checks. The build recipe is in [the release guide](docs/build-release.md).
+
+## Contract
+
 The driver preserves the currently used SQL Server authentication and adds the driver support required by
 Tabularis Extended's saved-result paging, query cancellation, and query history.
 
@@ -239,7 +254,9 @@ Use the versions and frozen package lockfiles in `ui/` and `explain/` for their 
 `just build`/`just release` currently build those assets, but their install steps must be made reproducible
 before using them as a release gate. Do not treat a backend-only build as a complete plugin package.
 
-No test in this work may create, seed, mutate, or drop a live database. Do not run `just seed-sqlserver`,
+The user authorized disposable Testcontainers fixtures on 2026-10-11. Those owned containers may create
+their test data and are removed after the run. This exception does not authorize changes to existing databases.
+No test in this work may create, seed, mutate, or drop an existing live database. Do not run `just seed-sqlserver`,
 `tests/live_db.rs`, or inherited CI jobs that perform SQL writes. Use recorded protocol fixtures for mutation
 and error cases. Use only explicit SELECT statements for authorized existing-connection checks and an approved
 nonproduction owned SELECT for cancellation. TDS ATTENTION is the cancellation mechanism; do not issue KILL.

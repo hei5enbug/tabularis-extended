@@ -1,0 +1,11 @@
+{
+  "name": "sqlserver-plus-container-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test sqlserver.test.mjs"
+  },
+  "devDependencies": {
+    "testcontainers": "12.2.0"
+  }
+}

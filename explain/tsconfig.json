@@ -18,7 +18,7 @@
     "verbatimModuleSyntax": true,
     "erasableSyntaxOnly": true,
     "noEmit": true,
-    "types": ["vitest/globals"]
+    "types": ["vitest/globals", "node"]
   },
   "include": ["src/**/*", "tests/**/*.ts"],
   "exclude": ["dist", "node_modules"]

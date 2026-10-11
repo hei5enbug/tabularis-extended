@@ -3,6 +3,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use crate::cancellation::{ExecutionLease, QueryExecutionError};
 use crate::connection::resolve_connection_params;
 use crate::driver::error::redact_connection_secrets;
 use crate::handlers::{
@@ -40,7 +41,12 @@ const NOT_IMPLEMENTED: &[(&str, &str)] = &[
 /// Parse one JSON-RPC line and return the response value (serialised
 /// downstream by `main.rs`). Never panics — parse errors and method
 /// failures are surfaced as JSON-RPC error responses.
+#[cfg(test)]
 pub async fn handle_line(line: &str) -> Value {
+    handle_line_with_execution(line, None).await
+}
+
+pub async fn handle_line_with_execution(line: &str, execution: Option<&ExecutionLease>) -> Value {
     let request: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(err) => return error_response(Value::Null, -32700, &format!("parse error: {err}")),
@@ -53,6 +59,7 @@ pub async fn handle_line(line: &str) -> Value {
         .unwrap_or("")
         .to_string();
     let params = request.get("params").cloned().unwrap_or(Value::Null);
+    let execution = execution.filter(|lease| Some(lease.request_id()) == id.as_u64());
 
     match method.as_str() {
         "initialize" => {
@@ -114,8 +121,11 @@ pub async fn handle_line(line: &str) -> Value {
         "apply_db_user_privileges" => users::apply_db_user_privileges(id, &params).await,
 
         // Query execution.
-        "execute_query" => query::execute_query(id, &params).await,
-        "execute_query_batch" => query::execute_query_batch(id, &params).await,
+        "execute_query" => query::execute_query_with_execution(id, &params, execution).await,
+        "execute_query_batch" => {
+            query::execute_query_batch_with_execution(id, &params, execution).await
+        }
+        "cancel" => Value::Null,
         "explain_query" => query::explain_query(id, &params).await,
 
         // CRUD.
@@ -199,6 +209,41 @@ pub fn respond<T: Serialize>(id: Value, outcome: Result<T, String>) -> Value {
     }
 }
 
+/// Turn a cancellable query result into its JSON-RPC response.
+pub fn respond_query<T: Serialize>(
+    id: Value,
+    request_id: Option<u64>,
+    outcome: Result<T, QueryExecutionError>,
+) -> Value {
+    match outcome {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(value) => ok_response(id, value),
+            Err(err) => error_response(id, -32603, &format!("serialization failed: {err}")),
+        },
+        Err(QueryExecutionError::CancelledConfirmed) => match request_id {
+            Some(request_id) => query_cancelled_response(id, request_id),
+            None => error_response(id, -32000, "SQL Server query cancellation was confirmed"),
+        },
+        Err(QueryExecutionError::Driver(message)) => error_response(id, -32000, &message),
+    }
+}
+
+pub fn query_cancelled_response(id: Value, request_id: u64) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "error": {
+            "code": -32800,
+            "message": "Query cancelled",
+            "data": {
+                "kind": "query_cancelled",
+                "request_id": request_id,
+                "server_termination_confirmed": true,
+            }
+        },
+        "id": id,
+    })
+}
+
 /// Deserialize the nested `params.params` connection object every RPC method
 /// receives.
 pub fn conn_params(params: &Value) -> Result<ConnectionParams, String> {
@@ -229,6 +274,51 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+
+    #[test]
+    fn 취소_확인_응답은_요청_id와_서버_확인_표시를_포함한다() {
+        // given
+        let response_id = json!(71);
+
+        // when
+        let response = query_cancelled_response(response_id.clone(), 71);
+
+        // then
+        assert_eq!(
+            response,
+            json!({
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32800,
+                    "message": "Query cancelled",
+                    "data": {
+                        "kind": "query_cancelled",
+                        "request_id": 71,
+                        "server_termination_confirmed": true
+                    }
+                },
+                "id": response_id
+            })
+        );
+    }
+
+    #[test]
+    fn 확인되지_않은_취소는_기존_driver_error를_그대로_보존한다() {
+        // given
+        let message = "SQL Server timeout: fixture deadline";
+
+        // when
+        let response = respond_query(
+            json!(72),
+            Some(72),
+            Err::<Value, _>(QueryExecutionError::Driver(message.to_string())),
+        );
+
+        // then
+        assert_eq!(response["error"]["code"], -32000);
+        assert_eq!(response["error"]["message"], message);
+        assert!(response.get("result").is_none());
+    }
 
     /// Snapshot extracted from every literal `PluginProcess::call` and
     /// `call_with_timeout` in Tabularis
@@ -359,7 +449,9 @@ mod tests {
 
         let plugin_only: Vec<_> = dispatched
             .difference(&host_methods)
-            .filter(|method| **method != "shutdown")
+            // `cancel` is a JSON-RPC notification consumed by the stdin
+            // reader as a protocol control message, not a host driver method.
+            .filter(|method| !matches!(**method, "shutdown" | "cancel"))
             .copied()
             .collect();
         assert!(

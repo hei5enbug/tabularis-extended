@@ -1,0 +1,348 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use crate::{
+    datatypes::sqldatatypes::{TdsDataType, TypeInfo, TypeInfoVariant},
+    token::tokens::SqlCollation,
+};
+
+use std::fmt;
+
+/// Schema, type, and flag information for a single column in a result set.
+///
+/// Returned as part of the `COLMETADATA` TDS token; one instance per column.
+#[derive(Debug, Clone)]
+pub struct ColumnMetadata {
+    /// SQL Server user-type ordinal (0 for base types, non-zero for aliases/CLR types).
+    pub user_type: u32,
+    /// Bitmask of column property flags (nullable, identity, computed, etc.).
+    pub flags: u16,
+    /// Wire-level type descriptor including length, precision, and scale.
+    pub type_info: TypeInfo,
+    /// High-level SQL Server data type.
+    pub data_type: TdsDataType,
+    /// Column name as declared in the query or table definition.
+    pub column_name: String,
+    /// Optional four-part name (`server.catalog.schema.table`) when the server
+    /// includes table-name metadata (e.g., browse-mode queries).
+    pub multi_part_name: Option<MultiPartName>,
+}
+
+impl ColumnMetadata {
+    /// Column allows `NULL` values.
+    pub fn is_nullable(&self) -> bool {
+        (self.flags & 0x01) != 0x00
+    }
+    /// Column uses a case-sensitive collation.
+    pub fn is_case_sensitive(&self) -> bool {
+        (self.flags & 0x02) != 0x00
+    }
+    /// Column is an identity (auto-increment) column.
+    pub fn is_identity(&self) -> bool {
+        (self.flags & 0x10) != 0x00
+    }
+    /// Column value is computed by the server.
+    pub fn is_computed(&self) -> bool {
+        (self.flags & 0x20) != 0x00
+    }
+    /// Column is a sparse column set (`xml COLUMN_SET FOR ALL_SPARSE_COLUMNS`).
+    pub fn is_sparse_column_set(&self) -> bool {
+        (self.flags & 0x1000) != 0x00
+    }
+    /// Column is protected by Always Encrypted.
+    pub fn is_encrypted(&self) -> bool {
+        (self.flags & 0x2000) != 0x00
+    }
+    /// Column uses Partially Length-prefixed (PLP) encoding (e.g., `varchar(max)`).
+    pub fn is_plp(&self) -> bool {
+        matches!(
+            self.type_info.type_info_variant,
+            TypeInfoVariant::PartialLen(_, _, _, _, _)
+        )
+    }
+    /// Returns the scale for decimal/numeric/time types.
+    ///
+    /// Returns `Some(scale)` for types that include scale information (e.g., `decimal(18,4)`, `time(7)`),
+    /// or `None` for types where scale is not applicable.
+    pub fn get_scale(&self) -> Option<u8> {
+        match self.type_info.type_info_variant {
+            TypeInfoVariant::VarLenScale(_, scale) => Some(scale),
+            TypeInfoVariant::VarLenPrecisionScale(_, _, _, scale) => Some(scale),
+            _ => None,
+        }
+    }
+
+    /// Returns the SQL collation for string-typed columns, or `None` for non-string types.
+    pub fn get_collation(&self) -> Option<SqlCollation> {
+        // Collation is only applicable to string types which are either VarLen strings
+        // Or PLP types with a collation.
+        match self.type_info.type_info_variant {
+            TypeInfoVariant::VarLenString(_, _, collation) => collation,
+            TypeInfoVariant::PartialLen(_, _, collation, _, _) => collation,
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ColumnMetadata {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "Column Name: {}\nData Type: {:?} (UserType: {})\nFlags: [Nullable: {}, CaseSensitive: {}, Identity: {}, Computed: {}, \
+        SparseColumnSet: {}, Encrypted: {}, MultiPartName: {:?}]\n",
+            self.column_name,
+            self.data_type,
+            self.user_type,
+            self.is_nullable(),
+            self.is_case_sensitive(),
+            self.is_identity(),
+            self.is_computed(),
+            self.is_sparse_column_set(),
+            self.is_encrypted(),
+            self.multi_part_name
+        )
+    }
+}
+
+/// Four-part table name (`server.catalog.schema.table`) optionally returned
+/// by the server alongside column metadata in browse-mode queries.
+#[derive(Debug, Default, Clone)]
+pub struct MultiPartName {
+    pub(crate) server_name: Option<String>,
+    pub(crate) catalog_name: Option<String>,
+    pub(crate) schema_name: Option<String>,
+    pub(crate) table_name: String,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // For column encryption metadata which is not implemented yet.
+pub(crate) struct ColumnEncryptionMetadata {
+    pub key_count: u8,
+    pub key_details: Vec<ColumnEncryptionKeyDetails>,
+    pub db_id: u32,
+    pub key_id: u32,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // For column encryption metadata which is not implemented yet.
+pub(crate) struct ColumnEncryptionKeyDetails {
+    pub encrypted_cek: Vec<u8>,
+    pub algo: String,
+    pub key_path: String,
+    pub key_store_name: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datatypes::sqldatatypes::{
+        FixedLengthTypes, PartialLengthType, TdsDataType, TypeInfo, TypeInfoVariant,
+        VariableLengthTypes,
+    };
+    use crate::token::tokens::SqlCollation;
+
+    fn create_test_column_metadata(
+        flags: u16,
+        type_info_variant: TypeInfoVariant,
+    ) -> ColumnMetadata {
+        ColumnMetadata {
+            user_type: 0,
+            flags,
+            type_info: TypeInfo {
+                tds_type: TdsDataType::IntN,
+                length: 4,
+                type_info_variant,
+            },
+            data_type: TdsDataType::IntN,
+            column_name: "test_column".to_string(),
+            multi_part_name: None,
+        }
+    }
+
+    #[test]
+    fn test_is_nullable() {
+        let metadata =
+            create_test_column_metadata(0x01, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(metadata.is_nullable());
+
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(!metadata.is_nullable());
+    }
+
+    #[test]
+    fn test_is_case_sensitive() {
+        let metadata =
+            create_test_column_metadata(0x02, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(metadata.is_case_sensitive());
+
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(!metadata.is_case_sensitive());
+    }
+
+    #[test]
+    fn test_is_identity() {
+        let metadata =
+            create_test_column_metadata(0x10, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(metadata.is_identity());
+
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(!metadata.is_identity());
+    }
+
+    #[test]
+    fn test_is_computed() {
+        let metadata =
+            create_test_column_metadata(0x20, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(metadata.is_computed());
+
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(!metadata.is_computed());
+    }
+
+    #[test]
+    fn test_is_sparse_column_set() {
+        let metadata =
+            create_test_column_metadata(0x1000, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(metadata.is_sparse_column_set());
+
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(!metadata.is_sparse_column_set());
+    }
+
+    #[test]
+    fn test_is_encrypted() {
+        let metadata =
+            create_test_column_metadata(0x2000, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(metadata.is_encrypted());
+
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(!metadata.is_encrypted());
+    }
+
+    #[test]
+    fn test_is_plp() {
+        let metadata = create_test_column_metadata(
+            0x00,
+            TypeInfoVariant::PartialLen(PartialLengthType::BigVarChar, None, None, None, None),
+        );
+        assert!(metadata.is_plp());
+
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(!metadata.is_plp());
+    }
+
+    #[test]
+    fn test_get_scale_varlen_scale() {
+        let metadata = create_test_column_metadata(
+            0x00,
+            TypeInfoVariant::VarLenScale(VariableLengthTypes::TimeN, 7),
+        );
+        assert_eq!(metadata.get_scale(), Some(7));
+    }
+
+    #[test]
+    fn test_get_scale_varlen_precision_scale() {
+        let metadata = create_test_column_metadata(
+            0x00,
+            TypeInfoVariant::VarLenPrecisionScale(VariableLengthTypes::DecimalN, 18, 38, 4),
+        );
+        assert_eq!(metadata.get_scale(), Some(4));
+    }
+
+    #[test]
+    fn test_get_scale_none() {
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert_eq!(metadata.get_scale(), None);
+    }
+
+    #[test]
+    fn test_get_collation_varlen_string() {
+        let collation = SqlCollation {
+            info: 0,
+            lcid_language_id: 1033,
+            col_flags: 0,
+            sort_id: 0,
+        };
+        let metadata = create_test_column_metadata(
+            0x00,
+            TypeInfoVariant::VarLenString(VariableLengthTypes::BigVarChar, 100, Some(collation)),
+        );
+        assert!(metadata.get_collation().is_some());
+    }
+
+    #[test]
+    fn test_get_collation_partial_len() {
+        let collation = SqlCollation {
+            info: 0,
+            lcid_language_id: 1033,
+            col_flags: 0,
+            sort_id: 0,
+        };
+        let metadata = create_test_column_metadata(
+            0x00,
+            TypeInfoVariant::PartialLen(
+                PartialLengthType::BigVarChar,
+                None,
+                Some(collation),
+                None,
+                None,
+            ),
+        );
+        assert!(metadata.get_collation().is_some());
+    }
+
+    #[test]
+    fn test_get_collation_none() {
+        let metadata =
+            create_test_column_metadata(0x00, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        assert!(metadata.get_collation().is_none());
+    }
+
+    #[test]
+    fn test_display_format() {
+        let metadata =
+            create_test_column_metadata(0x01, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        let display = format!("{metadata}");
+        assert!(display.contains("test_column"));
+        assert!(display.contains("Nullable: true"));
+    }
+
+    #[test]
+    fn test_multi_part_name_default() {
+        let multi_part = MultiPartName::default();
+        assert_eq!(multi_part.table_name, "");
+        assert!(multi_part.server_name.is_none());
+        assert!(multi_part.catalog_name.is_none());
+        assert!(multi_part.schema_name.is_none());
+    }
+
+    #[test]
+    fn test_multi_part_name_clone() {
+        let multi_part = MultiPartName {
+            server_name: Some("server".to_string()),
+            catalog_name: Some("catalog".to_string()),
+            schema_name: Some("dbo".to_string()),
+            table_name: "users".to_string(),
+        };
+        let cloned = multi_part.clone();
+        assert_eq!(cloned.server_name, Some("server".to_string()));
+        assert_eq!(cloned.table_name, "users");
+    }
+
+    #[test]
+    fn test_column_metadata_clone() {
+        let metadata =
+            create_test_column_metadata(0x01, TypeInfoVariant::FixedLen(FixedLengthTypes::Int4));
+        let cloned = metadata.clone();
+        assert_eq!(cloned.column_name, "test_column");
+        assert_eq!(cloned.flags, 0x01);
+    }
+}
