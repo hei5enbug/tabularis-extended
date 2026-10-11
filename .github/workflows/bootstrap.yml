@@ -72,6 +72,10 @@ jobs:
           pnpm test:sdk
           pnpm test:ui
           cargo test --locked --workspace
+      - name: Check disposable PostGIS integration
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: pnpm test:containers
       - name: Configure native installation fixture
         run: node scripts/ci/install.mjs prepare
       - name: Check ZIP packaging

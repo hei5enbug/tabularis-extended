@@ -5,7 +5,7 @@ import workerSource from "virtual:tabularis-map-worker";
 import mapLibreCss from "maplibre-gl/dist/maplibre-gl.css?inline";
 import spatialCss from "./styles.css?inline";
 import { cameraBounds, countGeometry, type Feature, type Geometry, type Viewport } from "./models";
-import { buildSpatialColumnsQuery, buildTableQuery, parseSpatialColumns, parseTableRows, type CompatSpatialColumn } from "./compat-query";
+import { buildPostgisSchemaQuery, buildSpatialColumnsQuery, buildTableQuery, parsePostgisSchema, parseSpatialColumns, parseTableRows, type CompatSpatialColumn } from "./compat-query";
 
 let workerUrl: string | null = null;
 let previousWorkerUrl: string | null = null;
@@ -108,7 +108,7 @@ export function CompatMapModal({ schema, table, connectionId }: { schema: string
   const modal = usePluginModal();
   const [columns, setColumns] = useState<CompatSpatialColumn[]>([]);
   const [selectedName, setSelectedName] = useState("");
-  const [columnsConnectionId, setColumnsConnectionId] = useState("");
+  const [catalogOwner, setCatalogOwner] = useState<{ connectionId: string; schema: string; table: string; extensionSchema: string } | null>(null);
   const [sourceSridDraft, setSourceSridDraft] = useState("");
   const [appliedSourceSrid, setAppliedSourceSrid] = useState<number | null>(null);
   const [queryRevision, setQueryRevision] = useState(0);
@@ -123,15 +123,18 @@ export function CompatMapModal({ schema, table, connectionId }: { schema: string
   const requestId = useRef(0);
   const alive = useRef(false);
   const connectionRef = useRef(active.connectionId);
+  const targetRef = useRef({ connectionId, schema, table });
   const executeQueryRef = useRef(query.executeQuery);
   const featuresRef = useRef(features);
   const mapReadyRef = useRef(mapReady);
   connectionRef.current = active.connectionId;
+  targetRef.current = { connectionId, schema, table };
   executeQueryRef.current = query.executeQuery;
   featuresRef.current = features;
   mapReadyRef.current = mapReady;
 
-  const current = (id: number): boolean => alive.current && requestId.current === id && connectionRef.current === connectionId;
+  const current = (id: number): boolean => alive.current && requestId.current === id && connectionRef.current === connectionId
+    && targetRef.current.connectionId === connectionId && targetRef.current.schema === schema && targetRef.current.table === table;
   const guardedQuery = async (sql: string, id: number): Promise<{ rows: unknown[][]; truncated: boolean }> => {
     if (!current(id)) throw new DOMException("The active connection changed.", "AbortError");
     const result = await executeQueryRef.current(sql) as { rows: unknown[][]; truncated?: boolean; pagination?: { has_more?: boolean } };
@@ -149,8 +152,10 @@ export function CompatMapModal({ schema, table, connectionId }: { schema: string
     const id = ++requestId.current;
     setColumns([]);
     setSelectedName("");
-    setColumnsConnectionId("");
+    setCatalogOwner(null);
     setFeatures([]);
+    setSelectedProperties(null);
+    setLoading(false);
     setTruncated(false);
     setSourceSridDraft("");
     setAppliedSourceSrid(null);
@@ -161,14 +166,17 @@ export function CompatMapModal({ schema, table, connectionId }: { schema: string
       return () => { if (requestId.current === id) requestId.current++; };
     }
     setLoading(true);
-    void guardedQuery(buildSpatialColumnsQuery(schema, table), id).then(({ rows }) => {
+    void (async () => {
+      const discovery = await guardedQuery(buildPostgisSchemaQuery(), id);
+      const extensionSchema = parsePostgisSchema(discovery.rows);
+      const { rows } = await guardedQuery(buildSpatialColumnsQuery(schema, table, extensionSchema), id);
       if (!current(id)) return;
       const found = parseSpatialColumns(rows);
       setColumns(found);
       setSelectedName(found[0]?.name ?? "");
-      setColumnsConnectionId(connectionId);
+      setCatalogOwner({ connectionId, schema, table, extensionSchema });
       if (found.length === 0) setError("선택한 테이블에서 geometry 또는 geography 열을 찾지 못했습니다.");
-    }).catch(failure => {
+    })().catch(failure => {
       if (current(id)) setError(messageOf(failure));
     }).finally(() => {
       if (current(id)) setLoading(false);
@@ -176,12 +184,15 @@ export function CompatMapModal({ schema, table, connectionId }: { schema: string
     return () => { if (requestId.current === id) requestId.current++; };
   }, [active.connectionId, connectionId, schema, table]);
 
-  const selectedColumn = columns.find(column => column.name === selectedName) ?? null;
+  const ownsCatalog = catalogOwner?.connectionId === connectionId && catalogOwner.schema === schema && catalogOwner.table === table
+    && active.connectionId === connectionId;
+  const selectedColumn = ownsCatalog ? columns.find(column => column.name === selectedName) ?? null : null;
   useEffect(() => {
-    if (!selectedColumn || columnsConnectionId !== connectionId) return;
+    if (!selectedColumn || !catalogOwner) return;
     const id = ++requestId.current;
     setFeatures([]);
     setSelectedProperties(null);
+    setLoading(false);
     setTruncated(false);
     setError("");
     if (connectionRef.current !== connectionId) {
@@ -193,7 +204,7 @@ export function CompatMapModal({ schema, table, connectionId }: { schema: string
       return () => { if (requestId.current === id) requestId.current++; };
     }
     setLoading(true);
-    const sql = buildTableQuery({ schema, table, column: selectedColumn.name, ...(appliedSourceSrid === null ? {} : { sourceSrid: appliedSourceSrid }) });
+    const sql = buildTableQuery({ schema, table, column: selectedColumn.name, extensionSchema: catalogOwner.extensionSchema, ...(appliedSourceSrid === null ? {} : { sourceSrid: appliedSourceSrid }) });
     void guardedQuery(sql, id).then(({ rows, truncated: hostTruncated }) => {
       if (!current(id)) return;
       const page = parseTableRows(rows, appliedSourceSrid ?? undefined);
@@ -205,7 +216,7 @@ export function CompatMapModal({ schema, table, connectionId }: { schema: string
       if (current(id)) setLoading(false);
     });
     return () => { if (requestId.current === id) requestId.current++; };
-  }, [appliedSourceSrid, columnsConnectionId, connectionId, queryRevision, schema, selectedColumn, table]);
+  }, [appliedSourceSrid, catalogOwner, connectionId, queryRevision, schema, selectedColumn, table]);
 
   const runTableQuery = () => {
     if (!selectedColumn) return;

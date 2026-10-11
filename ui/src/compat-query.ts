@@ -11,6 +11,7 @@ export interface CompatTableQuery {
   schema: string;
   table: string;
   column: string;
+  extensionSchema: string;
   sourceSrid?: number;
 }
 
@@ -31,10 +32,24 @@ export function sqlIdentifier(value: string): string {
   return `"${value.replaceAll('"', '""')}"`;
 }
 
-export function buildSpatialColumnsQuery(schema: string, table: string): string {
+export function buildPostgisSchemaQuery(): string {
+  return "SELECT n.nspname AS extension_schema FROM pg_catalog.pg_extension AS e JOIN pg_catalog.pg_namespace AS n ON n.oid = e.extnamespace WHERE e.extname = 'postgis'";
+}
+
+export function parsePostgisSchema(rows: unknown[][]): string {
+  if (rows.length === 0) throw new SpatialUiError("INVALID_ARGUMENT", "현재 데이터베이스에 PostGIS 확장이 설치되어 있지 않습니다.");
+  const row = rows[0];
+  if (rows.length !== 1 || !Array.isArray(row) || row.length !== 1 || typeof row[0] !== "string" || !row[0] || row[0].includes("\0")) {
+    throw new SpatialUiError("INVALID_ARGUMENT", "PostGIS 확장의 스키마를 확인할 수 없습니다. 유효한 스키마 하나가 필요합니다.");
+  }
+  return row[0];
+}
+
+export function buildSpatialColumnsQuery(schema: string, table: string, extensionSchema: string): string {
   const schemaValue = sqlLiteral(schema);
   const tableValue = sqlLiteral(table);
-  return `SELECT f_geometry_column AS column_name, 'geometry' AS spatial_type, srid, coord_dimension FROM public.geometry_columns WHERE f_table_schema = ${schemaValue} AND f_table_name = ${tableValue} UNION ALL SELECT f_geography_column AS column_name, 'geography' AS spatial_type, srid, coord_dimension FROM public.geography_columns WHERE f_table_schema = ${schemaValue} AND f_table_name = ${tableValue}`;
+  const namespace = sqlIdentifier(extensionSchema);
+  return `SELECT f_geometry_column AS column_name, 'geometry' AS spatial_type, srid, coord_dimension FROM ${namespace}.geometry_columns WHERE f_table_schema = ${schemaValue} AND f_table_name = ${tableValue} UNION ALL SELECT f_geography_column AS column_name, 'geography' AS spatial_type, srid, coord_dimension FROM ${namespace}.geography_columns WHERE f_table_schema = ${schemaValue} AND f_table_name = ${tableValue}`;
 }
 
 export function parseSpatialColumns(rows: unknown[][]): CompatSpatialColumn[] {
@@ -58,13 +73,14 @@ export function buildTableQuery(input: CompatTableQuery): string {
     throw new SpatialUiError("INVALID_ARGUMENT", "SRID는 1부터 999999 사이의 정수여야 합니다.");
   }
   const table = `${sqlIdentifier(input.schema)}.${sqlIdentifier(input.table)}`;
-  const column = `"t".${sqlIdentifier(input.column)}::geometry`;
+  const namespace = sqlIdentifier(input.extensionSchema);
+  const column = `"t".${sqlIdentifier(input.column)}::${namespace}.geometry`;
   const sourceGeometry = input.sourceSrid === undefined
     ? column
-    : `(CASE WHEN ST_SRID(${column}) = 0 THEN ST_SetSRID(${column}, ${input.sourceSrid}) ELSE ${column} END)`;
-  const emptyGeometry = `ST_Force2D(${sourceGeometry})`;
-  const noSourceSridZero = input.sourceSrid === undefined ? `WHEN ST_SRID(${column}) = 0 THEN NULL ` : "";
-  return `SELECT CASE ${noSourceSridZero}WHEN ST_IsEmpty(${emptyGeometry}) THEN NULL ELSE ST_AsGeoJSON(ST_Transform(${emptyGeometry}, 4326), 9, 0) END AS "__geojson", ST_SRID(${column}) AS "__source_srid", to_jsonb("t") - ${sqlLiteral(input.column)} AS "__properties" FROM ${table} AS "t" WHERE "t".${sqlIdentifier(input.column)} IS NOT NULL LIMIT ${PAGE_LIMIT.features + 1}`;
+    : `(CASE WHEN ${namespace}.st_srid(${column}) = 0 THEN ${namespace}.st_setsrid(${column}, ${input.sourceSrid}) ELSE ${column} END)`;
+  const emptyGeometry = `${namespace}.st_force2d(${sourceGeometry})`;
+  const noSourceSridZero = input.sourceSrid === undefined ? `WHEN ${namespace}.st_srid(${column}) = 0 THEN NULL ` : "";
+  return `SELECT CASE ${noSourceSridZero}WHEN ${namespace}.st_isempty(${emptyGeometry}) THEN NULL ELSE ${namespace}.st_asgeojson(${namespace}.st_transform(${emptyGeometry}, 4326), 9, 0) END AS "__geojson", ${namespace}.st_srid(${column}) AS "__source_srid", to_jsonb("t") - ${sqlLiteral(input.column)} AS "__properties" FROM ${table} AS "t" WHERE "t".${sqlIdentifier(input.column)} IS NOT NULL LIMIT ${PAGE_LIMIT.features + 1}`;
 }
 
 function parseGeometry(value: unknown): Geometry | null {

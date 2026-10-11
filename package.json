@@ -9,7 +9,13 @@
     "build:ui": "corepack pnpm build:sdk && corepack pnpm --dir ui build",
     "typecheck:ui": "corepack pnpm build:sdk && corepack pnpm --dir ui typecheck",
     "test:sdk": "corepack pnpm build:sdk && node --test tests/sdk.test.mjs",
-    "test:ui": "corepack pnpm build:sdk && corepack pnpm --dir ui test"
+    "test:ui": "corepack pnpm build:sdk && corepack pnpm --dir ui test",
+    "test:containers": "node --import tsx --test tests/containers/*.test.mjs"
+  },
+  "devDependencies": {
+    "pg": "8.23.1",
+    "testcontainers": "12.2.0",
+    "tsx": "4.23.15"
   },
   "packageManager": "pnpm@10.30.3"
 }
