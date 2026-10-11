@@ -1,6 +1,7 @@
+use std::ffi::OsString;
 use std::fmt;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -18,13 +19,32 @@ use crate::models::ConnectionParams;
 const SQL_RESOURCE: &str = "https://database.windows.net/";
 const MAX_STDOUT_BYTES: usize = 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 64 * 1024;
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+#[derive(Clone)]
+struct CliCommand {
+    identity_path: PathBuf,
+    program: PathBuf,
+    prefix_args: Vec<OsString>,
+}
+
+impl CliCommand {
+    fn direct(path: PathBuf) -> Self {
+        Self {
+            identity_path: path.clone(),
+            program: path,
+            prefix_args: Vec::new(),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct AzureCliAuth {
     username: String,
     tenant_id: String,
     object_id: String,
-    executable: PathBuf,
+    cli: CliCommand,
 }
 
 impl fmt::Debug for AzureCliAuth {
@@ -32,7 +52,7 @@ impl fmt::Debug for AzureCliAuth {
         formatter
             .debug_struct("AzureCliAuth")
             .field("identity", &"[redacted]")
-            .field("executable", &self.executable)
+            .field("executable", &self.cli.identity_path)
             .finish()
     }
 }
@@ -83,12 +103,21 @@ impl AzureCliAuth {
                     }
                     _ => PathBuf::from("az"),
                 };
+                let mut cli = resolve_cli_command(
+                    params
+                        .extra
+                        .get("azure_cli_path")
+                        .filter(|path| !path.trim().is_empty())
+                        .map(|_| executable.as_path()),
+                )
+                .map_err(|_| "Azure CLI executable could not be resolved".to_owned())?;
+                cli.identity_path = executable;
 
                 Ok(Some(Self {
                     username,
                     tenant_id,
                     object_id,
-                    executable,
+                    cli,
                 }))
             }
             Some(_) => Err("unsupported SQL Server authentication mode".into()),
@@ -121,13 +150,13 @@ impl AzureCliAuth {
             self.object_id,
             self.username.len(),
             self.username,
-            self.executable.to_string_lossy().len(),
-            self.executable.display()
+            self.cli.identity_path.to_string_lossy().len(),
+            self.cli.identity_path.display()
         )
     }
 
     pub async fn acquire_access_token(&self, deadline: Instant) -> Result<String, AcquireError> {
-        let mut child = Command::new(&self.executable)
+        let mut child = build_cli_command(&self.cli)
             .args([
                 "account",
                 "get-access-token",
@@ -189,6 +218,112 @@ impl AzureCliAuth {
     pub fn apply_token(&self, config: &mut Config, token: String) {
         config.authentication(AuthMethod::aad_token(token));
     }
+}
+
+fn build_cli_command(cli: &CliCommand) -> Command {
+    let mut command = Command::new(&cli.program);
+    command.args(&cli.prefix_args);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+fn resolve_cli_command(explicit_path: Option<&Path>) -> Result<CliCommand, &'static str> {
+    #[cfg(windows)]
+    {
+        let path_dirs = std::env::var_os("PATH")
+            .map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+            .unwrap_or_default();
+        resolve_windows_cli(explicit_path, &path_dirs)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(CliCommand::direct(
+            explicit_path
+                .unwrap_or_else(|| Path::new("az"))
+                .to_path_buf(),
+        ))
+    }
+}
+
+#[cfg(any(windows, test))]
+fn resolve_windows_cli(
+    explicit_path: Option<&Path>,
+    path_dirs: &[PathBuf],
+) -> Result<CliCommand, &'static str> {
+    if let Some(path) = explicit_path {
+        if !path.is_absolute() {
+            return Err("Azure CLI path must be absolute");
+        }
+        return resolve_explicit_windows_cli(path);
+    }
+
+    for directory in path_dirs.iter().filter(|directory| directory.is_absolute()) {
+        let executable = directory.join("az.exe");
+        if executable.is_file() {
+            return Ok(CliCommand::direct(executable));
+        }
+
+        let command = directory.join("az.cmd");
+        if command.is_file() {
+            return resolve_azure_cli_cmd(&command);
+        }
+    }
+
+    Err("Azure CLI was not found in absolute PATH directories")
+}
+
+#[cfg(any(windows, test))]
+fn resolve_explicit_windows_cli(path: &Path) -> Result<CliCommand, &'static str> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("exe") => {
+            if path.is_file() {
+                Ok(CliCommand::direct(path.to_path_buf()))
+            } else {
+                Err("Azure CLI executable was not found")
+            }
+        }
+        Some(extension) if extension.eq_ignore_ascii_case("cmd") => resolve_azure_cli_cmd(path),
+        None => {
+            let executable = path.with_extension("exe");
+            if executable.is_file() {
+                return Ok(CliCommand::direct(executable));
+            }
+            let command = path.with_extension("cmd");
+            if command.is_file() {
+                return resolve_azure_cli_cmd(&command);
+            }
+            Err("Azure CLI executable was not found")
+        }
+        Some(_) => Err("Azure CLI scripts and batch files are not supported"),
+    }
+}
+
+#[cfg(any(windows, test))]
+fn resolve_azure_cli_cmd(path: &Path) -> Result<CliCommand, &'static str> {
+    let is_official_cli = path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .is_some_and(|stem| stem.eq_ignore_ascii_case("az"))
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("cmd"));
+    if !is_official_cli || !path.is_file() {
+        return Err("Only the official Azure CLI az.cmd launcher is supported");
+    }
+
+    let python = path
+        .parent()
+        .and_then(Path::parent)
+        .map(|directory| directory.join("python.exe"))
+        .filter(|python| python.is_file())
+        .ok_or("Azure CLI Python runtime was not found")?;
+    Ok(CliCommand {
+        identity_path: path.to_path_buf(),
+        program: python,
+        prefix_args: vec![OsString::from("-IBm"), OsString::from("azure.cli")],
+    })
 }
 
 #[derive(Debug, PartialEq, Eq)]
