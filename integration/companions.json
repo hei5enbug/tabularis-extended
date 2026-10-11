@@ -4,7 +4,7 @@
     "repository": "hei5enbug/tabularis-sqlserver-plus",
     "version": "1.0.0-beta.3+plus.1",
     "tag": "plus-v1.0.0-beta.3+plus.1",
-    "sourceSha256": "c4ccbb02d17a476cd4f8b2b181298426f68ee0318d43161bb06a9454f525be04",
+    "sourceSha256": "5dd021897f167565577ede68be2d8a56445c29298b8ce5036e1c0a58fca68108",
     "platforms": {
       "darwin-arm64": {
         "archive": "sqlserver-plus-darwin-arm64.zip",
