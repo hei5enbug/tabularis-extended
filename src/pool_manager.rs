@@ -318,9 +318,13 @@ mod tests {
     fn entra_pool_key_contains_nonsecret_identity_and_excludes_password() {
         // given
         let mut first = entra_params(Some("shared"));
+        let cli_path = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         first
             .extra
-            .insert("azure_cli_path".into(), "/opt/azure/az".into());
+            .insert("azure_cli_path".into(), cli_path.clone());
         let mut second = first.clone();
         second
             .extra
@@ -337,7 +341,7 @@ mod tests {
         assert!(first_key.contains("tenant=11:tenant-guid"));
         assert!(first_key.contains("object_id=11:object-guid"));
         assert!(first_key.contains("username=19:person@example.test"));
-        assert!(first_key.contains("cli=13:/opt/azure/az"));
+        assert!(first_key.contains(&format!("cli={}:{}", cli_path.len(), cli_path)));
     }
 
     /// SQL 비밀번호는 풀 키에 저장되지 않는다.

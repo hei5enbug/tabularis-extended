@@ -55,15 +55,69 @@ fn rowversion_and_timestamp_are_not_offered_as_blobs() {
     }
 }
 
+/// 빈 출력 경로는 거부한다.
 #[test]
 fn writable_path_validation_rejects_empty_directory_and_missing_parent() {
-    assert!(validate_writable_file_path("").is_err());
-    assert!(validate_writable_file_path("/tmp").is_err());
-    assert!(validate_writable_file_path("/this-directory-must-not-exist-ss012/out.bin").is_err());
+    // given
+    let path = "";
+
+    // when
+    let result = validate_writable_file_path(path);
+
+    // then
+    assert!(result.is_err());
 }
 
+/// 출력 경로가 기존 디렉터리이면 거부한다.
+#[test]
+fn writable_path_validation_rejects_existing_directory() {
+    // given
+    let directory = std::env::temp_dir();
+
+    // when
+    let result = validate_writable_file_path(&directory.to_string_lossy());
+
+    // then
+    assert!(result.is_err());
+}
+
+/// 출력 파일의 상위 디렉터리가 없으면 거부한다.
+#[test]
+fn writable_path_validation_rejects_missing_parent() {
+    // given
+    let path = std::env::temp_dir()
+        .join(uuid::Uuid::new_v4().to_string())
+        .join("out.bin");
+
+    // when
+    let result = validate_writable_file_path(&path.to_string_lossy());
+
+    // then
+    assert!(result.is_err());
+}
+
+/// 기존 상위 디렉터리의 출력 파일 경로는 허용한다.
 #[test]
 fn writable_path_validation_accepts_existing_parent_and_bare_filename() {
-    assert!(validate_writable_file_path("/tmp/ss012-output.bin").is_ok());
-    assert!(validate_writable_file_path("ss012-output.bin").is_ok());
+    // given
+    let path = std::env::temp_dir().join("ss012-output.bin");
+
+    // when
+    let result = validate_writable_file_path(&path.to_string_lossy());
+
+    // then
+    assert!(result.is_ok());
+}
+
+/// 디렉터리 없이 지정한 출력 파일 이름은 허용한다.
+#[test]
+fn writable_path_validation_accepts_bare_filename() {
+    // given
+    let path = "ss012-output.bin";
+
+    // when
+    let result = validate_writable_file_path(path);
+
+    // then
+    assert!(result.is_ok());
 }
