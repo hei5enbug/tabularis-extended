@@ -120,57 +120,6 @@ fn readonly_세션의_권한_승격과_다른_주체를_거부하고_기존_세�
     assert_eq!(actual.2["result"]["rows"], json!([["initial"]]));
 }
 #[test]
-fn 권한을_나중에_추가하면_warm_pool에서도_매번_검사해_거부한다() {
-    // given
-    let fixture = Fixture::new();
-    let mut plugin = Plugin::new();
-    let initial = plugin.call(&fixture.exact("SELECT 1", &fixture.reader, true, "initial"));
-    support::sql(
-        &fixture.database,
-        &format!("GRANT UPDATE ON dbo.items(value) TO [{}];", fixture.reader),
-    );
-    // when
-    let actual = plugin.call(&fixture.exact("SELECT 1", &fixture.reader, true, "after_grant"));
-    // then
-    assert_eq!(initial["result"]["rows"], json!([[1]]));
-    assert_eq!(actual["error"]["data"]["code"], "WRITE_NOT_ALLOWED");
-}
-#[test]
-fn database_가시성이_제한되면_사용자_sql을_송신하기_전에_거부한다() {
-    // given
-    let fixture = Fixture::new();
-    let mut plugin = Plugin::new();
-    let initial = plugin.call(&fixture.exact("SELECT 1", &fixture.reader, true, "initial"));
-    support::sql("master", &format!("CREATE EVENT SESSION [{}] ON SERVER ADD EVENT sqlserver.rpc_starting(WHERE ([sqlserver].[like_i_sql_unicode_string]([statement],N'%a1_visibility_canary%'))) ADD TARGET package0.ring_buffer; ALTER EVENT SESSION [{}] ON SERVER STATE=START; DENY VIEW ANY DATABASE TO [{}];", fixture.database, fixture.database, fixture.reader));
-    let observed = format!("SELECT CAST(t.target_data AS xml).value('count(/RingBufferTarget/event[@name=\"rpc_starting\"])','int') FROM sys.dm_xe_session_targets t JOIN sys.dm_xe_sessions s ON t.event_session_address=s.address WHERE s.name='{}'", fixture.database);
-    let run = |plugin: &mut Plugin| {
-        let response = plugin.call(&fixture.exact(
-            "SELECT 42827 AS a1_visibility_canary",
-            &fixture.reader,
-            true,
-            "hidden",
-        ));
-        let sent = support::scalar(plugin, &fixture, &observed, "observe_dispatch");
-        let control = plugin.call(&fixture.exact(
-            "SELECT 42827 AS a1_visibility_canary",
-            "sa",
-            false,
-            "capture_control",
-        ));
-        let captured = support::scalar(plugin, &fixture, &observed, "observe_control_dispatch");
-        (response, sent, control, captured)
-    };
-    // when
-    let actual = run(&mut plugin);
-    // then
-    assert_eq!(initial["result"]["rows"], json!([[1]]));
-    assert_eq!(actual.0["error"]["data"]["code"], "CAPABILITY_UNAVAILABLE");
-    assert_eq!(actual.0["error"]["data"]["outcome"], "not_applied");
-    assert_eq!(actual.1, 0);
-    assert_eq!(actual.2["result"]["rows"], json!([[42827]]));
-    assert_eq!(actual.3, 1);
-}
-#[test]
 fn catalog와_generated_row는_native_lease와_정확한_count를_사용한다() {
     // given
     let fixture = Fixture::new();
@@ -226,10 +175,9 @@ fn 잘못된_frame_뒤에도_control과_서비스_negotiation을_처리한다() 
         actual["result"]["service_capabilities"]["exact_affected_rows"],
         false
     );
-    assert_eq!(
-        actual["result"]["service_capabilities"]["readonly_guarantee"],
-        "restricted_database_principal"
-    );
+    assert!(actual["result"]["service_capabilities"]
+        .get("readonly_guarantee")
+        .is_none());
 }
 #[test]
 fn logout은_인증값_없이_pool과_모든_세션을_무효화한다() {
@@ -269,21 +217,18 @@ fn logout은_인증값_없이_pool과_모든_세션을_무효화한다() {
     assert_eq!(actual.1["error"]["data"]["code"], "INVALID_ARGUMENT");
 }
 #[test]
-fn writable_user와_sa는_readonly_select도_sql_전에_거부한다() {
+fn writable_user와_sa의_readonly_select도_probe_없이_실행한다() {
     // given
     let fixture = Fixture::new();
     let mut plugin = Plugin::new();
-    let requests = [&fixture.writer, "sa"]
-        .map(|user| fixture.exact("SELECT 1 AS forbidden", user, true, user));
+    let requests =
+        [&fixture.writer, "sa"].map(|user| fixture.exact("SELECT 1 AS allowed", user, true, user));
     // when
     let actual = requests.map(|request| plugin.call(&request));
     // then
     assert!(actual
         .iter()
-        .all(|response| response["error"]["data"]["code"] == "WRITE_NOT_ALLOWED"));
-    assert!(actual
-        .iter()
-        .all(|response| response.get("result").is_none()));
+        .all(|response| response["result"]["rows"] == json!([[1]])));
 }
 #[test]
 fn readonly_batch와_cte와_dynamic_write는_db_권한을_우회하지_못한다() {
@@ -363,25 +308,6 @@ fn 빈_select와_추가_result_set의_metadata를_유지한다() {
     );
 }
 
-#[test]
-fn login_securable의_impersonate_권한은_readonly를_거부한다() {
-    // given
-    let fixture = Fixture::new();
-    let mut plugin = Plugin::new();
-    support::sql(
-        "master",
-        &format!(
-            "GRANT IMPERSONATE ON LOGIN::[{}] TO [{}];",
-            fixture.writer, fixture.reader
-        ),
-    );
-    let request = fixture.exact("SELECT 1", &fixture.reader, true, "login_grant");
-    // when
-    let actual = plugin.call(&request);
-    // then
-    assert_eq!(actual["error"]["data"]["code"], "WRITE_NOT_ALLOWED");
-    assert!(actual.get("result").is_none());
-}
 #[test]
 fn 읽기_취소는_attention을_보내고_physical_connection을_폐기한다() {
     // given
@@ -777,62 +703,6 @@ fn 쓰기와_예약한_session의_overflow는_성공_prefix를_반환하지_않�
     assert_eq!(actual.4, 1);
     assert_eq!(actual.5["error"]["data"]["code"], "OUTCOME_UNKNOWN");
     assert_eq!(actual.5["error"]["data"]["details"]["session_closed"], true);
-}
-#[test]
-fn 접근_가능한_다른_database의_write_role도_readonly를_거부한다() {
-    // given
-    let fixture = Fixture::new();
-    let other = Fixture::new();
-    let mut plugin = Plugin::new();
-    support::sql(
-        &other.database,
-        &format!(
-            "CREATE USER [{}] FOR LOGIN [{}]; ALTER ROLE db_datawriter ADD MEMBER [{}];",
-            fixture.reader, fixture.reader, fixture.reader
-        ),
-    );
-    let request = fixture.exact(
-        "SELECT value FROM dbo.items",
-        &fixture.reader,
-        true,
-        "cross_database",
-    );
-    // when
-    let actual = plugin.call(&request);
-    // then
-    assert_eq!(actual["error"]["data"]["code"], "WRITE_NOT_ALLOWED");
-    assert!(actual.get("result").is_none());
-}
-#[test]
-fn schema_ownership과_trustworthy_database는_readonly를_거부한다() {
-    // given
-    let owner = Fixture::new();
-    let trustworthy = Fixture::new();
-    let mut plugin = Plugin::new();
-    support::sql(
-        &owner.database,
-        &format!(
-            "CREATE SCHEMA private_schema AUTHORIZATION [{}];",
-            owner.reader
-        ),
-    );
-    support::sql(
-        "master",
-        &format!(
-            "ALTER DATABASE [{}] SET TRUSTWORTHY ON;",
-            trustworthy.database
-        ),
-    );
-    let requests = [
-        owner.exact("SELECT 1", &owner.reader, true, "owner"),
-        trustworthy.exact("SELECT 1", &trustworthy.reader, true, "trustworthy"),
-    ];
-    // when
-    let actual = requests.map(|request| plugin.call(&request));
-    // then
-    assert!(actual
-        .iter()
-        .all(|response| response["error"]["data"]["code"] == "WRITE_NOT_ALLOWED"));
 }
 #[test]
 fn 여러_connection의_query도_global_여덟개를_넘겨_실행하지_않는다() {

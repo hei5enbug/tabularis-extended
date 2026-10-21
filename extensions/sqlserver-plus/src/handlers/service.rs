@@ -1,6 +1,6 @@
 use crate::{
     driver::service::{
-        catalog, exact, pool, readonly,
+        catalog, exact, pool,
         registry::{self, Scope},
         row, sessions, supervise,
         types::{self, DriverContext},
@@ -26,7 +26,7 @@ pub fn is_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 pub fn capabilities() -> Value {
-    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel_v1":true,"cancel":true,"entra_token":false,"readonly_guarantee":"restricted_database_principal","catalog":true,"rows":true})
+    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel_v1":true,"cancel":true,"entra_token":false,"catalog":true,"rows":true})
 }
 pub fn prepare(params: &Value) -> Result<Scope, ServiceError> {
     let (context, _) = DriverContext::parse(params)?;
@@ -241,9 +241,6 @@ async fn run(
     };
     let mut lease = acquire(connection, context, scope).await?;
     let cancel = scope.cancel_handle();
-    if context.read_only {
-        readonly::probe(lease.client(), Some(&cancel)).await?;
-    }
     if let Some(input) = &row_operation {
         row::validate_primary_key(lease.client(), input, &cancel).await?;
     }

@@ -176,6 +176,18 @@ fn service_capabilities는_host_token을_광고하지_않는다() {
     assert_eq!(capabilities["service_protocol"], json!(1));
 }
 #[test]
+fn service_capabilities는_readonly_guarantee를_광고하지_않는다() {
+    // given
+    let capabilities = crate::handlers::service::capabilities();
+
+    // when
+    let actual = capabilities.get("readonly_guarantee");
+
+    // then
+    assert_eq!(actual, None);
+    assert_eq!(capabilities["catalog"], json!(true));
+}
+#[test]
 fn 다른_연결의_같은_request_id는_별도로_취소한다() {
     let _gate = registry::SHUTDOWN_GATE.read().unwrap();
     // given

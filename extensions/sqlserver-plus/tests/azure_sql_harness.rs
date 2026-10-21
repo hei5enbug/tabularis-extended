@@ -128,7 +128,7 @@ impl Fake {
         };
         match method {
             "initialize" => Ok(ok(
-                json!({"service_capabilities":{"service_protocol":1,"exact_query":true,"sessions":true,"cancel":true,"catalog":true,"rows":true,"entra_token":state.mode==Mode::HostTokenCapability,"exact_affected_rows":false,"readonly_guarantee":"restricted_database_principal"}}),
+                json!({"service_capabilities":{"service_protocol":1,"exact_query":true,"sessions":true,"cancel":true,"catalog":true,"rows":true,"entra_token":state.mode==Mode::HostTokenCapability,"exact_affected_rows":false}}),
             )),
             "service_test" => Ok(ok(json!({"success":true}))),
             "service_catalog" => match input["operation"].as_str() {

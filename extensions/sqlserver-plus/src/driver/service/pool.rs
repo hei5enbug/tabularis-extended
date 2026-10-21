@@ -1,5 +1,5 @@
 use super::{
-    exact, readonly,
+    exact,
     registry::{Scope, State},
     types::{self, DriverContext, TransientAuth},
     ServiceError,
@@ -206,9 +206,6 @@ impl Manager for ServiceManager {
                 }
                 _ => ServiceError::new("AUTH_REQUIRED", "SQL Server physical login failed"),
             })?;
-        if self.read_only {
-            readonly::probe(&mut client, Some(&cancel)).await?;
-        }
         if let Some(script) = self
             .params
             .startup_script

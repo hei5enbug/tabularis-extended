@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod catalog_objects;
 pub mod connection;
 pub mod ewkb;
 pub mod exact;

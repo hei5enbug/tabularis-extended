@@ -92,7 +92,7 @@ impl Harness<'_> {
                     .iter()
                     .all(|key| caps[*key] == true)
                 && caps["entra_token"] == false
-                && caps["readonly_guarantee"] == "restricted_database_principal",
+                && caps.get("readonly_guarantee").is_none(),
             "native_capability_response_without_host_token",
         )?;
         let tested = self.data("service_test", json!({}), None)?;

@@ -1,7 +1,6 @@
 pub mod catalog;
 pub mod exact;
 pub mod pool;
-pub mod readonly;
 pub mod registry;
 pub mod row;
 pub mod sessions;
