@@ -92,6 +92,19 @@ export type SlotContextMap = {
      * connection. The host resets the flag whenever the driver changes.
      */
     setCredentialFieldsHidden: (hidden: boolean) => void;
+    /** Whether only the host password input is currently hidden. */
+    passwordFieldHidden: boolean;
+    /**
+     * Hide (or show again) only the host password input; the username input
+     * stays visible and keeps its value. Hiding clears the password. Use it
+     * for drivers that need a login name but no password (e.g. a token the
+     * driver obtains itself). While hidden, the host ignores the password of
+     * an imported connection string and saves an explicit empty password,
+     * dropping any secret stored for the connection. The host resets the flag
+     * whenever the driver changes. `setCredentialFieldsHidden(true)` still
+     * hides both inputs whatever this flag says.
+     */
+    setPasswordFieldHidden: (hidden: boolean) => void;
   };
 };
 

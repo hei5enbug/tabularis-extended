@@ -69,6 +69,7 @@ export const errorCodes = [
   "INVALID_GEOMETRY",
   "FEATURE_TOO_LARGE",
   "VERSION_CONFLICT",
+  "CONNECTION_CONFLICT",
   "ETAG_CONFLICT",
   "DOCUMENT_ALREADY_EXISTS",
   "PARTITION_KEY_IMMUTABLE",
@@ -84,7 +85,11 @@ export const errorCodes = [
   "APPLY_TIMEOUT",
   "DRIVER_EXITED",
   "OUTCOME_UNKNOWN",
-  "DOCUMENT_NOT_FOUND"
+  "DOCUMENT_NOT_FOUND",
+  "WRITE_INTENT_REQUIRED",
+  "SECRET_NOT_ACCEPTED",
+  "OPERATION_NOT_ALLOWED",
+  "CANCEL_NOT_CONFIRMED"
 ] as const;
 export type ErrorCode = (typeof errorCodes)[number];
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";
@@ -125,7 +130,7 @@ export interface OperationInputs {
   "catalog.schemas": { "database": string };
   "catalog.objects": { "database": string; "schema": string | null };
   "catalog.describe": { "table": TableRef };
-  "query.execute": { "text": string; "parameters": (QueryParameter)[]; "page_size": number; "mode"?: "exact"; "database"?: string; "container"?: string; "partition_key"?: PartitionKeyComponent[] | null; "ru_budget"?: number } & ({ "language": "sql"; "result_mode"?: never } | { "language": "cosmos_sql"; "result_mode"?: "json_values" | "documents" });
+  "query.execute": { "text": string; "parameters": (QueryParameter)[]; "page_size": number; "mode"?: "exact"; "database"?: string; "schema"?: string; "container"?: string; "partition_key"?: PartitionKeyComponent[] | null; "ru_budget"?: number } & ({ "language": "sql"; "result_mode"?: never } | { "language": "cosmos_sql"; "result_mode"?: "json_values" | "documents" });
   "query.next": { "next_token": string };
   "result.get": { "result_id": string; "result_set_index": number; "offset": number; "limit": number };
   "result.release": { "result_id": string };

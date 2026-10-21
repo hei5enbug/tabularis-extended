@@ -5,7 +5,7 @@
   "origin_path": "build-support/host",
   "upstream_repository": "https://github.com/TabularisDB/tabularis.git",
   "upstream_base_sha": "b78a40946f072f6b8f2f1a4c80c1e04ff9b54cd4",
-  "canonical_host_commit": "a10ba47979320766f0cb706afd48e6cecd7331e8",
+  "canonical_host_commit": "b10b8b8abd73214f7952f14012eb2e6d78a81918",
   "api_version": "0.2.0",
   "service_protocol": 1,
   "files": [
@@ -59,9 +59,9 @@
     },
     {
       "path": "packages/plugin-api/src/slots.ts",
-      "sha256": "caa4cc28ec3b437f5258d1cfee8838923143d4649c1b226ad21967d7d0c1d9ae",
-      "size": 5020,
-      "origin_sha256": "caa4cc28ec3b437f5258d1cfee8838923143d4649c1b226ad21967d7d0c1d9ae"
+      "sha256": "6f20611837d1aaef66ec921011fababae65aab725836f737424ae9c1384524ca",
+      "size": 5782,
+      "origin_sha256": "6f20611837d1aaef66ec921011fababae65aab725836f737424ae9c1384524ca"
     },
     {
       "path": "packages/plugin-api/src/types.ts",
@@ -101,9 +101,9 @@
     },
     {
       "path": "packages/service-contracts/fixtures/v1/validation.json",
-      "sha256": "55b0e8ca95b1d318a27356cd902599072d4ff8270c58f00a2a9ae4e3f71c0f79",
-      "size": 291319,
-      "origin_sha256": "55b0e8ca95b1d318a27356cd902599072d4ff8270c58f00a2a9ae4e3f71c0f79"
+      "sha256": "3ebc000a867785a311be8078ddc9b31ff8b591f1f7e23442963792b335d08899",
+      "size": 295938,
+      "origin_sha256": "3ebc000a867785a311be8078ddc9b31ff8b591f1f7e23442963792b335d08899"
     },
     {
       "path": "packages/service-contracts/package.json",
@@ -113,15 +113,15 @@
     },
     {
       "path": "packages/service-contracts/schema/v1/request.json",
-      "sha256": "e058298905ecc1c718a7e0e7071a56defa9954a69d094007e2f851a05a949e19",
-      "size": 55881,
-      "origin_sha256": "e058298905ecc1c718a7e0e7071a56defa9954a69d094007e2f851a05a949e19"
+      "sha256": "4ddb65aceb9a4133281d840d531cb57a2816e9833e8f52c75101afbec03bc9ce",
+      "size": 55965,
+      "origin_sha256": "4ddb65aceb9a4133281d840d531cb57a2816e9833e8f52c75101afbec03bc9ce"
     },
     {
       "path": "packages/service-contracts/schema/v1/response.json",
-      "sha256": "30c965e5a6b60bcfcdc7edb1a4bc03f30f65e49fd058b7cc7e8089131e9290ea",
-      "size": 5123,
-      "origin_sha256": "30c965e5a6b60bcfcdc7edb1a4bc03f30f65e49fd058b7cc7e8089131e9290ea"
+      "sha256": "35d48429ec37415a2904384be07fddad3143322426e48bf3552516f1d273e577",
+      "size": 5323,
+      "origin_sha256": "35d48429ec37415a2904384be07fddad3143322426e48bf3552516f1d273e577"
     },
     {
       "path": "packages/service-contracts/src/index.ts",
@@ -131,9 +131,9 @@
     },
     {
       "path": "packages/service-contracts/src/types.ts",
-      "sha256": "11041ef010e1f12c4c9b6e5067cfe88072ca91d4eb3ea560964fed149a507a5b",
-      "size": 9493,
-      "origin_sha256": "11041ef010e1f12c4c9b6e5067cfe88072ca91d4eb3ea560964fed149a507a5b"
+      "sha256": "e0190a7c4b482467004d8b14c37206f95a7f4e93b5acef8775fc1025ead2759f",
+      "size": 9642,
+      "origin_sha256": "e0190a7c4b482467004d8b14c37206f95a7f4e93b5acef8775fc1025ead2759f"
     },
     {
       "path": "packages/service-contracts/tsconfig.json",

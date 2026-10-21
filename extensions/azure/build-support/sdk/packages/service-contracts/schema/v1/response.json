@@ -170,6 +170,7 @@
                 "INVALID_GEOMETRY",
                 "FEATURE_TOO_LARGE",
                 "VERSION_CONFLICT",
+                "CONNECTION_CONFLICT",
                 "ETAG_CONFLICT",
                 "DOCUMENT_ALREADY_EXISTS",
                 "PARTITION_KEY_IMMUTABLE",
@@ -185,7 +186,11 @@
                 "APPLY_TIMEOUT",
                 "DRIVER_EXITED",
                 "OUTCOME_UNKNOWN",
-                "DOCUMENT_NOT_FOUND"
+                "DOCUMENT_NOT_FOUND",
+                "WRITE_INTENT_REQUIRED",
+                "SECRET_NOT_ACCEPTED",
+                "OPERATION_NOT_ALLOWED",
+                "CANCEL_NOT_CONFIRMED"
               ]
             },
             "message": {

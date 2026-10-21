@@ -172,6 +172,7 @@ export function errorText(error: unknown): string {
     OUTCOME_UNKNOWN: '작업 결과를 확인할 수 없습니다. 다시 전송하지 말고 최신 문서를 조회하세요.',
     ETAG_CONFLICT: '문서가 변경되었습니다. 최신 조회 버튼으로 확인한 뒤 다시 결정하세요.',
     VERSION_CONFLICT: '연결 설정이 변경되었습니다. 최신 설정을 확인하고 다시 저장하세요.',
+    CONNECTION_CONFLICT: '연결 설정이 변경되었습니다. 최신 설정을 확인하고 다시 저장하세요.',
     METADATA_UNAVAILABLE: '파티션 키 정보를 확인할 수 없어 문서 쓰기를 사용할 수 없습니다.',
     IDENTITY_READ_ONLY: '문서 ID와 파티션 키는 변경할 수 없습니다.', SYSTEM_FIELD_READ_ONLY: '시스템 속성은 변경할 수 없습니다.',
     SYSTEM_PARTITION_KEY: '시스템 파티션 키 컨테이너는 문서 쓰기를 지원하지 않습니다.',

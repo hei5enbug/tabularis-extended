@@ -19,7 +19,7 @@ SDK snapshot에는 root와 각 package의 Apache-2.0 license 파일이 포함됩
 
 - upstream repository: `https://github.com/TabularisDB/tabularis.git`
 - upstream base: `b78a40946f072f6b8f2f1a4c80c1e04ff9b54cd4`
-- canonical host commit: `a10ba47979320766f0cb706afd48e6cecd7331e8`
+- canonical host commit: `b10b8b8abd73214f7952f14012eb2e6d78a81918`
 
 schema나 SDK source를 이 snapshot에서 수정하지 마세요.
 canonical source 변경을 수용할 때 원본 출처와 파일별 SHA를 함께 갱신하세요.

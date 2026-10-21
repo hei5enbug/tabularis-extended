@@ -160,9 +160,9 @@ describe('연결 선택과 설정', () => {
     expect(JSON.stringify(service.call.mock.calls)).not.toContain('approved');
     expect(JSON.stringify(service.call.mock.calls)).not.toContain('"driver"');
   });
-  it('설정 버전 충돌은 자동 저장 없이 사용자에게 표시한다', async () => {
+  it.each(['VERSION_CONFLICT', 'CONNECTION_CONFLICT'] as const)('설정 버전 충돌(%s)은 자동 저장 없이 사용자에게 표시한다', async code => {
     // given
-    const service = fakeService(async () => failure('VERSION_CONFLICT'));
+    const service = fakeService(async () => failure(code));
     render(<ConnectionPanel service={service} connection={connection} onChanged={vi.fn(async () => undefined)} />);
     const scenario = async () => { fireEvent.click(screen.getByRole('button', { name: '연결 설정 저장' })); await screen.findByRole('alert'); };
     // when

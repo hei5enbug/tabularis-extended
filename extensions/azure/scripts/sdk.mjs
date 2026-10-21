@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-export const SDK_REVISION = 'a10ba47979320766f0cb706afd48e6cecd7331e8';
+export const SDK_REVISION = 'b10b8b8abd73214f7952f14012eb2e6d78a81918';
 const prefix = 'build-support/sdk';
 const generated = new Set(['node_modules', 'dist']);
 

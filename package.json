@@ -30,6 +30,7 @@
     "typecheck:explain": "pnpm --filter @tabularis/explain typecheck",
     "build:plugin-api": "pnpm --filter @tabularis/plugin-api build",
     "check:plugin-api": "pnpm --filter @tabularis/plugin-api check:sync",
+    "check:extension-sdk": "node scripts/check-extension-sdk.mjs",
     "build:create-plugin": "pnpm --filter @tabularis/create-plugin build",
     "smoke:create-plugin": "pnpm --filter @tabularis/create-plugin smoke",
     "roadmap": "node scripts/update-roadmap.js",
