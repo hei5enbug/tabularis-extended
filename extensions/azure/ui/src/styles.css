@@ -1,0 +1,17 @@
+.cosmos-ui { --cosmos-bg:#fff; --cosmos-input:#fff; --cosmos-text:#17202a; --cosmos-muted:#475569; --cosmos-border:#a8b3c3; --cosmos-accent:#2563eb; --cosmos-error:#b42318; color:var(--cosmos-text); background:var(--cosmos-bg); padding:16px; font:14px/1.5 system-ui,sans-serif; overflow:auto; max-height:80vh; }
+.cosmos-ui section,.cosmos-ui details { border:1px solid var(--cosmos-border); border-radius:6px; padding:12px; margin:12px 0; }
+.cosmos-ui h3,.cosmos-ui h4 { margin:0 0 8px; }
+.cosmos-ui label { display:flex; flex-direction:column; gap:4px; margin:8px 0; }
+.cosmos-ui input,.cosmos-ui textarea,.cosmos-ui select,.cosmos-ui button { color:var(--cosmos-text); background:var(--cosmos-input); border:1px solid var(--cosmos-border); border-radius:4px; padding:7px; font:inherit; }
+.cosmos-ui textarea { width:100%; box-sizing:border-box; font-family:ui-monospace,monospace; }
+.cosmos-ui button,.cosmos-actions button { cursor:pointer; margin:4px 6px 4px 0; }
+.cosmos-ui button:disabled,.cosmos-actions button:disabled { cursor:default; opacity:.55; }
+.cosmos-ui :focus-visible,.cosmos-actions :focus-visible { outline:2px solid var(--cosmos-accent); outline-offset:2px; }
+.cosmos-ui .cosmos-checkbox { flex-direction:row; align-items:center; }
+.cosmos-fields { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:0 12px; }
+.cosmos-key { display:flex; flex-wrap:wrap; gap:12px; }
+.cosmos-ui pre { white-space:pre-wrap; overflow-wrap:anywhere; max-height:320px; overflow:auto; border:1px solid var(--cosmos-border); padding:8px; }
+.cosmos-ui [role=alert] { color:var(--cosmos-error); }
+.cosmos-ui p { overflow-wrap:anywhere; }
+.cosmos-ui summary { cursor:pointer; }
+.cosmos-ui fieldset { border:1px solid var(--cosmos-border); }

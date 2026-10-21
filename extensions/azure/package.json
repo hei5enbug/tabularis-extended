@@ -1,0 +1,39 @@
+{
+  "name": "@tabularis/azure",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
+  "scripts": {
+    "verify:sdk": "node scripts/sdk.mjs",
+    "build:sdk": "corepack pnpm verify:sdk && corepack pnpm --filter @tabularis/service-contracts build && corepack pnpm --filter @tabularis/plugin-api build",
+    "build:driver": "tsc",
+    "typecheck": "corepack pnpm build:sdk && tsc --noEmit",
+    "build": "corepack pnpm build:sdk && corepack pnpm build:driver",
+    "test:sdk": "corepack pnpm build:sdk && node --test tests/sdk.test.mjs",
+    "start": "node --max-old-space-size=512 dist/index.js",
+    "test:unit": "corepack pnpm build && node --test tests/unit/*.test.mjs",
+    "test:protocol": "corepack pnpm build && node --test tests/protocol/*.test.mjs",
+    "test:ui": "corepack pnpm --dir ui test",
+    "build:ui": "corepack pnpm --dir ui build",
+    "test:live": "node scripts/live/cli.mjs",
+    "package:plugin": "node scripts/package/cli.mjs",
+    "test:install": "node --test tests/install/*.test.mjs",
+    "bootstrap": "node scripts/bootstrap/cli.mjs",
+    "test:bootstrap": "node --test tests/bootstrap/*.test.mjs tests/ci/*.test.mjs"
+  },
+  "dependencies": {
+    "@azure/cosmos": "4.10.1",
+    "@tabularis/service-contracts": "workspace:*",
+    "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.0",
+    "js-yaml": "4.1.1",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@10.30.3"
+}

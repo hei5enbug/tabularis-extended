@@ -1,0 +1,167 @@
+import type { ReactNode } from "react";
+import type { JsonValue, Operation, ServiceRequest, ServiceResponse } from "@tabularis/service-contracts";
+
+export type { ServiceRequest, ServiceResponse } from "@tabularis/service-contracts";
+export interface ServiceCapabilities {
+  service_protocol: 1;
+  operations: Operation[];
+  spatial_v1: boolean;
+  documents_v1: boolean;
+  cancel_v1: boolean;
+  gui_instance_id?: string;
+}
+export interface PluginMapApplyRequest {
+  map_id: string;
+  state_version: number;
+  generation: number;
+  state: JsonValue;
+}
+export interface PluginMapApplyAck {
+  state_version: number;
+  rendered_version: number | null;
+  generation: number;
+  gui_applied: boolean;
+}
+export type PluginCredentialSlot = ServiceRequest<"credential.import">["input"]["slot"];
+export interface UsePluginServiceReturn {
+  importCredential(connectionId: string, slot: PluginCredentialSlot, secret: string, options: { persistence: "keychain" | "session"; signal?: AbortSignal }): Promise<ServiceResponse>;
+  call(request: ServiceRequest, options?: { signal?: AbortSignal }): Promise<ServiceResponse>;
+  executeWrite(request: ServiceRequest<"query.execute">, options?: { signal?: AbortSignal }): Promise<ServiceResponse>;
+  saveArtifact(artifactId: string): Promise<boolean>;
+  capabilities(connectionId: string): Promise<ServiceCapabilities>;
+  subscribeMap(handler: (request: PluginMapApplyRequest) => Promise<PluginMapApplyAck>): Promise<() => void>;
+}
+export interface UsePluginAssetsReturn {
+  resolve(filePath: string): Promise<{ url: string; dispose(): void }>;
+}
+
+export interface PluginModalOptions {
+  title: string;
+  content: ReactNode;
+  size?: "sm" | "md" | "lg" | "xl";
+}
+
+export interface PluginConfig {
+  interpreter?: string;
+  settings?: Record<string, unknown>;
+}
+
+export interface ThemeColors {
+  bg: {
+    base: string;
+    elevated: string;
+    overlay: string;
+    input: string;
+    tooltip: string;
+  };
+  surface: {
+    primary: string;
+    secondary: string;
+    tertiary: string;
+    hover: string;
+    active: string;
+    disabled: string;
+  };
+  text: {
+    primary: string;
+    secondary: string;
+    muted: string;
+    disabled: string;
+    accent: string;
+    inverse: string;
+  };
+  accent: {
+    primary: string;
+    secondary: string;
+    success: string;
+    warning: string;
+    error: string;
+    info: string;
+  };
+  border: {
+    subtle: string;
+    default: string;
+    strong: string;
+    focus: string;
+  };
+  semantic: {
+    string: string;
+    number: string;
+    boolean: string;
+    date: string;
+    null: string;
+    primaryKey: string;
+    foreignKey: string;
+    index: string;
+    connectionActive: string;
+    connectionInactive: string;
+    modified: string;
+    deleted: string;
+    new: string;
+  };
+}
+
+export interface PluginQueryResult {
+  columns: string[];
+  rows: unknown[][];
+}
+
+export interface UsePluginQueryReturn {
+  executeQuery: (query: string) => Promise<PluginQueryResult>;
+  loading: boolean;
+  error: string | null;
+}
+
+export interface UsePluginConnectionReturn {
+  connectionId: string | null;
+  driver: string | null;
+  schema: string | null;
+}
+
+export interface UsePluginToastReturn {
+  showInfo: (text: string) => Promise<void>;
+  showError: (text: string) => Promise<void>;
+  showWarning: (text: string) => Promise<void>;
+}
+
+export interface UsePluginSettingReturn {
+  getSetting: <T = unknown>(key: string, defaultValue?: T) => T;
+  setSetting: (key: string, value: unknown) => void;
+  setSettings: (updates: Record<string, unknown>) => void;
+}
+
+export interface UsePluginModalReturn {
+  openModal: (options: PluginModalOptions) => void;
+  closeModal: () => void;
+}
+
+export interface UsePluginThemeReturn {
+  themeId: string | null;
+  themeName: string | null;
+  isDark: boolean;
+  colors: ThemeColors | null;
+}
+
+/**
+ * Minimal i18next-compatible translator signature.
+ * Plugins should treat this as read-only.
+ */
+export type PluginTranslator = (key: string, options?: Record<string, unknown>) => string;
+
+/**
+ * The full host API surface injected by Tabularis at runtime as
+ * `window.__TABULARIS_API__`. Plugin code should not use this directly —
+ * import the named hooks/helpers from `@tabularis/plugin-api` instead.
+ */
+export interface TabularisHostApi {
+  usePluginService: () => UsePluginServiceReturn;
+  usePluginAssets: (pluginId: string) => UsePluginAssetsReturn;
+  usePluginQuery: () => UsePluginQueryReturn;
+  usePluginConnection: () => UsePluginConnectionReturn;
+  usePluginToast: () => UsePluginToastReturn;
+  usePluginSetting: (pluginId: string) => UsePluginSettingReturn;
+  usePluginTranslation: (pluginId: string) => PluginTranslator;
+  usePluginModal: () => UsePluginModalReturn;
+  usePluginTheme: () => UsePluginThemeReturn;
+  openUrl: (url: string) => Promise<void>;
+}

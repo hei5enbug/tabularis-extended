@@ -1,0 +1,93 @@
+name: Native build and package checks
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: tabularis-azure
+        shell: pwsh
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_TARGET_DIR: ${{ github.workspace }}/azure-launcher-target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: tabularis-azure
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.21.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          version: 10.30.3
+          package_json_file: tabularis-azure/package.json
+          run_install: false
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.96.0
+          components: clippy
+      - name: Install the Linux archive parser
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libarchive-tools
+      - name: Build from the canonical snapshot
+        run: |
+          node scripts/bootstrap/cli.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check the launcher
+        run: |
+          cargo build --locked --release --manifest-path launcher/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TABULARIS_C3B_TEST_NODE = (node -p 'process.execPath')
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --manifest-path launcher/Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --locked --all-targets --manifest-path launcher/Cargo.toml -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Verify official runtimes and configure install fixtures
+        run: |
+          $suffix = if ($IsWindows) { '.exe' } else { '' }
+          $launcher = Join-Path $env:CARGO_TARGET_DIR "release/tabularis-azure-launcher$suffix"
+          $python = if ($IsWindows) { (Get-Command python.exe -ErrorAction Stop).Source } else { '/usr/bin/python3' }
+          $cache = Join-Path '${{ runner.temp }}' 'tabularis-runtime-cache/node-v24.21.0'
+          node scripts/ci/prepare.mjs --launcher $launcher --python $python --cache $cache --env-file $env:GITHUB_ENV
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check driver and UI boundaries
+        run: |
+          pnpm typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test:bootstrap
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test:sdk
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test:unit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test:protocol
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm --dir ui typecheck
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm test:ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check install fixtures and native production ZIP
+        run: |
+          pnpm test:install 2>&1 | Tee-Object -FilePath '${{ runner.temp }}/azure-install.log'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node scripts/ci/collect.mjs '${{ runner.temp }}/azure-install.log' '${{ runner.temp }}/azure-artifacts'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: azure-native-${{ matrix.os }}
+          path: ${{ runner.temp }}/azure-artifacts/
+          if-no-files-found: error

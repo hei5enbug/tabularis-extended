@@ -1,0 +1,2619 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tabularis.dev/service/v1/request.json",
+  "title": "ServiceRequestV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "protocol_version",
+    "operation",
+    "request_id",
+    "input"
+  ],
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "operation": {
+      "enum": [
+        "connection.list",
+        "connection.create",
+        "connection.update",
+        "connection.delete",
+        "connection.test",
+        "catalog.databases",
+        "catalog.schemas",
+        "catalog.objects",
+        "catalog.describe",
+        "query.execute",
+        "query.next",
+        "result.get",
+        "result.release",
+        "row.insert",
+        "row.update",
+        "row.delete",
+        "document.read",
+        "document.create",
+        "document.replace",
+        "document.delete",
+        "session.open",
+        "session.commit",
+        "session.rollback",
+        "session.close",
+        "spatial.columns",
+        "spatial.query_result",
+        "spatial.table_query",
+        "spatial.feature",
+        "spatial.export",
+        "map.create",
+        "map.update",
+        "map.get",
+        "map.list",
+        "map.open",
+        "map.close",
+        "map.layer.add",
+        "map.layer.remove",
+        "map.layer.update",
+        "map.viewport.set",
+        "map.selection.set",
+        "map.save",
+        "job.get",
+        "job.result",
+        "job.cancel",
+        "auth.begin",
+        "auth.status",
+        "auth.cancel",
+        "auth.logout",
+        "credential.import"
+      ]
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "connection_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "session_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "map_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "expected_version": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0,
+      "maximum": 9007199254740991
+    },
+    "deadline_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120000,
+      "default": 30000
+    },
+    "input": {
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "operation": {
+          "const": "connection.list"
+        },
+        "input": {
+          "$ref": "#/definitions/input.connection.list"
+        }
+      },
+      "required": []
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "connection.create"
+        },
+        "input": {
+          "$ref": "#/definitions/input.connection.create"
+        }
+      },
+      "required": []
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "connection.update"
+        },
+        "input": {
+          "$ref": "#/definitions/input.connection.update"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "connection_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "connection.delete"
+        },
+        "input": {
+          "$ref": "#/definitions/input.connection.delete"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "connection_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "connection.test"
+        },
+        "input": {
+          "$ref": "#/definitions/input.connection.test"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "catalog.databases"
+        },
+        "input": {
+          "$ref": "#/definitions/input.catalog.databases"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "catalog.schemas"
+        },
+        "input": {
+          "$ref": "#/definitions/input.catalog.schemas"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "catalog.objects"
+        },
+        "input": {
+          "$ref": "#/definitions/input.catalog.objects"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "catalog.describe"
+        },
+        "input": {
+          "$ref": "#/definitions/input.catalog.describe"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "query.execute"
+        },
+        "input": {
+          "$ref": "#/definitions/input.query.execute"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "query.next"
+        },
+        "input": {
+          "$ref": "#/definitions/input.query.next"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "result.get"
+        },
+        "input": {
+          "$ref": "#/definitions/input.result.get"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "result.release"
+        },
+        "input": {
+          "$ref": "#/definitions/input.result.release"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "row.insert"
+        },
+        "input": {
+          "$ref": "#/definitions/input.row.insert"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "row.update"
+        },
+        "input": {
+          "$ref": "#/definitions/input.row.update"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "row.delete"
+        },
+        "input": {
+          "$ref": "#/definitions/input.row.delete"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "document.read"
+        },
+        "input": {
+          "$ref": "#/definitions/input.document.read"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "document.create"
+        },
+        "input": {
+          "$ref": "#/definitions/input.document.create"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "document.replace"
+        },
+        "input": {
+          "$ref": "#/definitions/input.document.replace"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "document.delete"
+        },
+        "input": {
+          "$ref": "#/definitions/input.document.delete"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "session.open"
+        },
+        "input": {
+          "$ref": "#/definitions/input.session.open"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "session.commit"
+        },
+        "input": {
+          "$ref": "#/definitions/input.session.commit"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id",
+        "session_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "session.rollback"
+        },
+        "input": {
+          "$ref": "#/definitions/input.session.rollback"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id",
+        "session_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "session.close"
+        },
+        "input": {
+          "$ref": "#/definitions/input.session.close"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id",
+        "session_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "spatial.columns"
+        },
+        "input": {
+          "$ref": "#/definitions/input.spatial.columns"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "spatial.query_result"
+        },
+        "input": {
+          "$ref": "#/definitions/input.spatial.query_result"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "spatial.table_query"
+        },
+        "input": {
+          "$ref": "#/definitions/input.spatial.table_query"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "spatial.feature"
+        },
+        "input": {
+          "$ref": "#/definitions/input.spatial.feature"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "spatial.export"
+        },
+        "input": {
+          "$ref": "#/definitions/input.spatial.export"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.create"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.create"
+        }
+      },
+      "required": []
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.update"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.update"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "map_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.get"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.get"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "map_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.list"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.list"
+        }
+      },
+      "required": []
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.open"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.open"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "map_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.close"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.close"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "map_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.layer.add"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.layer.add"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "connection_id",
+        "map_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.layer.remove"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.layer.remove"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "map_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.layer.update"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.layer.update"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "map_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.viewport.set"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.viewport.set"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "map_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.selection.set"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.selection.set"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "map_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "map.save"
+        },
+        "input": {
+          "$ref": "#/definitions/input.map.save"
+        },
+        "map_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "expected_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "map_id",
+        "expected_version"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "job.get"
+        },
+        "input": {
+          "$ref": "#/definitions/input.job.get"
+        }
+      },
+      "required": []
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "job.result"
+        },
+        "input": {
+          "$ref": "#/definitions/input.job.result"
+        }
+      },
+      "required": []
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "job.cancel"
+        },
+        "input": {
+          "$ref": "#/definitions/input.job.cancel"
+        }
+      },
+      "required": []
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "auth.begin"
+        },
+        "input": {
+          "$ref": "#/definitions/input.auth.begin"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "auth.status"
+        },
+        "input": {
+          "$ref": "#/definitions/input.auth.status"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "auth.cancel"
+        },
+        "input": {
+          "$ref": "#/definitions/input.auth.cancel"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "auth.logout"
+        },
+        "input": {
+          "$ref": "#/definitions/input.auth.logout"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "credential.import"
+        },
+        "input": {
+          "$ref": "#/definitions/input.credential.import"
+        }
+      },
+      "required": []
+    }
+  ],
+  "definitions": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "table": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "schema": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "database",
+        "schema",
+        "table"
+      ],
+      "additionalProperties": false
+    },
+    "row_identity": {
+      "type": "object",
+      "properties": {
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "values": {
+          "type": "array",
+          "items": {},
+          "minItems": 1
+        }
+      },
+      "required": [
+        "columns",
+        "values"
+      ],
+      "additionalProperties": false
+    },
+    "parameter": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {}
+      },
+      "required": [
+        "name",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "partition_component": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "number"
+            },
+            "value": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "boolean"
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "null"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": {
+              "const": "undefined"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "partition_key": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/partition_component"
+      },
+      "minItems": 1,
+      "maxItems": 3
+    },
+    "document_identity": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "partition_key": {
+          "$ref": "#/definitions/partition_key"
+        }
+      },
+      "required": [
+        "id",
+        "partition_key"
+      ],
+      "additionalProperties": false
+    },
+    "basemap": {
+      "type": "object",
+      "properties": {
+        "style_url": {
+          "type": "string",
+          "maxLength": 2048,
+          "pattern": "^[Hh][Tt][Tt][Pp][Ss]://(?:[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+)*\\.?|\\[(?:(?:[0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,7}:|(?:[0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|(?:[0-9A-Fa-f]{1,4}:){1,5}(?::[0-9A-Fa-f]{1,4}){1,2}|(?:[0-9A-Fa-f]{1,4}:){1,4}(?::[0-9A-Fa-f]{1,4}){1,3}|(?:[0-9A-Fa-f]{1,4}:){1,3}(?::[0-9A-Fa-f]{1,4}){1,4}|(?:[0-9A-Fa-f]{1,4}:){1,2}(?::[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:(?:(?::[0-9A-Fa-f]{1,4}){1,6})|:(?:(?::[0-9A-Fa-f]{1,4}){1,7}|:))\\])(?::(?:[0-9]{1,4}|[1-5][0-9]{4}|6[0-4][0-9]{3}|65[0-4][0-9]{2}|655[0-2][0-9]|6553[0-5]))?(?:[/?#][^\\s\\\\]*)?$",
+          "not": {
+            "pattern": "[\\s\\\\\\x00-\\x1f\\x7f]"
+          }
+        },
+        "attribution": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "style_url",
+        "attribution"
+      ],
+      "additionalProperties": false
+    },
+    "viewport": {
+      "type": "object",
+      "properties": {
+        "west": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "east": {
+          "type": "number",
+          "minimum": -180,
+          "maximum": 180
+        },
+        "south": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "north": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90
+        },
+        "world": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "west",
+        "east",
+        "south",
+        "north"
+      ],
+      "additionalProperties": false
+    },
+    "style": {
+      "type": "object",
+      "properties": {
+        "point": {
+          "type": "object",
+          "properties": {
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "radius": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 40
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "line": {
+          "type": "object",
+          "properties": {
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "width": {
+              "type": "number",
+              "minimum": 1,
+              "maximum": 20
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        },
+        "polygon": {
+          "type": "object",
+          "properties": {
+            "color": {
+              "type": "string",
+              "pattern": "^#[0-9A-Fa-f]{6}([0-9A-Fa-f]{2})?$"
+            },
+            "opacity": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          },
+          "required": [],
+          "additionalProperties": false
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "layer_source": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "query_result"
+            },
+            "result_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "result_set_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "column_index": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "source_srid": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "longitude_mode": {
+              "enum": [
+                "preserve",
+                "shortest"
+              ]
+            },
+            "skip_invalid": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "result_id",
+            "result_set_index",
+            "column_index"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "table"
+            },
+            "table": {
+              "$ref": "#/definitions/table"
+            },
+            "column": {
+              "type": "string",
+              "minLength": 1
+            },
+            "viewport": {
+              "$ref": "#/definitions/viewport"
+            },
+            "source_srid": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "longitude_mode": {
+              "enum": [
+                "preserve",
+                "shortest"
+              ]
+            },
+            "skip_invalid": {
+              "type": "boolean"
+            },
+            "srid_filter": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "minimum": 0,
+              "maximum": 999999
+            }
+          },
+          "required": [
+            "kind",
+            "table",
+            "column",
+            "viewport"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "feature_ref": {
+      "type": "object",
+      "properties": {
+        "layer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "feature_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "layer_id",
+        "feature_id"
+      ],
+      "additionalProperties": false
+    },
+    "input_channel": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "protected_stdin"
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "file_descriptor"
+            },
+            "descriptor": {
+              "type": "integer",
+              "minimum": 3,
+              "maximum": 255
+            }
+          },
+          "required": [
+            "kind",
+            "descriptor"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "const": "gui_buffer"
+            },
+            "channel_id": {
+              "type": "string",
+              "minLength": 36,
+              "maxLength": 36,
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          "required": [
+            "kind",
+            "channel_id"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "input.connection.list": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.connection.create": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "driver": {
+          "type": "string",
+          "minLength": 1
+        },
+        "settings": {
+          "type": "object"
+        },
+        "credential_ref": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "driver",
+        "settings",
+        "credential_ref"
+      ],
+      "additionalProperties": false
+    },
+    "input.connection.update": {
+      "type": "object",
+      "properties": {
+        "patch": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "patch"
+      ],
+      "additionalProperties": false
+    },
+    "input.connection.delete": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.connection.test": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.catalog.databases": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.catalog.schemas": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "database"
+      ],
+      "additionalProperties": false
+    },
+    "input.catalog.objects": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "database",
+        "schema"
+      ],
+      "additionalProperties": false
+    },
+    "input.catalog.describe": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/definitions/table"
+        }
+      },
+      "required": [
+        "table"
+      ],
+      "additionalProperties": false
+    },
+    "input.query.execute": {
+      "type": "object",
+      "properties": {
+        "language": {
+          "enum": [
+            "sql",
+            "cosmos_sql"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "parameters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/parameter"
+          }
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "mode": {
+          "const": "exact",
+          "default": "exact"
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "container": {
+          "type": "string",
+          "minLength": 1
+        },
+        "partition_key": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/partition_key"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "ru_budget": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "result_mode": {
+          "enum": [
+            "json_values",
+            "documents"
+          ]
+        }
+      },
+      "required": [
+        "language",
+        "text",
+        "parameters",
+        "page_size"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "language": {
+                "const": "cosmos_sql"
+              }
+            },
+            "required": [
+              "language"
+            ]
+          },
+          "then": {
+            "required": [
+              "database",
+              "container"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "language": {
+                "const": "sql"
+              }
+            },
+            "required": [
+              "language"
+            ]
+          },
+          "then": {
+            "not": {
+              "required": [
+                "result_mode"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "input.query.next": {
+      "type": "object",
+      "properties": {
+        "next_token": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "next_token"
+      ],
+      "additionalProperties": false
+    },
+    "input.result.get": {
+      "type": "object",
+      "properties": {
+        "result_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "result_set_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "result_id",
+        "result_set_index",
+        "offset",
+        "limit"
+      ],
+      "additionalProperties": false
+    },
+    "input.result.release": {
+      "type": "object",
+      "properties": {
+        "result_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "result_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.row.insert": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/definitions/table"
+        },
+        "values": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "table",
+        "values"
+      ],
+      "additionalProperties": false
+    },
+    "input.row.update": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/definitions/table"
+        },
+        "identity": {
+          "$ref": "#/definitions/row_identity"
+        },
+        "changes": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "table",
+        "identity",
+        "changes"
+      ],
+      "additionalProperties": false
+    },
+    "input.row.delete": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/definitions/table"
+        },
+        "identity": {
+          "$ref": "#/definitions/row_identity"
+        }
+      },
+      "required": [
+        "table",
+        "identity"
+      ],
+      "additionalProperties": false
+    },
+    "input.document.read": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "container": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/definitions/document_identity"
+        }
+      },
+      "required": [
+        "database",
+        "container",
+        "identity"
+      ],
+      "additionalProperties": false
+    },
+    "input.document.create": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "container": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document": {
+          "type": "object"
+        },
+        "partition_key": {
+          "$ref": "#/definitions/partition_key"
+        }
+      },
+      "required": [
+        "database",
+        "container",
+        "document",
+        "partition_key"
+      ],
+      "additionalProperties": false
+    },
+    "input.document.replace": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "container": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/definitions/document_identity"
+        },
+        "if_match": {
+          "type": "string",
+          "minLength": 1
+        },
+        "document": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "database",
+        "container",
+        "identity",
+        "if_match",
+        "document"
+      ],
+      "additionalProperties": false
+    },
+    "input.document.delete": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "container": {
+          "type": "string",
+          "minLength": 1
+        },
+        "identity": {
+          "$ref": "#/definitions/document_identity"
+        },
+        "if_match": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "database",
+        "container",
+        "identity",
+        "if_match"
+      ],
+      "additionalProperties": false
+    },
+    "input.session.open": {
+      "type": "object",
+      "properties": {
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "mode": {
+          "enum": [
+            "read_only",
+            "write"
+          ]
+        }
+      },
+      "required": [
+        "database",
+        "mode"
+      ],
+      "additionalProperties": false
+    },
+    "input.session.commit": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.session.rollback": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.session.close": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.spatial.columns": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/definitions/table"
+        }
+      },
+      "required": [
+        "table"
+      ],
+      "additionalProperties": false
+    },
+    "input.spatial.query_result": {
+      "type": "object",
+      "properties": {
+        "result_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "result_set_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "column_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "source_srid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "longitude_mode": {
+          "enum": [
+            "preserve",
+            "shortest"
+          ]
+        },
+        "skip_invalid": {
+          "type": "boolean"
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000,
+          "default": 1000
+        },
+        "next_token": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1
+        }
+      },
+      "required": [
+        "result_id",
+        "result_set_index",
+        "column_index"
+      ],
+      "additionalProperties": false
+    },
+    "input.spatial.table_query": {
+      "type": "object",
+      "properties": {
+        "table": {
+          "$ref": "#/definitions/table"
+        },
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "viewport": {
+          "$ref": "#/definitions/viewport"
+        },
+        "page_size": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "next_token": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "source_srid": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "longitude_mode": {
+          "enum": [
+            "preserve",
+            "shortest"
+          ]
+        },
+        "skip_invalid": {
+          "type": "boolean"
+        },
+        "srid_filter": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 999999
+        }
+      },
+      "required": [
+        "table",
+        "column",
+        "viewport",
+        "page_size"
+      ],
+      "additionalProperties": false
+    },
+    "input.spatial.feature": {
+      "type": "object",
+      "properties": {
+        "result_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "result_set_index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "feature_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "table": {
+          "$ref": "#/definitions/table"
+        },
+        "identity": {
+          "$ref": "#/definitions/row_identity"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "required": [
+            "result_id",
+            "feature_id"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "table"
+                ]
+              },
+              {
+                "required": [
+                  "identity"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "required": [
+            "table",
+            "identity"
+          ],
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "result_id"
+                ]
+              },
+              {
+                "required": [
+                  "feature_id"
+                ]
+              },
+              {
+                "required": [
+                  "result_set_index"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "input.spatial.export": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/layer_source"
+        },
+        "format": {
+          "const": "geojson"
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^[^/\\\\:\\x00-\\x1f\\x7f]+$",
+          "not": {
+            "enum": [
+              ".",
+              ".."
+            ]
+          }
+        },
+        "export_limit_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1073741824
+        }
+      },
+      "required": [
+        "source",
+        "format",
+        "filename"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.create": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "viewport": {
+          "$ref": "#/definitions/viewport"
+        },
+        "basemap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/basemap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.update": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "basemap": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/basemap"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "await_gui": {
+          "type": "boolean"
+        },
+        "gui_instance_id": {
+          "$ref": "#/definitions/id"
+        }
+      },
+      "minProperties": 1,
+      "anyOf": [
+        {
+          "required": [
+            "name"
+          ]
+        },
+        {
+          "required": [
+            "basemap"
+          ]
+        }
+      ],
+      "additionalProperties": false
+    },
+    "input.map.get": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.map.list": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.map.open": {
+      "type": "object",
+      "properties": {
+        "gui_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "gui_instance_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.close": {
+      "type": "object",
+      "properties": {
+        "gui_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "gui_instance_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.layer.add": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "$ref": "#/definitions/layer_source"
+        },
+        "style": {
+          "$ref": "#/definitions/style"
+        },
+        "await_gui": {
+          "type": "boolean"
+        },
+        "gui_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "source",
+        "style"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.layer.remove": {
+      "type": "object",
+      "properties": {
+        "layer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "await_gui": {
+          "type": "boolean"
+        },
+        "gui_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "layer_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.layer.update": {
+      "type": "object",
+      "properties": {
+        "layer_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "style": {
+          "$ref": "#/definitions/style"
+        },
+        "await_gui": {
+          "type": "boolean"
+        },
+        "gui_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "layer_id"
+      ],
+      "additionalProperties": false,
+      "anyOf": [
+        {
+          "required": [
+            "visible"
+          ]
+        },
+        {
+          "required": [
+            "style"
+          ]
+        }
+      ]
+    },
+    "input.map.viewport.set": {
+      "type": "object",
+      "properties": {
+        "viewport": {
+          "$ref": "#/definitions/viewport"
+        },
+        "await_gui": {
+          "type": "boolean"
+        },
+        "gui_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "viewport"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.selection.set": {
+      "type": "object",
+      "properties": {
+        "feature_refs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/feature_ref"
+          }
+        },
+        "await_gui": {
+          "type": "boolean"
+        },
+        "gui_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "feature_refs"
+      ],
+      "additionalProperties": false
+    },
+    "input.map.save": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.job.get": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "owner_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "job_id",
+        "owner_instance_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.job.result": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "owner_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "job_id",
+        "owner_instance_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.job.cancel": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "owner_instance_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "job_id",
+        "owner_instance_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.auth.begin": {
+      "type": "object",
+      "properties": {
+        "auth_mode": {
+          "enum": [
+            "account_key",
+            "entra_user",
+            "entra_service_principal"
+          ]
+        },
+        "persistence": {
+          "enum": [
+            "keychain",
+            "session"
+          ],
+          "default": "keychain"
+        }
+      },
+      "required": [
+        "auth_mode"
+      ],
+      "additionalProperties": false
+    },
+    "input.auth.status": {
+      "type": "object",
+      "properties": {
+        "auth_job_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "auth_job_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.auth.cancel": {
+      "type": "object",
+      "properties": {
+        "auth_job_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "auth_job_id"
+      ],
+      "additionalProperties": false
+    },
+    "input.auth.logout": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": false
+    },
+    "input.credential.import": {
+      "type": "object",
+      "properties": {
+        "slot": {
+          "enum": [
+            "db_password",
+            "cosmos_account_key",
+            "entra_client_secret",
+            "entra_refresh_token"
+          ]
+        },
+        "input_channel": {
+          "$ref": "#/definitions/input_channel"
+        },
+        "persistence": {
+          "enum": [
+            "keychain",
+            "session"
+          ]
+        }
+      },
+      "required": [
+        "slot",
+        "input_channel",
+        "persistence"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

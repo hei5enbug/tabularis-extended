@@ -1,0 +1,72 @@
+{
+  "id": "cosmos-nosql",
+  "name": "cosmos-nosql",
+  "kind": "driver",
+  "engine": "cosmos-nosql",
+  "version": "0.1.0",
+  "description": "Azure Cosmos DB for NoSQL driver with document editing, paged queries, and connection metadata.",
+  "executable": "cosmos-nosql",
+  "connection_metadata": true,
+  "service_protocol": 1,
+  "capabilities": {
+    "schemas": false,
+    "views": false,
+    "routines": false,
+    "file_based": false,
+    "identifier_quote": "\"",
+    "alter_primary_key": false,
+    "manage_tables": false,
+    "explain": false,
+    "documents_v1": true,
+    "query_page_v1": true,
+    "cancel_v1": true,
+    "metadata_discovery": true,
+    "readonly": false
+  },
+  "data_types": [
+    {
+      "name": "JSON",
+      "category": "json",
+      "requires_length": false,
+      "requires_precision": false,
+      "default_length": null
+    }
+  ],
+  "settings": [],
+  "min_runtime_version": "0.26.0",
+  "ui_extensions": [
+    {
+      "slot": "connection-modal.extra_fields",
+      "module": "ui/dist/index.js",
+      "driver": "cosmos-nosql"
+    },
+    {
+      "slot": "data-grid.toolbar.actions",
+      "module": "ui/dist/index.js",
+      "driver": "cosmos-nosql"
+    },
+    {
+      "slot": "row-edit-modal.footer.before",
+      "module": "ui/dist/index.js",
+      "driver": "cosmos-nosql"
+    },
+    {
+      "slot": "row-editor-sidebar.header.actions",
+      "module": "ui/dist/index.js",
+      "driver": "cosmos-nosql"
+    },
+    {
+      "slot": "settings.plugin.actions",
+      "module": "ui/dist/index.js"
+    }
+  ],
+  "paradigms": [
+    "document"
+  ],
+  "ui_assets": [
+    {
+      "path": "ui/dist/style.css",
+      "mime": "text/css"
+    }
+  ]
+}

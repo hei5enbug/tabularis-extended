@@ -1,0 +1,3 @@
+scripts/package/licenses/** -text
+LICENSE -text
+build-support/sdk/** -text

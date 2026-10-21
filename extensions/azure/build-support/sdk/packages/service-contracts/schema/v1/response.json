@@ -1,0 +1,238 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://tabularis.dev/service/v1/response.json",
+  "title": "ServiceResponseV1",
+  "type": "object",
+  "properties": {
+    "protocol_version": {
+      "const": 1
+    },
+    "request_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "connection_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "enum": [
+        "queued",
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "interrupted",
+        "outcome_unknown"
+      ]
+    },
+    "job_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "result_id": {
+      "anyOf": [
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "data": {},
+    "page": {
+      "type": "object",
+      "properties": {
+        "next_token": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "resume_mode": {
+          "enum": [
+            "none",
+            "native",
+            "materialized"
+          ]
+        }
+      },
+      "required": [
+        "next_token",
+        "has_more",
+        "resume_mode"
+      ],
+      "additionalProperties": false
+    },
+    "limits": {
+      "type": "object",
+      "properties": {
+        "truncated": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "truncated",
+        "reasons"
+      ],
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "properties": {
+        "elapsed_ms": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "request_charge": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "retry_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "elapsed_ms",
+        "request_charge",
+        "retry_count"
+      ],
+      "additionalProperties": false
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "error": {
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "code": {
+              "enum": [
+                "INVALID_ARGUMENT",
+                "PROTOCOL_MISMATCH",
+                "CONNECTION_NOT_FOUND",
+                "PERMISSION_DENIED",
+                "WRITE_NOT_ALLOWED",
+                "CAPABILITY_UNAVAILABLE",
+                "UNSUPPORTED_TYPE",
+                "UNSUPPORTED_OPERATION",
+                "AUTH_REQUIRED",
+                "AUTH_EXPIRED",
+                "INTERACTION_REQUIRED",
+                "TLS_VALIDATION_FAILED",
+                "SRID_REQUIRED",
+                "INVALID_GEOMETRY",
+                "FEATURE_TOO_LARGE",
+                "VERSION_CONFLICT",
+                "ETAG_CONFLICT",
+                "DOCUMENT_ALREADY_EXISTS",
+                "PARTITION_KEY_IMMUTABLE",
+                "DOCUMENT_TOO_LARGE",
+                "RESOURCE_LIMIT",
+                "INVALID_PAGE_TOKEN",
+                "CURSOR_EXPIRED",
+                "RESULT_EXPIRED",
+                "RATE_LIMITED",
+                "DEADLINE_EXCEEDED",
+                "CANCELLED",
+                "GUI_UNAVAILABLE",
+                "APPLY_TIMEOUT",
+                "DRIVER_EXITED",
+                "OUTCOME_UNKNOWN",
+                "DOCUMENT_NOT_FOUND"
+              ]
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "retryable": {
+              "type": "boolean"
+            },
+            "outcome": {
+              "enum": [
+                "not_started",
+                "not_applied",
+                "applied",
+                "unknown"
+              ]
+            },
+            "details": {}
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "outcome",
+            "details"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "protocol_version",
+    "request_id",
+    "connection_id",
+    "status",
+    "job_id",
+    "result_id",
+    "data",
+    "page",
+    "limits",
+    "metrics",
+    "warnings",
+    "error"
+  ],
+  "additionalProperties": false
+}

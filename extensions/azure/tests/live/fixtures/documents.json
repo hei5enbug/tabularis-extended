@@ -1,0 +1,707 @@
+[
+  {
+    "id": "item-00",
+    "tenant": "a",
+    "sort": 0,
+    "amount": -9,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        0,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 0,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-01",
+    "tenant": "b",
+    "sort": 11,
+    "amount": -8,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        1,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-02",
+    "tenant": "c",
+    "sort": 22,
+    "amount": -7,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        2,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 2,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-03",
+    "tenant": "a",
+    "sort": 33,
+    "amount": -6,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        3,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-04",
+    "tenant": "b",
+    "sort": 7,
+    "amount": -5,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        4,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 4,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-05",
+    "tenant": "c",
+    "sort": 18,
+    "amount": -4,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        5,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-06",
+    "tenant": "a",
+    "sort": 29,
+    "amount": -3,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        6,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 6,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-07",
+    "tenant": "b",
+    "sort": 3,
+    "amount": -2,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        7,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-08",
+    "tenant": "c",
+    "sort": 14,
+    "amount": -1,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        8,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 8,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-09",
+    "tenant": "a",
+    "sort": 25,
+    "amount": 0,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        9,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-10",
+    "tenant": "b",
+    "sort": 36,
+    "amount": 1,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        10,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 10,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-11",
+    "tenant": "c",
+    "sort": 10,
+    "amount": 2,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        11,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-12",
+    "tenant": "a",
+    "sort": 21,
+    "amount": 3,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        12,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 12,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-13",
+    "tenant": "b",
+    "sort": 32,
+    "amount": 4,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        13,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-14",
+    "tenant": "c",
+    "sort": 6,
+    "amount": 5,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        14,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 14,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-15",
+    "tenant": "a",
+    "sort": 17,
+    "amount": 6,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        15,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-16",
+    "tenant": "b",
+    "sort": 28,
+    "amount": 7,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        16,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 16,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-17",
+    "tenant": "c",
+    "sort": 2,
+    "amount": 8,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        17,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-18",
+    "tenant": "a",
+    "sort": 13,
+    "amount": 9,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        18,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 18,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-19",
+    "tenant": "b",
+    "sort": 24,
+    "amount": 10,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        19,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-20",
+    "tenant": "c",
+    "sort": 35,
+    "amount": 11,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        20,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 20,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-21",
+    "tenant": "a",
+    "sort": 9,
+    "amount": 12,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        21,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-22",
+    "tenant": "b",
+    "sort": 20,
+    "amount": 13,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        22,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 22,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-23",
+    "tenant": "c",
+    "sort": 31,
+    "amount": 14,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        23,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-24",
+    "tenant": "a",
+    "sort": 5,
+    "amount": 15,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        24,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 24,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-25",
+    "tenant": "b",
+    "sort": 16,
+    "amount": 16,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        25,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-26",
+    "tenant": "c",
+    "sort": 27,
+    "amount": 17,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        26,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 26,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-27",
+    "tenant": "a",
+    "sort": 1,
+    "amount": 18,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        27,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-28",
+    "tenant": "b",
+    "sort": 12,
+    "amount": 19,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        28,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 28,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-29",
+    "tenant": "c",
+    "sort": 23,
+    "amount": 20,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        29,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-30",
+    "tenant": "a",
+    "sort": 34,
+    "amount": 21,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        30,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 30,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-31",
+    "tenant": "b",
+    "sort": 8,
+    "amount": 22,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        31,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-32",
+    "tenant": "c",
+    "sort": 19,
+    "amount": 23,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        32,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 32,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-33",
+    "tenant": "a",
+    "sort": 30,
+    "amount": 24,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        33,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-34",
+    "tenant": "b",
+    "sort": 4,
+    "amount": 25,
+    "status": "active",
+    "nested": {
+      "present": null,
+      "list": [
+        34,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 34,
+      "nullable": null
+    }
+  },
+  {
+    "id": "item-35",
+    "tenant": "c",
+    "sort": 15,
+    "amount": 26,
+    "status": "done",
+    "nested": {
+      "present": null,
+      "list": [
+        35,
+        {
+          "flag": false
+        }
+      ],
+      "empty": []
+    }
+  },
+  {
+    "id": "item-36",
+    "tenant": "a",
+    "sort": 26,
+    "amount": 27,
+    "status": "new",
+    "nested": {
+      "present": null,
+      "list": [
+        36,
+        {
+          "flag": true
+        }
+      ],
+      "empty": []
+    },
+    "optional": {
+      "value": 36,
+      "nullable": null
+    }
+  }
+]

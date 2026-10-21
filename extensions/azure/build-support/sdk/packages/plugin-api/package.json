@@ -1,0 +1,56 @@
+{
+  "name": "@tabularis/plugin-api",
+  "version": "0.2.0",
+  "description": "Public API surface for Tabularis plugin UI extensions.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/TabularisDB/tabularis/tree/main/packages/plugin-api",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/TabularisDB/tabularis.git",
+    "directory": "packages/plugin-api"
+  },
+  "bugs": {
+    "url": "https://github.com/TabularisDB/tabularis/issues"
+  },
+  "keywords": [
+    "tabularis",
+    "plugin",
+    "plugin-api",
+    "database-client"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "react": "^18.0.0 || ^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.14",
+    "react": "19.2.4",
+    "tsup": "8.5.1",
+    "typescript": "5.9.3"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@tabularis/service-contracts": "workspace:*"
+  },
+  "private": true
+}

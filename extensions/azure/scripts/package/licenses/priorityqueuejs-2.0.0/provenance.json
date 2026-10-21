@@ -1,0 +1,40 @@
+{
+  "name": "priorityqueuejs",
+  "version": "2.0.0",
+  "upstream_files": {
+    "package.json": {
+      "file": "UPSTREAM-PACKAGE.json",
+      "bytes": 581,
+      "sha256": "115a363e8b9038f9defdd1e2a06def3309f3e8ff7fd65951d38940a5a069f66e"
+    },
+    "README.md": {
+      "file": "UPSTREAM-README.md",
+      "bytes": 1904,
+      "sha256": "d8b642d2eec713715981b38b7bf0fe7686f7e182464747f959d06352d47a05da"
+    }
+  },
+  "published_source": {
+    "registry_metadata_url": "https://registry.npmjs.org/priorityqueuejs/2.0.0",
+    "tarball_url": "https://registry.npmjs.org/priorityqueuejs/-/priorityqueuejs-2.0.0.tgz",
+    "repository_url": "https://github.com/janogonzalez/priorityqueuejs",
+    "git_head": "5fc8ac2ea0482277ee8110182e1d743e31cef1aa"
+  },
+  "license_declaration": {
+    "source": "UPSTREAM-README.md",
+    "heading": "Licence",
+    "text": "MIT"
+  },
+  "known_author": {
+    "source": "UPSTREAM-PACKAGE.json",
+    "value": "Jano González <info@janogonzalez.com>"
+  },
+  "original_license_file_present": false,
+  "template": {
+    "file": "MIT-TEMPLATE.txt",
+    "source": "https://raw.githubusercontent.com/spdx/license-list-data/main/text/MIT.txt",
+    "bytes": 1078,
+    "sha256": "b05785f9f18e6716bab63424b11454513b9943a222595b70411009202fc592b5",
+    "is_template": true,
+    "note": "The copyright placeholders belong to the SPDX template. They are not upstream attribution; no year or copyright holder has been substituted."
+  }
+}
