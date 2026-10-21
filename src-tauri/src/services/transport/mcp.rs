@@ -1,24 +1,37 @@
 use super::super::{
-    backend::CancellationSignal,
-    contracts::{ErrorCode, Operation, ServiceResponse, REQUEST_SCHEMA},
-    dispatch::{CallerContext, CallerTransport},
+    contracts::ErrorCode,
+    dispatch::CallerContext,
     error::{failure, redact_error, ServiceResult},
 };
 use super::{request, ServiceTransport};
 use async_trait::async_trait;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::Deserialize;
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 
 const MAX_PRESENTATION: usize = 64 * 1024;
-const DATA_BUDGET: usize = 12 * 1024;
+
+/// A JSON-RPC error the legacy server answers with, passed through unchanged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegacyFailure {
+    pub code: i32,
+    pub message: String,
+    pub data: Option<Value>,
+}
 
 #[async_trait]
 pub trait LegacyMcpBackend: Send + Sync {
     fn tools(&self) -> Value;
-    async fn call(&self, name: &str, arguments: Value, caller: &CallerContext) -> Option<Value>;
+    /// `None` when the name is not a legacy tool.
+    async fn call(
+        &self,
+        name: &str,
+        arguments: Value,
+        caller: &CallerContext,
+    ) -> Option<Result<Value, LegacyFailure>>;
+    /// The client named in the `initialize` request, for audit records.
+    fn client_connected(&self, _name: &str) {}
     async fn read(&self, uri: &str, caller: &CallerContext) -> Option<Value>;
     async fn list_resources(&self, _caller: &CallerContext) -> Option<Value> {
         None
@@ -123,107 +136,6 @@ struct Chunk {
 }
 
 impl ServiceTransport {
-    pub fn tools(&self) -> ServiceResult<Value> {
-        let source: Value = serde_json::from_str(REQUEST_SCHEMA)
-            .map_err(|_| failure(ErrorCode::CapabilityUnavailable))?;
-        let mut tools = Vec::new();
-        for name in self
-            .validator
-            .operation_names()
-            .into_iter()
-            .filter(|name| {
-                serde_json::from_value::<super::super::contracts::Operation>(json!(name))
-                    .map_or(true, |operation| !super::mcp_forbidden(operation))
-            })
-            .chain(std::iter::once("query.execute_write".into()))
-        {
-            let operation = if name == "query.execute_write" {
-                "query.execute"
-            } else {
-                &name
-            };
-            let schema = operation_schema(&source, operation)?;
-            tools.push(json!({"name":name,"description":format!("Common service {name}"),"inputSchema":schema}));
-        }
-        if let Some(legacy) = self.legacy.get() {
-            let additional = legacy.tools();
-            let additional = additional["tools"]
-                .as_array()
-                .ok_or_else(|| failure(ErrorCode::InvalidArgument))?;
-            let mut names: std::collections::HashSet<String> = tools
-                .iter()
-                .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
-                .collect();
-            for tool in additional {
-                let name = tool["name"]
-                    .as_str()
-                    .filter(|name| {
-                        !name.is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
-                    })
-                    .ok_or_else(|| failure(ErrorCode::InvalidArgument))?;
-                if !names.insert(name.into()) {
-                    return Err(failure(ErrorCode::InvalidArgument));
-                }
-                tools.push(tool.clone());
-            }
-        }
-        let value = json!({"tools":tools});
-        if serde_json::to_vec(&value)
-            .map_err(|_| failure(ErrorCode::ResourceLimit))?
-            .len()
-            > request::MAX_FRAME_BYTES
-        {
-            return Err(failure(ErrorCode::ResourceLimit));
-        }
-        Ok(value)
-    }
-
-    pub async fn call_tool(
-        self: &Arc<Self>,
-        name: &str,
-        arguments: Value,
-        mut caller: CallerContext,
-        signal: Option<CancellationSignal>,
-    ) -> ServiceResult<Value> {
-        caller.transport = CallerTransport::Mcp;
-        request::validate_caller(&caller)?;
-        let alias = name == "query.execute_write";
-        let operation = if alias { "query.execute" } else { name };
-        if serde_json::from_value::<Operation>(json!(operation)).is_ok_and(super::mcp_forbidden) {
-            return Err(failure(ErrorCode::OperationNotAllowed));
-        }
-        if !self
-            .validator
-            .operation_names()
-            .iter()
-            .any(|name| name == operation)
-        {
-            if let Some(legacy) = self.legacy.get() {
-                if let Some(value) = legacy.call(name, arguments, &caller).await {
-                    return Ok(value);
-                }
-            }
-            return Err(failure(ErrorCode::UnsupportedOperation));
-        }
-        let decoded = request::decode(&self.validator, &arguments)?;
-        if serde_json::to_value(decoded.operation)
-            .ok()
-            .as_ref()
-            .and_then(Value::as_str)
-            != Some(operation)
-        {
-            return Err(failure(ErrorCode::InvalidArgument));
-        }
-        if super::mcp_forbidden(decoded.operation) {
-            return Err(failure(ErrorCode::OperationNotAllowed));
-        }
-        let response = match self.run_one(arguments, caller, alias, signal).await {
-            Ok(response) => response,
-            Err(error) => request::error_response(&decoded, error),
-        };
-        Ok(tool_result(decoded.operation, &response))
-    }
-
     pub async fn read_resource(
         &self,
         uri: &str,
@@ -312,183 +224,4 @@ impl ServiceTransport {
             }
         }
     }
-}
-
-fn schema_references(
-    value: &Value,
-    names: &mut std::collections::BTreeSet<String>,
-) -> ServiceResult<()> {
-    match value {
-        Value::Object(object) => {
-            if let Some(reference) = object.get("$ref") {
-                let name = reference
-                    .as_str()
-                    .and_then(|reference| reference.strip_prefix("#/definitions/"))
-                    .filter(|name| !name.is_empty() && !name.contains('/'))
-                    .ok_or_else(|| failure(ErrorCode::CapabilityUnavailable))?;
-                names.insert(name.replace("~1", "/").replace("~0", "~"));
-            }
-            for value in object.values() {
-                schema_references(value, names)?;
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                schema_references(value, names)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn operation_schema(source: &Value, operation: &str) -> ServiceResult<Value> {
-    let branch = source["oneOf"]
-        .as_array()
-        .and_then(|branches| {
-            branches
-                .iter()
-                .find(|branch| branch["properties"]["operation"]["const"] == operation)
-        })
-        .ok_or_else(|| failure(ErrorCode::CapabilityUnavailable))?;
-    let mut schema = source.clone();
-    let object = schema
-        .as_object_mut()
-        .ok_or_else(|| failure(ErrorCode::CapabilityUnavailable))?;
-    object.remove("$id");
-    object.remove("definitions");
-    object.insert("oneOf".into(), json!([branch]));
-    schema["properties"]["operation"] = json!({"const":operation});
-    let mut pending = std::collections::BTreeSet::new();
-    let mut definitions = Map::new();
-    schema_references(&schema, &mut pending)?;
-    while let Some(name) = pending.pop_first() {
-        if definitions.contains_key(&name) {
-            continue;
-        }
-        let definition = source["definitions"]
-            .get(&name)
-            .ok_or_else(|| failure(ErrorCode::CapabilityUnavailable))?;
-        schema_references(definition, &mut pending)?;
-        definitions.insert(name, definition.clone());
-    }
-    schema["definitions"] = Value::Object(definitions);
-    Ok(schema)
-}
-
-struct Presentation {
-    budget: usize,
-    nodes: usize,
-    truncated: bool,
-}
-impl Presentation {
-    fn value(&mut self, value: &Value, depth: usize) -> Value {
-        if depth >= 32 || self.nodes >= 2048 || self.budget < 16 {
-            self.truncated = true;
-            return Value::Null;
-        }
-        self.nodes += 1;
-        match value {
-            Value::String(text) => {
-                let maximum = self.budget.min(1024);
-                let mut end = text.len().min(maximum);
-                while !text.is_char_boundary(end) {
-                    end -= 1;
-                }
-                self.truncated |= end < text.len();
-                self.budget = self.budget.saturating_sub(end + 8);
-                json!(&text[..end])
-            }
-            Value::Array(items) => {
-                self.truncated |= items.len() > 5;
-                self.budget = self.budget.saturating_sub(16);
-                Value::Array(
-                    items
-                        .iter()
-                        .take(5)
-                        .map(|value| self.value(value, depth + 1))
-                        .collect(),
-                )
-            }
-            Value::Object(object) => {
-                self.budget = self.budget.saturating_sub(16);
-                let mut result = Map::new();
-                for (key, value) in object.iter().take(64) {
-                    if self.budget < key.len() + 16 || key.len() > 256 {
-                        self.truncated = true;
-                        continue;
-                    }
-                    self.budget -= key.len() + 8;
-                    if key == "coordinates" && object.contains_key("type") {
-                        self.truncated = true;
-                        continue;
-                    }
-                    if matches!(key.as_str(), "native_state" | "tail") {
-                        self.truncated = true;
-                        continue;
-                    }
-                    if key == "geometry" && value.is_object() {
-                        result.insert(
-                            key.clone(),
-                            json!({"type":self.value(&value["type"],depth+1)}),
-                        );
-                        self.truncated |= value.get("coordinates").is_some();
-                        continue;
-                    }
-                    if matches!(key.as_str(), "rows" | "documents" | "values" | "features")
-                        && value.is_array()
-                    {
-                        let count = value.as_array().map_or(0, Vec::len);
-                        result.insert(format!("{key}_count"), json!(count));
-                        result.insert(format!("{key}_sample"), self.value(value, depth + 1));
-                    } else {
-                        result.insert(key.clone(), self.value(value, depth + 1));
-                    }
-                }
-                self.truncated |= object.len() > 64;
-                Value::Object(result)
-            }
-            _ => {
-                self.budget = self.budget.saturating_sub(32);
-                value.clone()
-            }
-        }
-    }
-}
-
-pub(crate) fn tool_result(operation: Operation, response: &ServiceResponse) -> Value {
-    let mut presentation = Presentation {
-        budget: DATA_BUDGET,
-        nodes: 0,
-        truncated: false,
-    };
-    let data = if matches!(
-        operation,
-        Operation::AuthBegin | Operation::AuthStatus | Operation::AuthCancel
-    ) {
-        let mut safe = Map::new();
-        for key in ["auth_job_id", "state", "user_action_required", "error_code"] {
-            if let Some(value) = response.data.get(key) {
-                safe.insert(key.into(), presentation.value(value, 0));
-            }
-        }
-        Value::Object(safe)
-    } else {
-        presentation.value(&response.data, 0)
-    };
-    let mut summary = json!({"protocol_version":response.protocol_version,"request_id":response.request_id,"connection_id":response.connection_id,"status":response.status,"job_id":response.job_id,"result_id":response.result_id,"data":data,"page":response.page,"limits":response.limits,"metrics":response.metrics,"warnings":response.warnings.iter().take(16).map(|warning| { let mut end=warning.len().min(256); while !warning.is_char_boundary(end) {end-=1;} warning[..end].to_owned() }).collect::<Vec<_>>(),"error":response.error.clone().map(redact_error),"presentation_truncated":presentation.truncated});
-    let render = |summary: &Value| json!({"content":[{"type":"text","text":summary.to_string()}],"structuredContent":summary,"isError":response.error.is_some()});
-    let mut output = render(&summary);
-    if serde_json::to_vec(&output).map_or(true, |bytes| bytes.len() > MAX_PRESENTATION) {
-        summary["data"] = json!({"omitted":true});
-        summary["presentation_truncated"] = json!(true);
-        summary["warnings"] = json!([]);
-        output = render(&summary);
-        if serde_json::to_vec(&output).map_or(true, |bytes| bytes.len() > MAX_PRESENTATION) {
-            let error = redact_error(failure(ErrorCode::ResourceLimit));
-            let safe = json!({"request_id":response.request_id,"connection_id":response.connection_id,"status":response.status,"job_id":response.job_id,"result_id":response.result_id,"presentation_truncated":true,"presentation_error":error});
-            output = json!({"content":[{"type":"text","text":safe.to_string()}],"structuredContent":safe,"isError":true});
-        }
-    }
-    output
 }

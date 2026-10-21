@@ -39,15 +39,34 @@ pub struct JobRecord {
     #[serde(default)]
     pub write_confirmed: bool,
     pub cancel_requested: bool,
+    /// What became of a cancellation request: `requested` (sent, no answer
+    /// yet), `confirmed` (the driver answered `CANCELLED`), `not_confirmed`
+    /// (the call ended some other way) or `completed_first` (it finished
+    /// successfully before the cancellation took effect).
+    #[serde(default)]
+    pub cancel_state: String,
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub response: Option<ServiceResponse>,
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveJob {
+    pub job_id: String,
+    pub operation: String,
+    pub connection_id: Option<String>,
+    pub status: JobStatus,
+    pub started_ms: u64,
 }
 
 struct ActiveJob {
     record: Mutex<JobRecord>,
     signal: CancellationSignal,
     history: Option<HistoryMeta>,
+    /// True once the request has reached the driver. From then on a
+    /// cancellation is a request to the driver, never a local abort.
+    dispatched: AtomicBool,
+    awaiting_approval: AtomicBool,
 }
 struct State {
     active_requests: HashMap<(Option<String>, String), String>,
@@ -83,6 +102,30 @@ impl JobManager {
     }
     pub fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+    /// Jobs this process still holds, with no SQL text: enough to list and
+    /// cancel them even when no history is being written.
+    pub fn live_details(&self) -> Vec<LiveJob> {
+        self.state
+            .lock()
+            .map(|state| {
+                state
+                    .active_jobs
+                    .values()
+                    .filter_map(|job| {
+                        let record = job.record.lock().ok()?;
+                        let meta = job.history.as_ref()?;
+                        Some(LiveJob {
+                            job_id: record.job_id.clone(),
+                            operation: meta.operation.clone(),
+                            connection_id: record.connection_id.clone(),
+                            status: record.status,
+                            started_ms: meta.started_ms,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     /// Starts recording a start and a terminal event for every job.
     pub fn set_history(&self, history: Arc<dyn HistoryStore>) {
@@ -201,6 +244,7 @@ impl JobManager {
             write_dispatched: false,
             write_confirmed: false,
             cancel_requested: false,
+            cancel_state: String::new(),
             created_at_ms: now_ms(),
             expires_at_ms: now_ms().saturating_add(JOB_TTL_MS),
             response: None,
@@ -224,6 +268,8 @@ impl JobManager {
             record: Mutex::new(record.clone()),
             signal: CancellationSignal::default(),
             history,
+            dispatched: AtomicBool::new(false),
+            awaiting_approval: AtomicBool::new(false),
         });
         let connection_semaphore = {
             let mut state = self
@@ -366,6 +412,9 @@ impl JobManager {
         }
         Ok(record)
     }
+    /// Cancels a job this process owns. A job that has not reached the driver
+    /// stops locally. One that has only gets `cancel_requested`: the runtime
+    /// asks the driver to cancel and keeps waiting for the original call.
     pub fn cancel(
         &self,
         job_id: &str,
@@ -385,16 +434,45 @@ impl JobManager {
                 .cloned()
         };
         if let Some(active) = active {
-            active.signal.cancel();
             let mut current = active
                 .record
                 .lock()
                 .map_err(|_| failure(ErrorCode::ResourceLimit))?;
+            if !active.dispatched.load(Ordering::SeqCst) {
+                active.signal.cancel();
+                current.cancel_state = "confirmed".into();
+            } else if current.cancel_state.is_empty() {
+                current.cancel_state = "requested".into();
+            }
             current.cancel_requested = true;
             record = current.clone();
             self.persist(&record)?;
         }
         Ok(record)
+    }
+    /// Records that the driver could not be asked to cancel the call.
+    pub fn mark_cancel_not_confirmed(&self, job_id: &str) {
+        let active = self
+            .state
+            .lock()
+            .ok()
+            .and_then(|state| state.active_jobs.get(job_id).cloned());
+        if let Some(active) = active {
+            if let Ok(mut record) = active.record.lock() {
+                if record.cancel_state == "requested" {
+                    record.cancel_state = "not_confirmed".into();
+                    let _ = self.persist(&record);
+                }
+            }
+        }
+    }
+    /// Whether this process still holds the job and it waits for a human.
+    pub fn awaiting_approval(&self, job_id: &str) -> bool {
+        self.state
+            .lock()
+            .ok()
+            .and_then(|state| state.active_jobs.get(job_id).cloned())
+            .is_some_and(|job| job.awaiting_approval.load(Ordering::SeqCst))
     }
     pub fn active_count(&self) -> usize {
         self.state
@@ -461,6 +539,61 @@ impl JobLease {
             return Err(error);
         }
         Ok(())
+    }
+    /// Marks the request as handed to the driver. A cancellation that already
+    /// arrived stops it here, before anything reaches the driver.
+    pub fn mark_dispatched(&self) -> ServiceResult<()> {
+        let record = self
+            .active
+            .record
+            .lock()
+            .map_err(|_| failure(ErrorCode::ResourceLimit))?;
+        if self.active.signal.is_cancelled() || record.cancel_requested {
+            return Err(failure(ErrorCode::Cancelled));
+        }
+        self.active.dispatched.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+    pub fn dispatched(&self) -> bool {
+        self.active.dispatched.load(Ordering::SeqCst)
+    }
+    pub fn cancel_requested(&self) -> bool {
+        self.active
+            .record
+            .lock()
+            .map(|record| record.cancel_requested)
+            .unwrap_or(false)
+    }
+    /// Starts a cancellation request that did not come from a caller, such as
+    /// an expired deadline. The driver is asked; the call is not abandoned.
+    pub fn request_cancel(&self) -> bool {
+        let Ok(mut record) = self.active.record.lock() else {
+            return false;
+        };
+        if !self.active.dispatched.load(Ordering::SeqCst) {
+            return false;
+        }
+        record.cancel_requested = true;
+        if record.cancel_state.is_empty() {
+            record.cancel_state = "requested".into();
+        }
+        if self.persisted {
+            let _ = self.manager.persist(&record);
+        }
+        true
+    }
+    pub fn set_cancel_state(&self, state: &str) {
+        if let Ok(mut record) = self.active.record.lock() {
+            if record.cancel_requested {
+                record.cancel_state = state.into();
+                if self.persisted {
+                    let _ = self.manager.persist(&record);
+                }
+            }
+        }
+    }
+    pub fn set_awaiting_approval(&self, waiting: bool) {
+        self.active.awaiting_approval.store(waiting, Ordering::SeqCst);
     }
     pub fn write_dispatched(&self) -> bool {
         self.active

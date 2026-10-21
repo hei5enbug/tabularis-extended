@@ -150,102 +150,180 @@ async fn 프로토콜_불일치는_고정된_오류로_거부한다() {
         .contains("canary-secret"));
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
-#[tokio::test]
-async fn 도구_목록은_공유_스키마의_작업에서_가져오기와_연결_삭제를_뺀_마흔일곱_작업과_쓰기_별칭을_사용한다(
-) {
-    // given
-    let h = Harness::new();
-    let source: Value = serde_json::from_str(super::super::contracts::REQUEST_SCHEMA).unwrap();
-    // when
-    let actual = checked_catalog(&h);
-    // then
-    assert_eq!(actual.0["tools"].as_array().unwrap().len(), 48);
-    assert!(actual.0["tools"].as_array().unwrap().iter().all(|tool| {
-        !matches!(
-            tool["name"].as_str(),
-            Some("credential.import" | "connection.delete")
-        )
-    }));
-    assert_eq!(
-        actual.0["tools"][0]["inputSchema"]["definitions"]["input.connection.list"],
-        source["definitions"]["input.connection.list"]
-    );
-    assert!(actual.0["tools"][0]["inputSchema"]["definitions"]
-        .get("input.query.execute")
-        .is_none());
-    assert_eq!(
-        actual.0["tools"][0]["inputSchema"]["additionalProperties"],
-        false
-    );
-    assert_eq!(
-        actual.0["tools"][0]["inputSchema"]["oneOf"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(actual.0["tools"][47]["name"], "query.execute_write");
-    assert_eq!(
-        actual.0["tools"][47]["inputSchema"]["properties"]["operation"]["const"],
-        "query.execute"
-    );
-    assert!(actual.1);
+const EXCLUDED: [&str; 2] = ["credential_import", "connection_delete"];
+fn catalog(h: &Harness) -> Vec<Value> {
+    h.transport.tools().unwrap()["tools"]
+        .as_array()
+        .unwrap()
+        .clone()
 }
 #[tokio::test]
-async fn 도구_이름과_작업이_다르면_실행하지_않는다() {
+async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔일곱_작업과_미리보기와_작업목록이다() {
     // given
     let h = Harness::new();
-    let raw = raw_query("select");
+    let pattern = |name: &str| {
+        (1..=64).contains(&name.len())
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    };
+    // when
+    let actual = catalog(&h);
+    // then
+    let names: Vec<&str> = actual
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names.len(), 49);
+    assert!(names.iter().all(|name| pattern(name)));
+    assert!(names.iter().all(|name| !EXCLUDED.contains(name)));
+    assert!(names.contains(&"table_preview") && names.contains(&"job_list"));
+    assert!(names.contains(&"map_layer_add") && names.contains(&"connection_test"));
+    assert!(!names.contains(&"query_execute_write"));
+    assert_eq!(
+        names.iter().collect::<std::collections::HashSet<_>>().len(),
+        names.len()
+    );
+}
+#[tokio::test]
+async fn 모든_도구는_반환값과_쓰기_여부를_밝히는_실제_설명을_가진다() {
+    // given
+    let h = Harness::new();
+    // when
+    let actual = catalog(&h);
+    // then
+    for tool in &actual {
+        let description = tool["description"].as_str().unwrap();
+        assert!(description.len() > 30, "{}", tool["name"]);
+        assert!(!description.starts_with("Common service"), "{}", tool["name"]);
+        assert!(description.ends_with('.'), "{}", tool["name"]);
+    }
+    let write_tools: Vec<_> = actual
+        .iter()
+        .filter(|tool| tool["inputSchema"]["properties"].get("write").is_some())
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        write_tools,
+        [
+            "query_execute",
+            "row_insert",
+            "row_update",
+            "row_delete",
+            "document_create",
+            "document_replace",
+            "document_delete",
+            "session_commit"
+        ]
+    );
+}
+#[tokio::test]
+async fn 도구_인자는_평평하며_봉투_필드는_도구가_쓰는_것만_노출한다() {
+    // given
+    let h = Harness::new();
+    // when
+    let actual = catalog(&h);
+    let by_name = |name: &str| {
+        actual
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap()
+            .clone()
+    };
+    // then
+    let query = &by_name("query_execute")["inputSchema"];
+    for field in [
+        "connection_id",
+        "text",
+        "database",
+        "schema",
+        "wait_ms",
+        "write",
+        "deadline_ms",
+        "session_id",
+    ] {
+        assert!(query["properties"].get(field).is_some(), "{field}");
+    }
+    assert!(query["properties"].get("input").is_none());
+    assert!(query["properties"].get("operation").is_none());
+    assert!(query["properties"].get("request_id").is_none());
+    assert!(query["properties"].get("protocol_version").is_none());
+    assert_eq!(query["required"], json!(["text", "connection_id"]));
+    assert_eq!(query["properties"]["wait_ms"]["default"], 5000);
+    assert_eq!(query["properties"]["wait_ms"]["maximum"], 60000);
+    let update = &by_name("connection_update")["inputSchema"];
+    assert!(update["properties"].get("expected_version").is_some());
+    assert!(update["properties"].get("map_id").is_none());
+    let map = &by_name("map_update")["inputSchema"];
+    assert!(map["properties"].get("map_id").is_some());
+    assert!(map["properties"].get("connection_id").is_none());
+    let result = &by_name("result_get")["inputSchema"];
+    assert_eq!(result["required"], json!(["result_id", "connection_id"]));
+    assert_eq!(result["properties"]["limit"]["maximum"], 1000);
+    let preview = &by_name("table_preview")["inputSchema"];
+    assert_eq!(preview["properties"]["limit"]["default"], 10);
+    assert_eq!(preview["properties"]["limit"]["maximum"], 1000);
+    let list = &by_name("job_list")["inputSchema"];
+    assert_eq!(list["properties"]["limit"]["maximum"], 200);
+}
+#[tokio::test]
+async fn 알수없는_인자가_있으면_실행하지_않는다() {
+    // given
+    let h = Harness::new();
+    let arguments = json!({"connection_id":"conn-a","unexpected":true});
     // when
     let actual = h
         .transport
-        .call_tool("connection.test", raw, mcp_caller(), None)
+        .call_tool("connection_test", arguments, mcp_caller(), None)
         .await;
     // then
     assert_eq!(actual.unwrap_err().code, ErrorCode::InvalidArgument);
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
-async fn MCP_자격증명_가져오기는_보호된_입력채널을_읽지_않는다() {
+async fn 제외된_두_도구는_도구_이름과_점_이름_모두에서_거부한다() {
     // given
     let h = Harness::new();
-    let raw=serde_json::to_value(support::request(Operation::CredentialImport,json!({"slot":"db_password","input_channel":{"kind":"file_descriptor","descriptor":7},"persistence":"session"}))).unwrap();
+    let arguments = json!({"connection_id":"conn-a","expected_version":1});
     // when
-    let actual = h
-        .transport
-        .call_tool("credential.import", raw, mcp_caller(), None)
-        .await;
+    let mut actual = Vec::new();
+    for name in [
+        "credential_import",
+        "credential.import",
+        "connection_delete",
+        "connection.delete",
+    ] {
+        actual.push(
+            h.transport
+                .call_tool(name, arguments.clone(), mcp_caller(), None)
+                .await,
+        );
+    }
+    let submitted = {
+        let mut request = support::request(Operation::ConnectionDelete, json!({}));
+        request.expected_version = Some(1);
+        h.transport
+            .submit(serde_json::to_value(request).unwrap(), mcp_caller())
+            .await
+    };
     // then
-    assert_eq!(actual.unwrap_err().code, ErrorCode::OperationNotAllowed);
+    assert!(actual
+        .iter()
+        .all(|result| result.as_ref().unwrap_err().code == ErrorCode::OperationNotAllowed));
+    assert_eq!(submitted.unwrap_err().code, ErrorCode::OperationNotAllowed);
+    assert_eq!(h.connections.writes.load(Ordering::SeqCst), 0);
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
-async fn MCP는_연결_삭제를_도구와_직접_제출_모두에서_거부한다() {
+async fn 쓰기_의도가_있어도_연결의_쓰기_승인을_우회하지_않는다() {
     // given
     let h = Harness::new();
-    let mut request = support::request(Operation::ConnectionDelete, json!({}));
-    request.expected_version = Some(1);
-    let raw = serde_json::to_value(request).unwrap();
-    // when
-    let tool = h
-        .transport
-        .call_tool("connection.delete", raw.clone(), mcp_caller(), None)
-        .await;
-    let submitted = h.transport.submit(raw, mcp_caller()).await;
-    // then
-    assert_eq!(tool.unwrap_err().code, ErrorCode::OperationNotAllowed);
-    assert_eq!(submitted.unwrap_err().code, ErrorCode::OperationNotAllowed);
-    assert_eq!(h.connections.writes.load(Ordering::SeqCst), 0);
-}
-#[tokio::test]
-async fn 쓰기_별칭도_연결의_쓰기_승인을_우회하지_않는다() {
-    // given
-    let h = Harness::new();
-    let raw = raw_query("write");
+    let arguments =
+        json!({"connection_id":"conn-a","text":"UPDATE fixture SET value = 1","write":true});
     // when
     let actual = h
         .transport
-        .call_tool("query.execute_write", raw, mcp_caller(), None)
+        .call_tool("query_execute", arguments, mcp_caller(), None)
         .await
         .unwrap();
     // then
@@ -253,6 +331,25 @@ async fn 쓰기_별칭도_연결의_쓰기_승인을_우회하지_않는다() {
     assert_eq!(
         actual["structuredContent"]["error"]["code"],
         "WRITE_NOT_ALLOWED"
+    );
+    assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn 쓰기_의도_없는_쓰기_문장은_드라이버에_닿기_전에_거부한다() {
+    // given
+    let h = Harness::new();
+    h.allow_write();
+    let arguments = json!({"connection_id":"conn-a","text":"UPDATE fixture SET value = 1"});
+    // when
+    let actual = h
+        .transport
+        .call_tool("query_execute", arguments, mcp_caller(), None)
+        .await
+        .unwrap();
+    // then
+    assert_eq!(
+        actual["structuredContent"]["error"]["code"],
+        "WRITE_INTENT_REQUIRED"
     );
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
@@ -321,7 +418,7 @@ fn 인증_결과의_중첩된_디바이스_코드는_MCP에_표시하지_않는�
     response.status = JobStatus::Succeeded;
     response.data = json!({"auth_job_id":"auth-job","state":"interaction_required","user_action_required":true,"challenge":{"verification_uri":"canary-uri","user_code":"canary-code","nested":{"user_code":"canary-nested"}}});
     // when
-    let actual = mcp::tool_result(Operation::AuthBegin, &response);
+    let actual = present::tool_result(Operation::AuthBegin, &response, None);
     // then
     assert!(!actual.to_string().contains("canary"));
     assert_eq!(
@@ -339,10 +436,10 @@ fn 일반_문서의_challenge_필드는_인증정보로_오판하지_않는다()
     response.status = JobStatus::Succeeded;
     response.data = json!({"values":[{"challenge":"ordinary-document-value"}]});
     // when
-    let actual = mcp::tool_result(Operation::QueryExecute, &response);
+    let actual = present::tool_result(Operation::QueryExecute, &response, None);
     // then
     assert_eq!(
-        actual["structuredContent"]["data"]["values_sample"][0]["challenge"],
+        actual["structuredContent"]["data"]["values"][0]["challenge"],
         "ordinary-document-value"
     );
 }
@@ -356,7 +453,7 @@ fn 공간_표시는_다섯_샘플과_참조만_보존하고_좌표는_제외한�
     response.result_id = Some("result-reference".into());
     response.data = json!({"artifact_id":"artifact-reference","features":(0..20).map(|id|json!({"id":id,"geometry":{"type":"Polygon","coordinates":["coordinate-canary".repeat(5000)]},"properties":{"label":"가".repeat(20000)}})).collect::<Vec<_>>()});
     // when
-    let actual = mcp::tool_result(Operation::SpatialQueryResult, &response);
+    let actual = present::tool_result(Operation::SpatialQueryResult, &response, None);
     // then
     assert_eq!(actual["structuredContent"]["data"]["features_count"], 20);
     assert_eq!(
@@ -556,7 +653,7 @@ async fn MCP_안전하지_않은_정수_ID는_실행_전에_거부한다() {
     // given
     let h = Harness::new();
     let frames = vec![
-        json!({"jsonrpc":"2.0","id":9007199254740992_u64,"method":"tools/call","params":{"name":"query.execute","arguments":raw_query("select")}}),
+        json!({"jsonrpc":"2.0","id":9007199254740992_u64,"method":"tools/call","params":{"name":"query_execute","arguments":{"connection_id":"conn-a","text":"select 1"}}}),
     ];
     // when
     let actual = stream(&h, frames, Mode::Mcp).await;
@@ -877,6 +974,72 @@ async fn NDJSON은_막힌_일반_요청을_기다리지_않고_취소_control을
         .any(|value| value["data"]["cancel_requested"] == true));
 }
 #[tokio::test]
+async fn MCP는_막힌_도구_호출을_기다리지_않고_제어_호출에_먼저_답한다() {
+    // given
+    let h = Harness::new();
+    let gate = TestGate::new();
+    h.driver
+        .gates
+        .lock()
+        .unwrap()
+        .insert("blocked-mcp".into(), gate.clone());
+    let frames = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"query_execute","arguments":{"connection_id":"conn-a","text":"SELECT 'blocked-mcp'","wait_ms":20000}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+        json!({"jsonrpc":"2.0","id":3,"method":"ping"}),
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"job_get","arguments":{"job_id":"j-none","owner_instance_id":"owner"}}}),
+        json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"result_release","arguments":{"connection_id":"conn-a","result_id":"r-none"}}}),
+    ];
+    let mut input = Vec::new();
+    for frame in frames {
+        input.extend_from_slice(frame.to_string().as_bytes());
+        input.push(b'\n');
+    }
+    let output = Output::default();
+    let observed = output.clone();
+    let transport = h.transport.clone();
+    let task = tokio::spawn(async move {
+        transport
+            .run_stdio(
+                tokio::io::BufReader::new(std::io::Cursor::new(input)),
+                output,
+                support::caller(),
+                Mode::Mcp,
+                false,
+                Default::default(),
+            )
+            .await
+            .unwrap()
+    });
+    gate.wait_entered().await;
+    // when
+    let answered = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let ids: Vec<Value> = observed
+                .0
+                .lock()
+                .unwrap()
+                .split(|byte| *byte == b'\n')
+                .filter(|line| !line.is_empty())
+                .map(|line| serde_json::from_slice::<Value>(line).unwrap()["id"].clone())
+                .collect();
+            if ids.len() >= 4 {
+                return ids;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    gate.release();
+    task.await.unwrap();
+    // then
+    assert!(!answered.contains(&json!(1)));
+    for id in [2, 3, 4, 5] {
+        assert!(answered.contains(&json!(id)), "{id}");
+    }
+}
+#[tokio::test]
 async fn 초과_프레임은_입력을_중단하고_내용을_오류에_노출하지_않는다() {
     // given
     let h = Harness::new();
@@ -956,9 +1119,14 @@ struct DuplicateLegacy;
 #[async_trait]
 impl LegacyMcpBackend for DuplicateLegacy {
     fn tools(&self) -> Value {
-        json!({"tools":[{"name":"query.execute"}]})
+        json!({"tools":[{"name":"query_execute"}]})
     }
-    async fn call(&self, _name: &str, _arguments: Value, _caller: &CallerContext) -> Option<Value> {
+    async fn call(
+        &self,
+        _name: &str,
+        _arguments: Value,
+        _caller: &CallerContext,
+    ) -> Option<Result<Value, LegacyFailure>> {
         None
     }
     async fn read(&self, _uri: &str, _caller: &CallerContext) -> Option<Value> {
@@ -974,20 +1142,6 @@ async fn legacy_도구의_중복_이름은_등록_후_목록에서_거부한다(
     let actual = h.transport.tools();
     // then
     assert_eq!(actual.unwrap_err().code, ErrorCode::InvalidArgument);
-}
-
-fn checked_catalog(h: &Harness) -> (Value, bool) {
-    let tools = h.transport.tools().unwrap();
-    let validator = jsonschema::JSONSchema::options()
-        .with_draft(jsonschema::Draft::Draft7)
-        .compile(&tools["tools"][0]["inputSchema"])
-        .unwrap();
-    let mut request = support::request(Operation::ConnectionList, json!({}));
-    request.connection_id = None;
-    let mut unknown = serde_json::to_value(request).unwrap();
-    unknown["unknown_field"] = json!(true);
-    let rejected = !validator.is_valid(&unknown);
-    (tools, rejected)
 }
 
 async fn nonquery_write_flag(h: &Harness) -> (ServiceResponse, bool) {
@@ -1024,47 +1178,62 @@ async fn CLI_쓰기옵션은_카탈로그에_쿼리_쓰기의도를_등록하지
     assert!(h.driver.contexts.lock().unwrap()[0].1);
 }
 
-fn derived_fixture_parity(h: &Harness) -> (Vec<String>, usize, usize, usize) {
+fn derived_fixture_parity(h: &Harness) -> (Vec<String>, usize, usize) {
     let tools = h.transport.tools().unwrap();
     let bytes = serde_json::to_vec(&tools).unwrap().len();
     let fixtures: Value =
         serde_json::from_str(super::super::contracts::VALIDATION_FIXTURES).unwrap();
+    let mut validators = std::collections::HashMap::new();
+    for tool in tools["tools"].as_array().unwrap() {
+        validators.insert(
+            tool["name"].as_str().unwrap().to_owned(),
+            jsonschema::JSONSchema::options()
+                .with_draft(jsonschema::Draft::Draft7)
+                .compile(&tool["inputSchema"])
+                .unwrap(),
+        );
+    }
     let mut differences = Vec::new();
     let mut cases = 0;
-    let mut other_operations = 0;
-    for tool in tools["tools"].as_array().unwrap() {
-        let operation = tool["inputSchema"]["properties"]["operation"]["const"]
-            .as_str()
-            .unwrap();
-        let validator = jsonschema::JSONSchema::options()
-            .with_draft(jsonschema::Draft::Draft7)
-            .compile(&tool["inputSchema"])
-            .unwrap();
-        for fixture in fixtures
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|fixture| fixture["schema"] == "request")
-        {
-            let value = &fixture["value"];
-            let canonical = h.transport.validator.validate_request(value).is_ok();
-            let matches = value["operation"] == operation;
-            let expected = canonical && matches;
-            let actual = validator.is_valid(value);
-            cases += 1;
-            if actual != expected || canonical != fixture["valid"].as_bool().unwrap() {
-                differences.push(format!("{}:{}", tool["name"], fixture["name"]));
-            }
-            if canonical && !matches && !actual {
-                other_operations += 1;
+    let mut rejected = 0;
+    for fixture in fixtures
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|fixture| fixture["schema"] == "request")
+    {
+        let value = &fixture["value"];
+        let Some(operation) = value["operation"].as_str() else {
+            continue;
+        };
+        let Some(validator) = validators.get(&operation.replace('.', "_")) else {
+            continue;
+        };
+        // The same call written flat: input fields beside the identifiers.
+        let mut flat = value["input"].as_object().cloned().unwrap_or_default();
+        for key in ["connection_id", "session_id", "map_id", "expected_version"] {
+            if !value[key].is_null() {
+                flat.insert(key.into(), value[key].clone());
             }
         }
+        if let Some(deadline) = value.get("deadline_ms").filter(|deadline| !deadline.is_null()) {
+            flat.insert("deadline_ms".into(), deadline.clone());
+        }
+        let canonical = h.transport.validator.validate_request(value).is_ok();
+        let actual = validator.is_valid(&Value::Object(flat));
+        cases += 1;
+        if canonical && !actual {
+            differences.push(format!("{operation}:{}", fixture["name"]));
+        }
+        if !canonical && !actual {
+            rejected += 1;
+        }
     }
-    println!("derived_tools_bytes={bytes} fixture_comparisons={cases} other_operation_rejections={other_operations}");
-    (differences, bytes, cases, other_operations)
+    println!("derived_tools_bytes={bytes} fixture_comparisons={cases} rejected={rejected}");
+    (differences, bytes, cases)
 }
 #[tokio::test]
-async fn 모든_도구의_참조_폐쇄_스키마는_공유_fixture_허용거부와_일치한다() {
+async fn 모든_도구의_평평한_스키마는_공유_fixture의_허용_입력을_모두_허용한다() {
     // given
     let h = Harness::new();
     // when
@@ -1072,8 +1241,7 @@ async fn 모든_도구의_참조_폐쇄_스키마는_공유_fixture_허용거부
     // then
     assert!(actual.0.is_empty(), "{:?}", actual.0);
     assert!(actual.1 < 512 * 1024);
-    assert!(actual.2 > 10000);
-    assert!(actual.3 > 1000);
+    assert!(actual.2 > 300);
 }
 
 struct LegacyResources;
@@ -1082,7 +1250,12 @@ impl LegacyMcpBackend for LegacyResources {
     fn tools(&self) -> Value {
         json!({"tools":[]})
     }
-    async fn call(&self, _name: &str, _arguments: Value, _caller: &CallerContext) -> Option<Value> {
+    async fn call(
+        &self,
+        _name: &str,
+        _arguments: Value,
+        _caller: &CallerContext,
+    ) -> Option<Result<Value, LegacyFailure>> {
         None
     }
     async fn read(&self, _uri: &str, _caller: &CallerContext) -> Option<Value> {
@@ -1115,4 +1288,82 @@ async fn resources_list는_주입된_기존_연결과_스키마_목록을_전달
     );
     assert_eq!(actual.1[0]["result"]["caller_id"], "caller");
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn 미리보기_문장은_방언마다_식별자를_인용하고_한도를_문법에_맞게_넣는다() {
+    // given
+    let cases = [
+        (SqlFlavor::Postgres, Some("public"), "orders", "SELECT * FROM \"public\".\"orders\" LIMIT 3"),
+        (SqlFlavor::Mysql, None, "orders", "SELECT * FROM `orders` LIMIT 3"),
+        (SqlFlavor::Sqlite, None, "orders", "SELECT * FROM \"orders\" LIMIT 3"),
+        (SqlFlavor::Mssql, Some("dbo"), "orders", "SELECT TOP (3) * FROM [dbo].[orders]"),
+        (SqlFlavor::Postgres, None, "a\"b", "SELECT * FROM \"a\"\"b\" LIMIT 3"),
+        (SqlFlavor::Mysql, None, "a`b", "SELECT * FROM `a``b` LIMIT 3"),
+        (SqlFlavor::Mssql, None, "a]b", "SELECT TOP (3) * FROM [a]]b]"),
+    ];
+    // when
+    let actual: Vec<String> = cases
+        .iter()
+        .map(|(flavor, schema, table, _)| {
+            tool_call::preview_sql(*flavor, *schema, table, 3).unwrap()
+        })
+        .collect();
+    // then
+    assert_eq!(
+        actual,
+        cases.iter().map(|case| case.3.to_owned()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn 미리보기_문장은_빈_이름과_제어문자와_너무_긴_이름을_만들지_않는다() {
+    // given
+    let long = "x".repeat(129);
+    let names = ["", "a\nb", "a\0b", long.as_str()];
+    // when
+    let actual: Vec<_> = names
+        .iter()
+        .map(|name| tool_call::preview_sql(SqlFlavor::Postgres, None, name, 1))
+        .collect();
+    let schema = tool_call::preview_sql(SqlFlavor::Postgres, Some("a\nb"), "t", 1);
+    // then
+    assert!(actual.iter().all(Result::is_err));
+    assert_eq!(schema.unwrap_err().code, ErrorCode::InvalidArgument);
+}
+
+#[test]
+fn 도구_이름_규칙은_점_이름을_밑줄로_바꾸고_64자_패턴만_허용한다() {
+    // given
+    let valid = ["map_layer_add", "a-b", "x"];
+    let invalid = ["", "map.layer", "has space", &"x".repeat(65)];
+    // when
+    let actual = (
+        valid.map(tool_catalog::valid_tool_name),
+        invalid.map(tool_catalog::valid_tool_name),
+        tool_catalog::tool_name("map.layer.add"),
+    );
+    // then
+    assert!(actual.0.iter().all(|valid| *valid));
+    assert!(actual.1.iter().all(|valid| !*valid));
+    assert_eq!(actual.2, "map_layer_add");
+}
+
+#[test]
+fn 제어_도구는_결과와_작업을_다루는_도구만이고_쿼리_실행은_아니다() {
+    // given
+    let names = [
+        "job_get",
+        "job_cancel",
+        "job_list",
+        "result_get",
+        "result_release",
+        "query_execute",
+        "table_preview",
+        "catalog_databases",
+    ];
+    // when
+    let actual = names.map(tool_catalog::is_control_tool);
+    // then
+    assert_eq!(actual, [true, true, true, true, true, false, false, false]);
 }

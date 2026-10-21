@@ -1,9 +1,12 @@
 mod mcp;
+mod present;
 mod request;
 mod stdio;
+mod tool_call;
+pub mod tool_catalog;
 
 use super::{
-    backend::CancellationSignal,
+    backend::{CancellationSignal, SavedConnection},
     contracts::{
         ErrorCode, JobStatus, Operation, SchemaValidator, ServiceRequest, ServiceResponse,
     },
@@ -22,9 +25,9 @@ use std::{
 use tokio::time::{timeout_at, Instant};
 
 pub use super::policy::mcp_forbidden;
-pub use mcp::{ArtifactResource, LegacyMcpBackend, ResourceRead};
+pub use mcp::{ArtifactResource, LegacyFailure, LegacyMcpBackend, ResourceRead};
 pub use request::{error_exit_code, exit_code, MAX_FRAME_BYTES};
-pub use stdio::Mode;
+pub use stdio::{legacy_error_frame, Mode};
 
 #[async_trait]
 pub trait TransportArtifacts: Send + Sync {
@@ -55,6 +58,33 @@ impl TransportArtifacts for UnavailableArtifacts {
     }
 }
 
+/// How a driver writes SQL, for the statements the transport builds itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SqlFlavor {
+    Postgres,
+    Mssql,
+    Mysql,
+    Sqlite,
+    Other,
+}
+
+/// What a connection's driver offers, read from its capabilities and the
+/// connection's own metadata.
+#[derive(Clone, Debug)]
+pub struct CatalogTraits {
+    /// Object kinds the driver can list: `table`, `view`,
+    /// `materialized_view`, `routine`, `trigger`.
+    pub kinds: Vec<String>,
+    pub flavor: SqlFlavor,
+    /// Schema the driver uses when a call names none.
+    pub default_schema: Option<String>,
+}
+
+#[async_trait]
+pub trait CatalogMetadata: Send + Sync {
+    async fn traits(&self, connection: &SavedConnection) -> ServiceResult<CatalogTraits>;
+}
+
 pub struct ServiceTransport {
     runtime: Arc<ServiceRuntime>,
     policy: Arc<ApprovalPolicy>,
@@ -62,6 +92,8 @@ pub struct ServiceTransport {
     validator: SchemaValidator,
     ipc: OnceLock<Weak<LocalIpc>>,
     legacy: OnceLock<Arc<dyn LegacyMcpBackend>>,
+    metadata: OnceLock<Arc<dyn CatalogMetadata>>,
+    catalog: Vec<tool_catalog::ToolSpec>,
 }
 
 impl ServiceTransport {
@@ -78,7 +110,15 @@ impl ServiceTransport {
                 .map_err(|_| failure(ErrorCode::CapabilityUnavailable))?,
             ipc: OnceLock::new(),
             legacy: OnceLock::new(),
+            metadata: OnceLock::new(),
+            catalog: tool_catalog::build()?,
         }))
+    }
+
+    pub fn set_catalog_metadata(&self, metadata: Arc<dyn CatalogMetadata>) -> ServiceResult<()> {
+        self.metadata
+            .set(metadata)
+            .map_err(|_| failure(ErrorCode::InvalidArgument))
     }
 
     pub fn set_ipc(&self, ipc: Weak<LocalIpc>) -> ServiceResult<()> {

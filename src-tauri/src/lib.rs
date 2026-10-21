@@ -223,8 +223,9 @@ pub fn run() {
         // only, leaving the stdout JSON-RPC stream clean.
         init_logger(create_log_buffer(1000), log::LevelFilter::Info);
         let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-        rt.block_on(mcp::run_mcp_server());
-        return;
+        let code = rt.block_on(service_native::cli::run_mcp());
+        rt.shutdown_timeout(std::time::Duration::from_secs(3));
+        std::process::exit(code);
     }
 
     if let Some(cli::Command::Service(service)) = &args.command {

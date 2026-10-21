@@ -350,8 +350,27 @@ pub struct TestDriver {
     pub session_peak: AtomicUsize,
     pub gates: Mutex<HashMap<String, Arc<TestGate>>>,
     pub cancelled_connections: Mutex<Vec<String>>,
+    /// When false a cancellation request is accepted but the running call
+    /// ignores it, like a driver that cannot interrupt its query.
+    pub cancel_confirms: AtomicBool,
+    /// When true the cancellation request itself fails.
+    pub cancel_fails: AtomicBool,
+    cancelled_requests: Mutex<std::collections::HashSet<String>>,
+    cancel_notify: tokio::sync::Notify,
 }
 impl TestDriver {
+    async fn cancel_requested(&self, context: &DriverContext) {
+        let key = format!("{}\0{}", context.connection_id, context.request_id);
+        loop {
+            let notified = self.cancel_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cancelled_requests.lock().unwrap().contains(&key) {
+                return;
+            }
+            notified.await;
+        }
+    }
     pub fn new() -> Self {
         Self {
             calls: AtomicUsize::new(0),
@@ -367,6 +386,10 @@ impl TestDriver {
             session_peak: AtomicUsize::new(0),
             gates: Mutex::new(HashMap::new()),
             cancelled_connections: Mutex::new(Vec::new()),
+            cancel_confirms: AtomicBool::new(true),
+            cancel_fails: AtomicBool::new(false),
+            cancelled_requests: Mutex::new(Default::default()),
+            cancel_notify: tokio::sync::Notify::new(),
         }
     }
 }
@@ -464,11 +487,11 @@ impl DriverBackend for TestDriver {
             .as_deref()
             .and_then(|text| self.gates.lock().unwrap().get(text).cloned());
         if let Some(gate) = gate {
-            tokio::select! { _ = gate.enter() => {}, _ = context.signal.cancelled() => return Ok(DriverOutput { data: Value::Null, snapshot: None, cursor: None, confirmed_cancelled: true, session_closed: false, metrics: Metrics::default(), limits: Limits::default(), warnings: vec![] }) }
+            tokio::select! { _ = gate.enter() => {}, _ = context.signal.cancelled() => return Ok(DriverOutput { data: Value::Null, snapshot: None, cursor: None, confirmed_cancelled: true, session_closed: false, metrics: Metrics::default(), limits: Limits::default(), warnings: vec![] }), _ = self.cancel_requested(&context) => return Err(failure(ErrorCode::Cancelled)) }
         }
         match fixture.as_deref() {
             Some("wait") => {
-                context.signal.cancelled().await;
+                tokio::select! { _ = context.signal.cancelled() => {}, _ = self.cancel_requested(&context) => {} }
                 return Ok(DriverOutput {
                     data: Value::Null,
                     snapshot: None,
@@ -553,12 +576,22 @@ impl DriverBackend for TestDriver {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(native_output(state.tail.clone(), vec![], state.page_size))
     }
-    async fn cancel(&self, connection_id: &str, _request_id: &str) -> ServiceResult<()> {
+    async fn cancel(&self, connection_id: &str, request_id: &str) -> ServiceResult<()> {
         self.cancels.fetch_add(1, Ordering::SeqCst);
         self.cancelled_connections
             .lock()
             .unwrap()
             .push(connection_id.into());
+        if self.cancel_fails.load(Ordering::SeqCst) {
+            return Err(failure(ErrorCode::CapabilityUnavailable));
+        }
+        if self.cancel_confirms.load(Ordering::SeqCst) {
+            self.cancelled_requests
+                .lock()
+                .unwrap()
+                .insert(format!("{connection_id}\0{request_id}"));
+            self.cancel_notify.notify_waiters();
+        }
         Ok(())
     }
     async fn reserve_session(

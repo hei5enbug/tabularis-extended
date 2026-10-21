@@ -3,12 +3,16 @@ mod caller;
 pub mod catalog;
 pub mod cli;
 mod credentials;
+mod metadata;
 mod renderer;
+#[cfg(test)]
+mod mcp_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 
 pub use artifacts::NativeArtifacts;
 pub use caller::{window_authority, WindowAuthority};
+pub use metadata::NativeCatalogMetadata;
 pub use credentials::{register_credential, CredentialSource};
 pub use renderer::RendererSubscriptions;
 
@@ -112,6 +116,8 @@ impl NativeCore {
             .await?,
         );
         core.transport.set_ipc(Arc::downgrade(&ipc))?;
+        core.transport
+            .set_catalog_metadata(Arc::new(NativeCatalogMetadata::new(Arc::downgrade(&core))))?;
         MapDomain::attach(
             &core.platform.runtime,
             core.maps.clone(),

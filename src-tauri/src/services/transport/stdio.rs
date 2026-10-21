@@ -4,7 +4,7 @@ use super::super::{
     dispatch::{CallerContext, CallerTransport},
     error::{failure, redact_error, ServiceResult},
 };
-use super::{request, ServiceTransport};
+use super::{request, tool_catalog, LegacyFailure, ServiceTransport};
 use serde_json::{json, Value};
 use std::{sync::Arc, time::Duration};
 use tokio::{
@@ -79,6 +79,26 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     }
 }
 
+/// Why an MCP request failed: a service error, or an error the legacy server
+/// answers with and that is passed on unchanged.
+enum Failure {
+    Service(ServiceError),
+    Legacy(LegacyFailure),
+}
+impl From<ServiceError> for Failure {
+    fn from(error: ServiceError) -> Self {
+        Self::Service(error)
+    }
+}
+
+pub fn legacy_error_frame(id: Value, failure: LegacyFailure) -> Value {
+    let mut error = json!({"code":failure.code,"message":failure.message});
+    if let Some(data) = failure.data {
+        error["data"] = data;
+    }
+    json!({"jsonrpc":"2.0","id":id,"error":error})
+}
+
 fn rpc_error(id: Value, error: ServiceError) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"Service request failed","data":redact_error(error)}})
 }
@@ -139,42 +159,48 @@ impl ServiceTransport {
         };
         caller.transport = CallerTransport::Mcp;
         let params = raw.get("params").cloned().unwrap_or_else(|| json!({}));
-        let result = async {
+        let result: Result<Value, Failure> = async {
             match raw["method"].as_str().unwrap_or_default() {
                 "initialize" => {
                     only_keys(&params, &["protocolVersion", "capabilities", "clientInfo"])?;
                     let version = params["protocolVersion"].as_str().filter(|version| matches!(*version, "2024-11-05" | "2025-03-26" | "2025-06-18")).unwrap_or("2025-06-18");
-                    Ok(json!({"protocolVersion":version,"capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"tabularis-service-transport","version":"1"}}))
+                    if let (Some(name), Some(legacy)) = (params["clientInfo"]["name"].as_str(), self.legacy.get()) {
+                        legacy.client_connected(name);
+                    }
+                    Ok(json!({"protocolVersion":version,"capabilities":{"tools":{},"resources":{}},"serverInfo":{"name":"tabularis-extended","version":env!("CARGO_PKG_VERSION")}}))
                 }
                 "ping" => { only_keys(&params, &[])?; Ok(json!({})) }
-                "tools/list" => { only_keys(&params, &[])?; self.tools() }
+                "tools/list" => { only_keys(&params, &[])?; Ok(self.tools()?) }
                 "resources/list" => {
                     only_keys(&params,&[])?;
                     let value=match self.legacy.get() {Some(legacy)=>legacy.list_resources(&caller).await.unwrap_or_else(||json!({"resources":[]})),None=>json!({"resources":[]})};
-                    if serde_json::to_vec(&value).map_err(|_|failure(ErrorCode::ResourceLimit))?.len()>request::MAX_FRAME_BYTES{return Err(failure(ErrorCode::ResourceLimit));}
+                    if serde_json::to_vec(&value).map_err(|_|failure(ErrorCode::ResourceLimit))?.len()>request::MAX_FRAME_BYTES{return Err(failure(ErrorCode::ResourceLimit).into());}
                     Ok(value)
                 }
                 "tools/call" => {
                     only_keys(&params, &["name", "arguments"])?;
                     let name = params["name"].as_str().ok_or_else(|| failure(ErrorCode::InvalidArgument))?;
-                    self.call_tool(name, params["arguments"].clone(), caller, Some(signal)).await
+                    match self.legacy_call(name, &params["arguments"], &caller).await {
+                        Some(Ok(value)) => Ok(value),
+                        Some(Err(legacy)) => Err(Failure::Legacy(legacy)),
+                        None => Ok(self.call_tool(name, params["arguments"].clone(), caller, Some(signal)).await?),
+                    }
                 }
                 "resources/read" => {
                     only_keys(&params, &["uri"])?;
                     let uri = params["uri"].as_str().ok_or_else(|| failure(ErrorCode::InvalidArgument))?;
-                    self.resource_with_legacy(uri, &caller).await
+                    Ok(self.resource_with_legacy(uri, &caller).await?)
                 }
                 "notifications/initialized" if id.is_none() => { only_keys(&params, &[])?; Ok(json!({})) }
-                _ => Err(failure(ErrorCode::UnsupportedOperation)),
+                _ => Err(failure(ErrorCode::UnsupportedOperation).into()),
             }
         }.await;
         match (id, result) {
             (None, _) => (None, 0),
             (Some(id), Ok(result)) => (Some(json!({"jsonrpc":"2.0","id":id,"result":result})), 0),
-            (Some(id), Err(error)) => {
-                let code = request::error_exit_code(&error);
-                (Some(rpc_error(id, error)), code)
-            }
+            (Some(id), Err(Failure::Legacy(failure))) => (Some(legacy_error_frame(id, failure)), 0),
+            // A rejected request is an answer, not a server failure.
+            (Some(id), Err(Failure::Service(error))) => (Some(rpc_error(id, error)), 0),
         }
     }
 
@@ -289,22 +315,27 @@ impl ServiceTransport {
                 } else {
                     &raw
                 };
-                let is_control = envelope["operation"]
-                    .as_str()
-                    .and_then(|name| serde_json::from_value(json!(name)).ok())
-                    .is_some_and(request::control_operation)
-                    || (mode == Mode::Mcp
-                        && matches!(
-                            raw["method"].as_str(),
-                            Some(
-                                "initialize"
-                                    | "ping"
-                                    | "tools/list"
-                                    | "resources/list"
-                                    | "resources/read"
-                                    | "notifications/initialized"
-                            )
-                        ));
+                let is_control = if mode == Mode::Mcp {
+                    match raw["method"].as_str() {
+                        Some(
+                            "initialize"
+                            | "ping"
+                            | "tools/list"
+                            | "resources/list"
+                            | "resources/read"
+                            | "notifications/initialized",
+                        ) => true,
+                        Some("tools/call") => raw["params"]["name"]
+                            .as_str()
+                            .is_some_and(tool_catalog::is_control_tool),
+                        _ => false,
+                    }
+                } else {
+                    envelope["operation"]
+                        .as_str()
+                        .and_then(|name| serde_json::from_value(json!(name)).ok())
+                        .is_some_and(request::control_operation)
+                };
                 let permit = match if is_control {
                     control.clone()
                 } else {
@@ -337,7 +368,12 @@ impl ServiceTransport {
                 let deadline_ms = envelope["deadline_ms"]
                     .as_u64()
                     .unwrap_or(30_000)
-                    .clamp(1, 120_000);
+                    .clamp(1, 120_000)
+                    .saturating_add(if mode == Mode::Mcp {
+                        envelope["wait_ms"].as_u64().unwrap_or(5_000).min(60_000)
+                    } else {
+                        0
+                    });
                 let deadline = Instant::now() + Duration::from_millis(deadline_ms + 2_000);
                 drain_deadline = drain_deadline.max(deadline);
                 deadline_updates.send_replace(drain_deadline);

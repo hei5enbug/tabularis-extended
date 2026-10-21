@@ -1,0 +1,8 @@
+{"jsonrpc":"2.0","id":1,"method":"tools/list"}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"list_connections","arguments":{}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_databases","arguments":{"connection_id":"fx-sqlite"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"list_tables","arguments":{"connection_id":"fx-sqlite"}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"describe_table","arguments":{"connection_id":"fx-sqlite","table_name":"orders"}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"run_query","arguments":{"connection_id":"fx-sqlite","query":"select id, name from users order by id","limit":2}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"run_query","arguments":{"connection_id":"fx-sqlite","query":"select id, name from users order by id","output_format":"toon"}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"describe_table","arguments":{"connection_id":"Fixture","table_name":"users","output_format":"toon"}}}

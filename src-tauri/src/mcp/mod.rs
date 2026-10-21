@@ -16,7 +16,6 @@ use crate::persistence;
 use crate::plugins;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 
 mod cooldown;
@@ -29,6 +28,8 @@ use cooldown::{DISABLE_CHECK_COOLDOWN, RELOAD_COOLDOWN};
 use output::{OutputFormatError, ToolOutputFormat};
 use protocol::*;
 
+#[cfg(test)]
+mod golden_tests;
 #[cfg(test)]
 mod output_tests;
 #[cfg(test)]
@@ -47,6 +48,10 @@ struct CallAudit {
     status: String,
     error: Option<String>,
     approval_id: Option<String>,
+    /// Database and schema the call actually used, reported back to the
+    /// caller when it chose either one.
+    effective_database: Option<String>,
+    effective_schema: Option<String>,
 }
 
 impl CallAudit {
@@ -61,8 +66,26 @@ impl CallAudit {
             status: "success".to_string(),
             error: None,
             approval_id: None,
+            effective_database: None,
+            effective_schema: None,
         }
     }
+}
+
+/// Profile directory the legacy tools read connections from.
+#[cfg(test)]
+pub(crate) static CONFIG_DIR_OVERRIDE: std::sync::Mutex<Option<std::path::PathBuf>> =
+    std::sync::Mutex::new(None);
+fn config_dir() -> std::path::PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = CONFIG_DIR_OVERRIDE
+        .lock()
+        .ok()
+        .and_then(|directory| directory.clone())
+    {
+        return dir;
+    }
+    paths::get_app_config_dir()
 }
 
 /// MCP-mode equivalent of `expand_ssh_connection_params` — no AppHandle needed.
@@ -70,7 +93,7 @@ impl CallAudit {
 async fn expand_ssh_params_for_mcp(
     params: &ConnectionParams,
 ) -> Result<ConnectionParams, JsonRpcError> {
-    expand_ssh_params_for_mcp_in(&paths::get_app_config_dir(), params).await
+    expand_ssh_params_for_mcp_in(&config_dir(), params).await
 }
 
 pub(crate) async fn expand_ssh_params_for_mcp_in(
@@ -178,7 +201,7 @@ pub(crate) async fn expand_ssh_params_for_mcp_in(
 async fn expand_k8s_params_for_mcp(
     params: &ConnectionParams,
 ) -> Result<ConnectionParams, JsonRpcError> {
-    expand_k8s_params_for_mcp_in(&paths::get_app_config_dir(), params).await
+    expand_k8s_params_for_mcp_in(&config_dir(), params).await
 }
 
 pub(crate) async fn expand_k8s_params_for_mcp_in(
@@ -243,7 +266,7 @@ pub(crate) async fn expand_k8s_params_for_mcp_in(
 }
 
 fn find_connection(conn_id: &str) -> Result<crate::models::SavedConnection, JsonRpcError> {
-    let config_path = paths::resolve_connections_path(&paths::get_app_config_dir());
+    let config_path = paths::resolve_connections_path(&config_dir());
     let connections = persistence::load_connections(&config_path).map_err(|e| JsonRpcError {
         code: -32000,
         message: e,
@@ -468,58 +491,6 @@ fn resolve_default_schema<'a>(
     }
 }
 
-pub async fn run_mcp_server() {
-    eprintln!("[MCP] Starting Tabularis MCP Server...");
-
-    register_drivers_for_mcp().await;
-
-    let stdin = io::stdin();
-    let mut stdout = io::stdout();
-    let mut iterator = stdin.lock().lines();
-
-    while let Some(line_result) = iterator.next() {
-        match line_result {
-            Ok(line) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-
-                // Log input to stderr for debugging
-                eprintln!("[MCP] Received: {}", line);
-
-                match serde_json::from_str::<JsonRpcRequest>(&line) {
-                    Ok(request) => {
-                        let response = handle_request(request).await;
-                        if let Some(resp) = response {
-                            let json = serde_json::to_string(&resp)
-                                .expect("serializing a JsonRpcResponse cannot fail");
-                            // Log output to stderr
-                            eprintln!("[MCP] Sending: {}", json);
-                            // Stop cleanly if the client has gone away (BrokenPipe)
-                            // rather than panicking the whole server.
-                            if let Err(e) = stdout
-                                .write_all(json.as_bytes())
-                                .and_then(|_| stdout.write_all(b"\n"))
-                                .and_then(|_| stdout.flush())
-                            {
-                                eprintln!("[MCP] Failed to write response, stopping: {}", e);
-                                break;
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("[MCP] Error parsing JSON: {}", e);
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("[MCP] Error reading stdin: {}", e);
-                break;
-            }
-        }
-    }
-}
-
 async fn handle_request(req: JsonRpcRequest) -> Option<JsonRpcResponse> {
     // Notifications (no id)
     if req.id.is_none() {
@@ -739,6 +710,7 @@ fn handle_list_tools(config: &AppConfig) -> Result<Value, JsonRpcError> {
                 "properties": {
                     "connection_id": { "type": "string", "description": "The ID or name of the connection" },
                     "schema": { "type": "string", "description": "Schema name (optional, defaults to 'public' for PostgreSQL)" },
+                    "database": database_schema(),
                     "output_format": output_format_schema(default_output_format)
                 },
                 "required": ["connection_id"]
@@ -755,6 +727,7 @@ fn handle_list_tools(config: &AppConfig) -> Result<Value, JsonRpcError> {
                     "connection_id": { "type": "string", "description": "The ID or name of the connection" },
                     "table_name": { "type": "string", "description": "The name of the table to describe" },
                     "schema": { "type": "string", "description": "Schema name (optional, defaults to 'public' for PostgreSQL)" },
+                    "database": database_schema(),
                     "output_format": output_format_schema(default_output_format)
                 },
                 "required": ["connection_id", "table_name"]
@@ -769,6 +742,8 @@ fn handle_list_tools(config: &AppConfig) -> Result<Value, JsonRpcError> {
                     "connection_id": { "type": "string", "description": "The ID or name of the connection" },
                     "query": { "type": "string", "description": "The SQL query to execute" },
                     "limit": { "type": "integer", "description": "Maximum number of rows to return (default: 100). If the query already contains a LIMIT clause smaller than this value, the query's LIMIT takes precedence." },
+                    "database": database_schema(),
+                    "schema": { "type": "string", "description": "Schema to run the query in (optional). The result then also reports the effective database and schema." },
                     "output_format": output_format_schema(default_output_format)
                 },
                 "required": ["connection_id", "query"]
@@ -897,17 +872,23 @@ async fn dispatch_tool(
         "list_tables" => {
             let args = require_args(args)?;
             let format = requested_output_format(Some(args), config)?;
-            tool_list_tables(args, config, audit, format).await
+            let mut result = tool_list_tables(args, config, audit, format).await?;
+            report_effective(&mut result, args, audit);
+            Ok(result)
         }
         "describe_table" => {
             let args = require_args(args)?;
             let format = requested_output_format(Some(args), config)?;
-            tool_describe_table(args, config, audit, format).await
+            let mut result = tool_describe_table(args, config, audit, format).await?;
+            report_effective(&mut result, args, audit);
+            Ok(result)
         }
         "run_query" => {
             let args = require_args(args)?;
             let format = requested_output_format(Some(args), config)?;
-            tool_run_query(args, config, session_id, audit, format).await
+            let mut result = tool_run_query(args, config, session_id, audit, format).await?;
+            report_effective(&mut result, args, audit);
+            Ok(result)
         }
         _ => Err(JsonRpcError {
             code: -32601,
@@ -934,6 +915,73 @@ fn output_format_schema(default: &str) -> Value {
         "default": default,
         "description": "Text output encoding. JSON is the backward-compatible default; TOON is optimized for LLM token usage."
     })
+}
+
+fn effective_database(params: &ConnectionParams) -> Option<String> {
+    let primary = params.database.primary();
+    (!primary.is_empty()).then(|| primary.to_string())
+}
+
+fn database_schema() -> Value {
+    json!({
+        "type": "string",
+        "description": "Database to use for this call (optional). It must be one that list_databases reports for the connection. The result then also reports the effective database and schema."
+    })
+}
+
+/// Applies a caller-chosen `database` to this call's parameters. The name
+/// must be one the driver lists for the connection; the saved connection is
+/// never changed.
+async fn select_database(
+    args: &serde_json::Map<String, Value>,
+    driver: &Arc<dyn DatabaseDriver>,
+    params: &mut ConnectionParams,
+) -> Result<(), JsonRpcError> {
+    let Some(requested) = args.get("database") else {
+        return Ok(());
+    };
+    let invalid = |message: &str| JsonRpcError {
+        code: -32602,
+        message: message.to_string(),
+        data: None,
+    };
+    let database = requested
+        .as_str()
+        .filter(|name| !name.is_empty() && !name.chars().any(char::is_control))
+        .ok_or_else(|| invalid("INVALID_ARGUMENT: database must be a non-empty string"))?;
+    let listed = driver
+        .get_databases(params)
+        .await
+        .map_err(|message| JsonRpcError {
+            code: -32000,
+            message,
+            data: None,
+        })?;
+    if !listed.iter().any(|name| name == database) {
+        return Err(invalid(
+            "INVALID_ARGUMENT: database is not one the driver lists for this connection",
+        ));
+    }
+    params.database = crate::models::DatabaseSelection::Single(database.to_string());
+    Ok(())
+}
+
+/// Adds the effective database and schema to a result when the caller chose
+/// either one. The text content is left exactly as the legacy tool wrote it.
+fn report_effective(
+    result: &mut Value,
+    args: &serde_json::Map<String, Value>,
+    audit: &CallAudit,
+) {
+    if !args.contains_key("database") && !args.contains_key("schema") {
+        return;
+    }
+    result["structuredContent"] = json!({
+        "effective": {
+            "database": audit.effective_database,
+            "schema": audit.effective_schema,
+        }
+    });
 }
 
 fn requested_output_format(
@@ -973,7 +1021,7 @@ async fn tool_list_connections(
     _audit: &mut CallAudit,
     format: ToolOutputFormat,
 ) -> Result<Value, JsonRpcError> {
-    let config_path = paths::resolve_connections_path(&paths::get_app_config_dir());
+    let config_path = paths::resolve_connections_path(&config_dir());
     let connections = persistence::load_connections(&config_path).map_err(|e| JsonRpcError {
         code: -32000,
         message: e,
@@ -1014,11 +1062,14 @@ async fn tool_list_tables(
 
     audit.connection_id = Some(conn_id.to_string());
 
-    let (conn, db_params, driver) =
+    let (conn, mut db_params, driver) =
         resolve_db_driver(conn_id, config.active_external_drivers.as_deref()).await?;
     audit.connection_name = Some(conn.name.clone());
+    select_database(args, &driver, &mut db_params).await?;
 
     let effective_schema = resolve_default_schema(&driver, schema);
+    audit.effective_database = effective_database(&db_params);
+    audit.effective_schema = effective_schema.map(str::to_owned);
     let tables = driver
         .get_tables(&db_params, effective_schema)
         .await
@@ -1093,11 +1144,14 @@ async fn tool_describe_table(
 
     audit.connection_id = Some(conn_id.to_string());
 
-    let (conn, db_params, driver) =
+    let (conn, mut db_params, driver) =
         resolve_db_driver(conn_id, config.active_external_drivers.as_deref()).await?;
     audit.connection_name = Some(conn.name.clone());
+    select_database(args, &driver, &mut db_params).await?;
 
     let effective_schema = resolve_default_schema(&driver, schema);
+    audit.effective_database = effective_database(&db_params);
+    audit.effective_schema = effective_schema.map(str::to_owned);
     // Run the three metadata fetches concurrently so a slow driver costs one
     // round-trip's worth of latency, not three (and at most one call timeout
     // rather than three sequential ones blocking the MCP request loop).
@@ -1151,9 +1205,13 @@ async fn tool_run_query(
     let kind = ai_activity::classify_query_kind(query);
     audit.query_kind = Some(kind.to_string());
 
-    let (conn, db_params, driver) =
+    let schema = args.get("schema").and_then(|v| v.as_str());
+    let (conn, mut db_params, driver) =
         resolve_db_driver(conn_id, config.active_external_drivers.as_deref()).await?;
     audit.connection_name = Some(conn.name.clone());
+    select_database(args, &driver, &mut db_params).await?;
+    audit.effective_database = effective_database(&db_params);
+    audit.effective_schema = schema.map(str::to_owned);
 
     // Read-only enforcement (fail-closed: unknown counts as write).
     if config::is_connection_readonly(config, &conn.id) && kind != "select" {
@@ -1206,7 +1264,7 @@ async fn tool_run_query(
         // Pre-flight EXPLAIN — best effort, never blocks.
         let (explain_plan, explain_error) = if want_explain {
             let outcome =
-                preflight::preflight_explain(&conn.params.driver, &db_params, query, None).await;
+                preflight::preflight_explain(&conn.params.driver, &db_params, query, schema).await;
             (outcome.plan, outcome.error)
         } else {
             (None, None)
@@ -1335,7 +1393,7 @@ async fn tool_run_query(
     }
 
     let result = driver
-        .execute_query(&db_params, &effective_query, Some(max_rows), 1, None)
+        .execute_query(&db_params, &effective_query, Some(max_rows), 1, schema)
         .await
         .map_err(|e| JsonRpcError {
             code: -32000,

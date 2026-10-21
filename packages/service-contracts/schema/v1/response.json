@@ -189,7 +189,8 @@
                 "DOCUMENT_NOT_FOUND",
                 "WRITE_INTENT_REQUIRED",
                 "SECRET_NOT_ACCEPTED",
-                "OPERATION_NOT_ALLOWED"
+                "OPERATION_NOT_ALLOWED",
+                "CANCEL_NOT_CONFIRMED"
               ]
             },
             "message": {

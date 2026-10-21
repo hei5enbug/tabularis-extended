@@ -1,11 +1,11 @@
-use super::{output::ToolOutputFormat, protocol::JsonRpcRequest};
+use super::protocol::JsonRpcRequest;
 use crate::{
     service_native::{catalog, NativeCore},
     services::{
         contracts::{ErrorCode, Operation, ServiceResponse},
         dispatch::CallerContext,
         error::{failure, redact_error, ServiceResult},
-        transport::LegacyMcpBackend,
+        transport::{LegacyFailure, LegacyMcpBackend},
     },
 };
 use async_trait::async_trait;
@@ -39,6 +39,8 @@ impl NativeLegacyMcp {
         }
         Ok(matched[0].clone())
     }
+    /// Resource reads for service-capable drivers: the connection list and
+    /// one connection's tables, through the common service.
     async fn common(
         &self,
         name: &str,
@@ -67,114 +69,58 @@ impl NativeLegacyMcp {
             .policy
             .permission(&connection, caller)
             .await?;
-        let Some((_, caps)) = catalog::driver_capabilities(&connection.driver).await? else {
-            return Ok(None);
-        };
-        let schema = args.get("schema").and_then(Value::as_str);
-        let operation = match name {
-            "list_databases" => Operation::CatalogDatabases,
-            "list_tables" => Operation::CatalogObjects,
-            "describe_table" => Operation::CatalogDescribe,
-            "run_query" => Operation::QueryExecute,
-            _ => return Err(failure(ErrorCode::UnsupportedOperation)),
-        };
-        if !core
-            .platform
-            .runtime
-            .driver
-            .supports(&connection, operation)
+        if catalog::driver_capabilities(&connection.driver)
             .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        if name != "list_tables"
+            || !core
+                .platform
+                .runtime
+                .driver
+                .supports(&connection, Operation::CatalogObjects)
+                .await?
         {
             return Err(failure(ErrorCode::UnsupportedOperation));
         }
-        let database = || {
-            catalog::database(
-                &core,
-                &connection.id,
-                args.get("database")
-                    .and_then(Value::as_str)
-                    .map(str::to_owned),
-            )
-        };
-        let mut input = match operation {
-            Operation::CatalogDatabases => json!({}),
-            Operation::CatalogObjects => json!({"database":database()?,"schema":schema}),
-            Operation::CatalogDescribe => {
-                json!({"table":{"database":database()?,"schema":schema,"table":args["table_name"].as_str().ok_or_else(||failure(ErrorCode::InvalidArgument))?}})
-            }
-            Operation::QueryExecute => {
-                let text = args["query"]
-                    .as_str()
-                    .filter(|text| !text.is_empty())
-                    .ok_or_else(|| failure(ErrorCode::InvalidArgument))?;
-                let size = match args.get("limit") {
-                    None => 100,
-                    Some(value) => value
-                        .as_u64()
-                        .filter(|size| *size >= 1)
-                        .ok_or_else(|| failure(ErrorCode::InvalidArgument))?
-                        .min(1000),
-                };
-                let mut query = json!({"language":if caps.documents{"cosmos_sql"}else{"sql"},"text":text,"parameters":[],"page_size":size,"mode":"exact"});
-                if caps.documents {
-                    for field in ["database", "container"] {
-                        query[field] = json!(args[field]
-                            .as_str()
-                            .filter(|value| !value.is_empty())
-                            .ok_or_else(|| failure(ErrorCode::InvalidArgument))?);
-                    }
-                } else {
-                    if args.contains_key("container") {
-                        return Err(failure(ErrorCode::InvalidArgument));
-                    }
-                    query["database"] = json!(database()?);
-                }
-                query
-            }
-            _ => return Err(failure(ErrorCode::UnsupportedOperation)),
-        };
-        let write = match args.get("write") {
-            None => false,
-            Some(value) => value
-                .as_bool()
-                .ok_or_else(|| failure(ErrorCode::InvalidArgument))?,
-        };
-        let mut response = catalog::call(
+        let input = json!({"database":catalog::database(&core, &connection.id, None)?,"schema":args.get("schema").and_then(Value::as_str)});
+        let response = catalog::call(
             &core,
             caller.clone(),
-            operation,
+            Operation::CatalogObjects,
             Some(connection.id),
-            input.take(),
-            write,
+            input,
+            false,
         )
         .await?;
-        if operation == Operation::CatalogDescribe {
-            response.data["indexes"] = Value::Null;
-            response.data["foreign_keys"] = Value::Null;
-            response.data["unsupported_fields"] = json!(["indexes", "foreign_keys"]);
-        }
         Ok(Some(summary(&response)))
     }
-    fn format(&self, args: &Map<String, Value>) -> ServiceResult<ToolOutputFormat> {
-        let core = self.core()?;
-        let path = core.platform.approvals.profile().join("config.json");
-        let config = match crate::persistence::service_read_file(&path, 16 * 1024 * 1024, false)? {
-            Some(bytes) => {
-                serde_json::from_slice(&bytes).map_err(|_| failure(ErrorCode::PermissionDenied))?
-            }
-            None => crate::config::AppConfig::default(),
-        };
-        ToolOutputFormat::from_arguments(Some(args), ToolOutputFormat::from_config(&config))
-            .map_err(|_| failure(ErrorCode::InvalidArgument))
-    }
-    async fn legacy(&self, method: &str, params: Value) -> Value {
+    /// Runs the request on the legacy server's own handler and returns its
+    /// result or its JSON-RPC error untouched.
+    async fn legacy(&self, method: &str, params: Value) -> Result<Value, LegacyFailure> {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".into(),
             id: Some(json!("legacy-adapter")),
             method: method.into(),
             params: Some(params),
         };
-        match super::handle_request(request).await {Some(response)=>response.result.unwrap_or_else(||json!({"isError":true,"content":[{"type":"text","text":"Legacy service failed"}]})),None=>json!({"isError":true,"content":[{"type":"text","text":"Legacy service failed"}]})}
+        let failed = || LegacyFailure {
+            code: -32603,
+            message: "Legacy service failed".into(),
+            data: None,
+        };
+        let response = super::handle_request(request).await.ok_or_else(failed)?;
+        match (response.result, response.error) {
+            (_, Some(error)) => Err(LegacyFailure {
+                code: error.code,
+                message: error.message,
+                data: error.data,
+            }),
+            (Some(result), None) => Ok(result),
+            (None, None) => Err(failed()),
+        }
     }
 }
 
@@ -184,44 +130,25 @@ impl LegacyMcpBackend for NativeLegacyMcp {
         super::handle_list_tools(&crate::config::AppConfig::default())
             .unwrap_or_else(|_| json!({"tools":[]}))
     }
-    async fn call(&self, name: &str, arguments: Value, caller: &CallerContext) -> Option<Value> {
+    async fn call(
+        &self,
+        name: &str,
+        arguments: Value,
+        _caller: &CallerContext,
+    ) -> Option<Result<Value, LegacyFailure>> {
         if !matches!(
             name,
             "list_connections" | "list_databases" | "list_tables" | "describe_table" | "run_query"
         ) {
             return None;
         }
-        let result = async {
-            let args = arguments
-                .as_object()
-                .ok_or_else(|| failure(ErrorCode::InvalidArgument))?;
-            let format = self.format(args)?;
-            match self.common(name, args, caller).await? {
-                Some(summary) => {
-                    let mut output = super::tool_result(&summary, format)
-                        .map_err(|_| failure(ErrorCode::ResourceLimit))?;
-                    output["structuredContent"] = summary;
-                    if serde_json::to_vec(&output)
-                        .map_err(|_| failure(ErrorCode::ResourceLimit))?
-                        .len()
-                        > 64 * 1024
-                    {
-                        return Err(failure(ErrorCode::ResourceLimit));
-                    }
-                    Ok(output)
-                }
-                None => Ok(self
-                    .legacy("tools/call", json!({"name":name,"arguments":arguments}))
-                    .await),
-            }
-        }
-        .await;
-        Some(match result {
-            Ok(value) => value,
-            Err(error) => {
-                json!({"isError":true,"content":[{"type":"text","text":"Service request failed"}],"structuredContent":{"error":redact_error(error)}})
-            }
-        })
+        Some(
+            self.legacy("tools/call", json!({"name":name,"arguments":arguments}))
+                .await,
+        )
+    }
+    fn client_connected(&self, name: &str) {
+        crate::ai_activity::set_client_hint(Some(name.to_string()));
     }
     async fn read(&self, uri: &str, caller: &CallerContext) -> Option<Value> {
         let name = if uri == "tabularis://connections" {
@@ -240,7 +167,10 @@ impl LegacyMcpBackend for NativeLegacyMcp {
             Ok(Some(summary)) => {
                 json!({"contents":[{"uri":uri,"mimeType":"application/json","text":summary.to_string()}]})
             }
-            Ok(None) => self.legacy("resources/read", json!({"uri":uri})).await,
+            Ok(None) => self
+                .legacy("resources/read", json!({"uri":uri}))
+                .await
+                .unwrap_or_else(|_| json!({"contents":[]})),
             Err(error) => {
                 json!({"contents":[{"uri":uri,"mimeType":"application/json","text":json!({"error":redact_error(error)}).to_string()}]})
             }

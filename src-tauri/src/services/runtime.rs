@@ -27,11 +27,15 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex, Weak,
     },
     time::Duration,
 };
+
+/// How long a request waits after its deadline for the driver to answer the
+/// cancellation it was asked to perform.
+pub const CANCEL_GRACE_MS: u64 = 5_000;
 
 pub const SERVICE_OPERATIONS: &[Operation] = &[
     Operation::ConnectionList,
@@ -82,6 +86,8 @@ pub struct ServiceRuntime {
     tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     stopping: AtomicBool,
     extensions: Mutex<HashMap<Operation, Arc<dyn super::extensions::OperationExtension>>>,
+    me: Weak<ServiceRuntime>,
+    cancel_grace_ms: AtomicU64,
 }
 
 struct RuntimeAuthLifecycle {
@@ -158,7 +164,9 @@ impl ServiceRuntime {
             Arc::new(SessionSecretStore::default()),
             lifecycle,
         );
-        let runtime = Arc::new(Self {
+        let validator = super::contracts::SchemaValidator::new()
+            .map_err(|_| failure(ErrorCode::InvalidArgument))?;
+        let runtime = Arc::new_cyclic(|me| Self {
             connections,
             policy,
             driver,
@@ -168,11 +176,12 @@ impl ServiceRuntime {
             auth,
             secret_inputs: Arc::new(SecretInputs::default()),
             history: std::sync::OnceLock::new(),
-            validator: super::contracts::SchemaValidator::new()
-                .map_err(|_| failure(ErrorCode::InvalidArgument))?,
+            validator,
             tasks: Mutex::new(HashMap::new()),
             stopping: AtomicBool::new(false),
             extensions: Mutex::new(HashMap::new()),
+            me: me.clone(),
+            cancel_grace_ms: AtomicU64::new(CANCEL_GRACE_MS),
         });
         runtime.start_maintenance()?;
         Ok(runtime)
@@ -184,6 +193,14 @@ impl ServiceRuntime {
             .get()
             .ok_or_else(|| failure(ErrorCode::CapabilityUnavailable))?
             .list(query, &self.jobs.live_jobs())
+    }
+    /// Shortens the wait for a driver to answer a cancellation after a
+    /// deadline. Meant for fixtures; the default is `CANCEL_GRACE_MS`.
+    pub fn set_cancel_grace_ms(&self, grace_ms: u64) {
+        self.cancel_grace_ms.store(grace_ms, Ordering::SeqCst);
+    }
+    fn cancel_grace(&self) -> Duration {
+        Duration::from_millis(self.cancel_grace_ms.load(Ordering::SeqCst))
     }
     /// Records every job from now on and serves `job_history`.
     pub fn set_history(&self, history: Arc<dyn HistoryStore>) {
@@ -475,12 +492,22 @@ impl ServiceRuntime {
                     let connection = self.connections.get(connection_id).await?;
                     self.policy.permission(&connection, caller).await?;
                 }
+                let mut cancel_unsent = false;
                 if request.operation == Operation::JobCancel {
                     record = self.jobs.cancel(job_id, owner, caller)?;
-                }
-                if request.operation == Operation::JobCancel && record.cancel_requested {
-                    if let Some(id) = &record.connection_id {
-                        self.driver.cancel(id, &record.request_id).await?;
+                    if record.cancel_requested && record.cancel_state == "requested" {
+                        if let Some(id) = &record.connection_id {
+                            let sent = tokio::time::timeout(
+                                Duration::from_secs(5),
+                                self.driver.cancel(id, &record.request_id),
+                            )
+                            .await;
+                            if !matches!(sent, Ok(Ok(()))) {
+                                self.jobs.mark_cancel_not_confirmed(job_id);
+                                record.cancel_state = "not_confirmed".into();
+                                cancel_unsent = true;
+                            }
+                        }
                     }
                 }
                 if request.operation == Operation::JobResult {
@@ -489,10 +516,15 @@ impl ServiceRuntime {
                         json!({"status":record.status,"response":record.response}),
                     ));
                 }
-                return Ok(success(
+                let mut response = success(
                     request,
-                    json!({"job_id":record.job_id,"status":record.status,"cancel_requested":record.cancel_requested,"owner_instance_id":record.owner_instance_id}),
-                ));
+                    json!({"job_id":record.job_id,"status":record.status,"cancel_requested":record.cancel_requested,"owner_instance_id":record.owner_instance_id,"awaiting_approval":self.jobs.awaiting_approval(job_id),"cancel_state":if record.cancel_state.is_empty(){Value::Null}else{json!(record.cancel_state)},"cancel_code":if record.cancel_state=="not_confirmed"{json!("CANCEL_NOT_CONFIRMED")}else{Value::Null}}),
+                );
+                if cancel_unsent {
+                    response.status = JobStatus::Failed;
+                    response.error = Some(failure(ErrorCode::CancelNotConfirmed));
+                }
+                return Ok(response);
             }
             _ => {}
         }
@@ -507,21 +539,24 @@ impl ServiceRuntime {
             let hash = value_hash(
                 &serde_json::to_value(request).map_err(|_| failure(ErrorCode::InvalidArgument))?,
             );
-            if is_write {
+            lease.set_awaiting_approval(true);
+            let approved = if is_write {
                 before_publication(
                     lease,
                     self.policy
                         .consume_write_approval(&connection, caller, request, &hash),
                 )
-                .await?;
+                .await
             } else {
                 before_publication(
                     lease,
                     self.policy
                         .consume_read_approval(&connection, caller, request, &hash),
                 )
-                .await?;
-            }
+                .await
+            };
+            lease.set_awaiting_approval(false);
+            approved?;
         }
         let mut context = DriverContext {
             connection_id: connection.id.clone(),
@@ -933,37 +968,40 @@ impl ServiceRuntime {
         &self,
         connection: &SavedConnection,
         request: &ServiceRequest,
-        context: DriverContext,
+        mut context: DriverContext,
         lease: &JobLease,
         cursor: Option<&super::results::CursorState>,
     ) -> ServiceResult<DriverOutput> {
-        let call = async {
-            match cursor {
-                Some(cursor) => {
-                    self.driver
-                        .continue_cursor(connection, cursor, context)
-                        .await
-                }
-                None => self.driver.execute(connection, request, context).await,
+        lease.mark_dispatched()?;
+        context.deadline_ms = context
+            .deadline_ms
+            .saturating_add(self.cancel_grace().as_millis() as u64)
+            .clamp(1, 120_000);
+        let result = match cursor {
+            Some(cursor) => {
+                self.driver
+                    .continue_cursor(connection, cursor, context)
+                    .await
             }
+            None => self.driver.execute(connection, request, context).await,
         };
-        match tokio::time::timeout(
-            Duration::from_millis(lease.deadline_at_ms.saturating_sub(now_ms())),
-            call,
-        )
-        .await
-        {
-            Ok(Ok(output)) if output.confirmed_cancelled => {
+        match result {
+            Ok(output) if output.confirmed_cancelled => {
                 let mut error = failure(ErrorCode::Cancelled);
-                error.outcome = Outcome::NotApplied;
+                error.outcome = if lease.write_dispatched() {
+                    Outcome::Unknown
+                } else {
+                    Outcome::NotApplied
+                };
                 if output.session_closed {
                     error.details = json!({"session_closed":true});
                 }
                 Err(error)
             }
-            Ok(Err(mut error)) => {
+            Err(mut error) => {
                 if lease.write_dispatched()
                     && (error.outcome == Outcome::Unknown
+                        || error.code == ErrorCode::Cancelled
                         || (error.outcome == Outcome::NotStarted
                             && matches!(
                                 error.code,
@@ -972,25 +1010,14 @@ impl ServiceRuntime {
                                     | ErrorCode::OutcomeUnknown
                             )))
                 {
-                    error.code = ErrorCode::OutcomeUnknown;
+                    if error.code != ErrorCode::Cancelled {
+                        error.code = ErrorCode::OutcomeUnknown;
+                    }
                     error.outcome = Outcome::Unknown;
                 }
                 Err(error)
             }
-            Ok(Ok(output)) => Ok(output),
-            Err(_) => {
-                lease.signal().cancel();
-                let _ = self
-                    .driver
-                    .cancel(&connection.id, &request.request_id)
-                    .await;
-                let mut error = failure(ErrorCode::DeadlineExceeded);
-                if lease.write_dispatched() {
-                    error = failure(ErrorCode::OutcomeUnknown);
-                    error.outcome = Outcome::Unknown;
-                }
-                Err(error)
-            }
+            Ok(output) => Ok(output),
         }
     }
     fn store_output(
@@ -1183,6 +1210,8 @@ impl ServiceRuntime {
             Operation::JobGet
                 | Operation::JobResult
                 | Operation::JobCancel
+                | Operation::ResultGet
+                | Operation::ResultRelease
                 | Operation::AuthStatus
                 | Operation::AuthCancel
                 | Operation::AuthLogout
@@ -1210,25 +1239,28 @@ impl ServiceRuntime {
             request,
         };
         let started = now_ms();
-        let execution = match tokio::time::timeout(
-            Duration::from_millis(lease.deadline_at_ms.saturating_sub(now_ms())),
-            self.execute(request, caller, &lease, is_write),
-        )
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                lease.signal().cancel();
-                if let Some(id) = &request.connection_id {
-                    let _ = tokio::time::timeout(
-                        Duration::from_secs(2),
-                        self.driver.cancel(id, &request.request_id),
-                    )
-                    .await;
-                }
-                Err(failure(ErrorCode::DeadlineExceeded))
+        let lease = Arc::new(lease);
+        let (execution, deadline_cancel) =
+            self.run_bounded(request, caller, &lease, is_write).await;
+        // A job stopped before it reached the driver is already recorded as
+        // cancelled; only a request the driver was asked about is judged here.
+        let cancel_state = deadline_cancel.or_else(|| {
+            if !lease.cancel_requested() {
+                return None;
             }
-        };
+            if !lease.dispatched() {
+                return execution.is_ok().then_some("completed_first");
+            }
+            Some(match &execution {
+                Ok(_) => "completed_first",
+                Err(_) if lease.signal().is_cancelled() => "not_confirmed",
+                Err(error) if error.code == ErrorCode::Cancelled => "confirmed",
+                Err(_) => "not_confirmed",
+            })
+        });
+        if let Some(state) = cancel_state {
+            lease.set_cancel_state(state);
+        }
         let mut response = match execution {
             Ok(response) => response,
             Err(mut error) => {
@@ -1244,12 +1276,17 @@ impl ServiceRuntime {
                                     | ErrorCode::OutcomeUnknown
                             )))
                 {
-                    error.code = ErrorCode::OutcomeUnknown;
+                    if error.code != ErrorCode::Cancelled {
+                        error.code = ErrorCode::OutcomeUnknown;
+                    }
                     error.outcome = Outcome::Unknown;
                 }
                 error_response(request, error)
             }
         };
+        if cancel_state == Some("not_confirmed") {
+            response.warnings.push("cancel_not_confirmed".into());
+        }
         response.metrics.elapsed_ms = now_ms().saturating_sub(started);
         let mut preview = response.clone();
         preview.job_id = Some(lease.id());
@@ -1269,6 +1306,76 @@ impl ServiceRuntime {
                     error.outcome = Outcome::Applied;
                 }
                 error_response(request, error)
+            }
+        }
+    }
+    /// Runs the operation until its deadline. At the deadline a call that
+    /// reached the driver is asked to cancel and gets a grace period to
+    /// answer; one that never reached it stops locally. The second value is
+    /// what became of that cancellation request. A call the driver never
+    /// confirmed keeps its slot until it ends on its own.
+    async fn run_bounded(
+        &self,
+        request: &ServiceRequest,
+        caller: &CallerContext,
+        lease: &Arc<JobLease>,
+        is_write: bool,
+    ) -> (ServiceResult<ServiceResponse>, Option<&'static str>) {
+        let remaining = Duration::from_millis(lease.deadline_at_ms.saturating_sub(now_ms()));
+        let Some(runtime) = self.me.upgrade() else {
+            return (
+                match tokio::time::timeout(
+                    remaining,
+                    self.execute(request, caller, lease, is_write),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(failure(ErrorCode::DeadlineExceeded)),
+                },
+                None,
+            );
+        };
+        let mut task = {
+            let (request, caller, lease) = (request.clone(), caller.clone(), lease.clone());
+            ExecutionTask::spawn(async move {
+                runtime.execute(&request, &caller, &lease, is_write).await
+            })
+        };
+        if let Ok(result) = tokio::time::timeout(remaining, task.join()).await {
+            return (result, None);
+        }
+        let grace = self.cancel_grace();
+        if !lease.request_cancel() {
+            lease.signal().cancel();
+            let _ = tokio::time::timeout(grace.min(Duration::from_secs(2)), task.join()).await;
+            return (Err(failure(ErrorCode::DeadlineExceeded)), None);
+        }
+        if let Some(id) = &request.connection_id {
+            let _ = tokio::time::timeout(
+                grace.max(Duration::from_millis(1)),
+                self.driver.cancel(id, &request.request_id),
+            )
+            .await;
+        }
+        match tokio::time::timeout(grace, task.join()).await {
+            Ok(Ok(response)) => (Ok(response), Some("completed_first")),
+            Ok(Err(error)) if error.code == ErrorCode::Cancelled => {
+                let mut error = failure(ErrorCode::DeadlineExceeded);
+                error.outcome = if lease.write_dispatched() {
+                    Outcome::Unknown
+                } else {
+                    Outcome::NotApplied
+                };
+                (Err(error), Some("confirmed"))
+            }
+            Ok(Err(error)) => (Err(error), Some("not_confirmed")),
+            Err(_) => {
+                task.detach();
+                (
+                    Err(failure(ErrorCode::DeadlineExceeded)),
+                    Some("not_confirmed"),
+                )
             }
         }
     }
@@ -1341,6 +1448,8 @@ impl ServiceRuntime {
             Operation::JobGet
                 | Operation::JobResult
                 | Operation::JobCancel
+                | Operation::ResultGet
+                | Operation::ResultRelease
                 | Operation::AuthStatus
                 | Operation::AuthCancel
                 | Operation::AuthLogout
@@ -1520,6 +1629,43 @@ impl ServiceRuntime {
             .map_err(|_| failure(ErrorCode::ResourceLimit))?
             .insert("maintenance".into(), task);
         Ok(())
+    }
+}
+
+/// An operation running as its own task. Dropping the handle stops the task
+/// unless it was detached to let a call that ignored its cancellation end on
+/// its own while it still holds the job's slot.
+struct ExecutionTask(Option<tokio::task::JoinHandle<ServiceResult<ServiceResponse>>>);
+impl ExecutionTask {
+    fn spawn(
+        future: impl std::future::Future<Output = ServiceResult<ServiceResponse>> + Send + 'static,
+    ) -> Self {
+        Self(Some(tokio::spawn(future)))
+    }
+    async fn join(&mut self) -> ServiceResult<ServiceResponse> {
+        match self.0.as_mut() {
+            Some(handle) => match handle.await {
+                Ok(result) => {
+                    self.0 = None;
+                    result
+                }
+                Err(_) => {
+                    self.0 = None;
+                    Err(failure(ErrorCode::DriverExited))
+                }
+            },
+            None => Err(failure(ErrorCode::DriverExited)),
+        }
+    }
+    fn detach(&mut self) {
+        self.0 = None;
+    }
+}
+impl Drop for ExecutionTask {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
     }
 }
 

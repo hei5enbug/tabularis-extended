@@ -10144,5 +10144,86 @@
         "details": null
       }
     }
+  },
+  {
+    "name": "query.execute의 스키마 선택을 허용한다",
+    "schema": "request",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.execute",
+      "request_id": "fixture-query.execute-schema",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "language": "sql",
+        "text": "select 1",
+        "parameters": [],
+        "page_size": 10,
+        "database": "app",
+        "schema": "public"
+      }
+    }
+  },
+  {
+    "name": "query.execute의 빈 스키마를 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.execute",
+      "request_id": "fixture-query.execute-schema",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "language": "sql",
+        "text": "select 1",
+        "parameters": [],
+        "page_size": 10,
+        "schema": ""
+      }
+    }
+  },
+  {
+    "name": "취소 미확인 오류 코드를 허용한다",
+    "schema": "response",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "request_id": "fixture-response",
+      "connection_id": "connection-1",
+      "status": "outcome_unknown",
+      "job_id": "job-1",
+      "result_id": null,
+      "data": null,
+      "page": {
+        "next_token": null,
+        "has_more": false,
+        "resume_mode": "none"
+      },
+      "limits": {
+        "truncated": false,
+        "reasons": []
+      },
+      "metrics": {
+        "elapsed_ms": 0,
+        "request_charge": null,
+        "retry_count": 0
+      },
+      "warnings": [],
+      "error": {
+        "code": "CANCEL_NOT_CONFIRMED",
+        "message": "The driver did not confirm the cancellation; the call may still finish.",
+        "retryable": false,
+        "outcome": "unknown",
+        "details": null
+      }
+    }
   }
 ]

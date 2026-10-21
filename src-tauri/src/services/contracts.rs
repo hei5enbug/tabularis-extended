@@ -288,6 +288,8 @@ pub enum ErrorCode {
     SecretNotAccepted,
     #[serde(rename = "OPERATION_NOT_ALLOWED")]
     OperationNotAllowed,
+    #[serde(rename = "CANCEL_NOT_CONFIRMED")]
+    CancelNotConfirmed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

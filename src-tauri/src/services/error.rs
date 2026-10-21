@@ -30,6 +30,9 @@ pub fn failure(code: ErrorCode) -> ServiceError {
         ErrorCode::ResultExpired => "The result has expired or was released.",
         ErrorCode::DeadlineExceeded => "The service deadline was exceeded.",
         ErrorCode::Cancelled => "The driver confirmed cancellation.",
+        ErrorCode::CancelNotConfirmed => {
+            "The driver did not confirm the cancellation; the call may still finish."
+        }
         ErrorCode::OutcomeUnknown => "The write outcome could not be confirmed.",
         ErrorCode::UnsupportedOperation => "The connection does not support this operation.",
         ErrorCode::TlsValidationFailed => "TLS certificate validation failed.",
@@ -74,6 +77,21 @@ pub fn redact_error(error: ServiceError) -> ServiceError {
         }
         if error.details["gui_applied"] == false {
             details.insert("gui_applied".into(), Value::Bool(false));
+        }
+    }
+    if error.code == ErrorCode::UnsupportedOperation {
+        if let Some(kind) = error
+            .details
+            .get("object_kind")
+            .and_then(Value::as_str)
+            .filter(|kind| {
+                matches!(
+                    *kind,
+                    "table" | "view" | "materialized_view" | "routine" | "trigger"
+                )
+            })
+        {
+            details.insert("object_kind".into(), Value::String(kind.into()));
         }
     }
     if error.code == ErrorCode::GuiUnavailable {

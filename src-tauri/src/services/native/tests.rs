@@ -34,12 +34,96 @@ impl Drop for Directory {
         let _ = std::fs::remove_dir_all(&self.0);
     }
 }
-#[derive(Default)]
+/// What the scripted driver does and records. A query that is held waits for
+/// `release` and, unless `ignore_cancel` is set, ends with `CANCELLED` when it
+/// is asked to cancel.
 pub(crate) struct DriverState {
     pub calls: Mutex<Vec<(ServiceRpcMethod, Value, bool)>>,
     pub legacy: AtomicUsize,
     pub capability_error: Mutex<Option<ErrorCode>>,
     pub unknown_count: AtomicBool,
+    /// Databases the catalog lists; `fixture` when empty.
+    pub databases: Mutex<Vec<String>>,
+    /// The database each service call ran against.
+    pub params_databases: Mutex<Vec<String>>,
+    pub executions: AtomicUsize,
+    /// Rows a query returns; ten when zero.
+    pub rows: AtomicUsize,
+    /// Bytes of text next to each row's number; none when zero.
+    pub cell_bytes: AtomicUsize,
+    pub hold: AtomicBool,
+    pub entered: AtomicUsize,
+    pub ignore_cancel: AtomicBool,
+    pub cancel_fails: AtomicBool,
+    pub cancels: AtomicUsize,
+    released: tokio::sync::Semaphore,
+    announce: tokio::sync::Notify,
+    cancelled: Mutex<std::collections::HashSet<String>>,
+    cancel_signal: tokio::sync::Notify,
+}
+impl Default for DriverState {
+    fn default() -> Self {
+        Self {
+            calls: Default::default(),
+            legacy: Default::default(),
+            capability_error: Default::default(),
+            unknown_count: Default::default(),
+            databases: Default::default(),
+            params_databases: Default::default(),
+            executions: Default::default(),
+            rows: Default::default(),
+            cell_bytes: Default::default(),
+            hold: Default::default(),
+            entered: Default::default(),
+            ignore_cancel: Default::default(),
+            cancel_fails: Default::default(),
+            cancels: Default::default(),
+            released: tokio::sync::Semaphore::new(0),
+            announce: Default::default(),
+            cancelled: Default::default(),
+            cancel_signal: Default::default(),
+        }
+    }
+}
+impl DriverState {
+    pub fn release(&self, jobs: usize) {
+        self.released.add_permits(jobs);
+    }
+    pub async fn wait_entered(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let notified = self.announce.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.entered.load(Ordering::SeqCst) >= count {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("the held query did not reach the driver");
+    }
+    async fn cancel_requested(&self, request: &str) {
+        loop {
+            let notified = self.cancel_signal.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cancelled.lock().unwrap().contains(request) {
+                return;
+            }
+            notified.await;
+        }
+    }
+    async fn hold_query(&self, request: &str) -> ServiceResult<()> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.announce.notify_waiters();
+        let ignore = self.ignore_cancel.load(Ordering::SeqCst);
+        tokio::select! {
+            permit = self.released.acquire() => { permit.unwrap().forget(); Ok(()) },
+            _ = self.cancel_requested(request), if !ignore => Err(failure(ErrorCode::Cancelled)),
+        }
+    }
 }
 struct MockDriver {
     manifest: PluginManifest,
@@ -258,7 +342,7 @@ impl DatabaseDriver for MockDriver {
     async fn service_call(
         &self,
         method: ServiceRpcMethod,
-        _: &ConnectionParams,
+        params: &ConnectionParams,
         context: &DriverContext,
         input: Value,
     ) -> ServiceResult<Value> {
@@ -267,14 +351,40 @@ impl DatabaseDriver for MockDriver {
             .lock()
             .unwrap()
             .push((method, input.clone(), context.read_only));
+        self.state
+            .params_databases
+            .lock()
+            .unwrap()
+            .push(params.database.primary().to_owned());
         Ok(match method {
             ServiceRpcMethod::ExactQuery => {
-                json!({"columns":["duplicate","duplicate"],"column_metadata":[{"native_type":"int4"},{"native_type":"text"}],"rows":(0..10).map(|n|json!([n,null])).collect::<Vec<_>>(),"affected_rows":null})
+                self.state.executions.fetch_add(1, Ordering::SeqCst);
+                if self.state.hold.load(Ordering::SeqCst) {
+                    self.state.hold_query(&context.request_id).await?;
+                }
+                let rows = match self.state.rows.load(Ordering::SeqCst) {
+                    0 => 10,
+                    rows => rows,
+                };
+                let cell = match self.state.cell_bytes.load(Ordering::SeqCst) {
+                    0 => Value::Null,
+                    bytes => json!("x".repeat(bytes)),
+                };
+                json!({"columns":["duplicate","duplicate"],"column_metadata":[{"native_type":"int4"},{"native_type":"text"}],"rows":(0..rows).map(|n|json!([n,cell])).collect::<Vec<_>>(),"affected_rows":null})
             }
             ServiceRpcMethod::Catalog => match input["operation"].as_str().unwrap_or("") {
-                "catalog.databases" => json!({"databases":["fixture"]}),
+                "catalog.databases" => {
+                    let databases = self.state.databases.lock().unwrap().clone();
+                    if databases.is_empty() {
+                        json!({"databases":["fixture"]})
+                    } else {
+                        json!({"databases":databases})
+                    }
+                }
                 "catalog.schemas" => json!({"schemas":["public"]}),
-                "catalog.objects" => json!({"objects":[{"name":"records"}]}),
+                "catalog.objects" => {
+                    json!({"objects":[{"name":"records","kind":"table"},{"name":"records_view","kind":"view"}]})
+                }
                 "catalog.describe" => {
                     json!({"columns":[{"name":"b","native_type":"text","is_primary_key":true,"primary_key_position":2},{"name":"a","native_type":"int4","is_primary_key":true,"primary_key_position":1},{"name":"payload","native_type":"jsonb"}]})
                 }
@@ -288,7 +398,13 @@ impl DatabaseDriver for MockDriver {
             _ => return Err(failure(ErrorCode::UnsupportedOperation)),
         })
     }
-    async fn service_cancel(&self, _: &str, _: &str) -> ServiceResult<()> {
+    async fn service_cancel(&self, _: &str, request: &str) -> ServiceResult<()> {
+        self.state.cancels.fetch_add(1, Ordering::SeqCst);
+        if self.state.cancel_fails.load(Ordering::SeqCst) {
+            return Err(failure(ErrorCode::CapabilityUnavailable));
+        }
+        self.state.cancelled.lock().unwrap().insert(request.into());
+        self.state.cancel_signal.notify_waiters();
         Ok(())
     }
 }
@@ -347,6 +463,11 @@ pub(crate) struct Harness {
 }
 impl Harness {
     pub async fn new() -> Self {
+        Self::with_manifest(|_| {}).await
+    }
+    /// The same fixture with the driver's manifest edited before it is
+    /// registered, to stand in for another kind of driver.
+    pub async fn with_manifest(edit: impl FnOnce(&mut PluginManifest)) -> Self {
         let directory = Directory::new();
         let state = Arc::new(DriverState::default());
         let secrets = Arc::new(SyntheticSecrets::default());
@@ -354,6 +475,7 @@ impl Harness {
             .manifest()
             .clone();
         manifest.id = format!("native-{}", uuid::Uuid::new_v4());
+        edit(&mut manifest);
         let driver_id = manifest.id.clone();
         crate::drivers::registry::register_driver(MockDriver {
             manifest,

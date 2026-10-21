@@ -308,7 +308,11 @@ impl DriverBackend for RegistryDriverBackend {
         }
         let input = match method {
             ServiceRpcMethod::ExactQuery => {
-                json!({"text":request.input["text"],"parameters":request.input["parameters"],"max_rows":10000,"max_bytes":16*1024*1024-64*1024})
+                let mut input = json!({"text":request.input["text"],"parameters":request.input["parameters"],"max_rows":10000,"max_bytes":16*1024*1024-64*1024});
+                if let Some(schema) = request.input["schema"].as_str() {
+                    input["schema"] = json!(schema);
+                }
+                input
             }
             ServiceRpcMethod::Catalog | ServiceRpcMethod::Row => {
                 let mut input = request.input.clone();
