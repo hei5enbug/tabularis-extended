@@ -1,11 +1,11 @@
-//! `tabularis://` deep-link handling.
+//! `tabularis-extended://` deep-link handling.
 //!
 //! When a Tabularium registry renders an "Open in App" button (see its
 //! `GET /api/instance/info` `appUrlSchemes` payload), the registry mints a
 //! URL of the form:
 //!
 //! ```text
-//! tabularis://install/<slug>?version=<v>&registry=<base_url>
+//! tabularis-extended://install/<slug>?version=<v>&registry=<base_url>
 //! ```
 //!
 //! * `<slug>`     — required path segment, the plugin id on the registry.
@@ -34,6 +34,10 @@ use url::Url;
 #[derive(Default)]
 pub struct PendingInstall(pub Mutex<Option<PluginInstallRequest>>);
 
+/// Custom URL scheme this fork registers and accepts. The official app owns
+/// `tabularis://`; the fork never claims or handles it.
+pub const DEEP_LINK_SCHEME: &str = "tabularis-extended";
+
 /// Event name the frontend listens on. Kept stable as part of the
 /// public contract with the Tabularium registry.
 pub const PLUGIN_INSTALL_EVENT: &str = "tabularis://plugin-install";
@@ -50,22 +54,22 @@ pub struct PluginInstallRequest {
     pub registry: Option<String>,
 }
 
-/// Parses a `tabularis://...` URL into a typed install request.
+/// Parses a `tabularis-extended://...` URL into a typed install request.
 /// Returns `None` for URLs we don't (yet) handle so callers can ignore
 /// them quietly.
 ///
 /// Accepted forms (Tabularium currently emits the query-based one):
-///   * `tabularis://install?slug=<slug>&version=<v>&registry=<base>`
-///   * `tabularis://install/<slug>?version=<v>&registry=<base>`
-///   * `tabularis:install/<slug>` (some launchers strip the `//`)
+///   * `tabularis-extended://install?slug=<slug>&version=<v>&registry=<base>`
+///   * `tabularis-extended://install/<slug>?version=<v>&registry=<base>`
+///   * `tabularis-extended:install/<slug>` (some launchers strip the `//`)
 pub fn parse_install_url(raw: &str) -> Option<PluginInstallRequest> {
     let url = Url::parse(raw).ok()?;
-    if url.scheme() != "tabularis" {
+    if url.scheme() != DEEP_LINK_SCHEME {
         return None;
     }
 
-    // Action = host if present (`tabularis://install...`), otherwise the
-    // first path segment (`tabularis:install/...`).
+    // Action = host if present (`tabularis-extended://install...`), otherwise the
+    // first path segment (`tabularis-extended:install/...`).
     let host = url.host_str();
     let action_from_path = || {
         url.path()
@@ -77,7 +81,7 @@ pub fn parse_install_url(raw: &str) -> Option<PluginInstallRequest> {
     };
     let action = host.map(str::to_string).unwrap_or_else(action_from_path);
     if action != "install" {
-        log::debug!("Ignoring tabularis:// URL with unknown action: {}", raw);
+        log::debug!("Ignoring tabularis-extended:// URL with unknown action: {}", raw);
         return None;
     }
 
@@ -96,7 +100,7 @@ pub fn parse_install_url(raw: &str) -> Option<PluginInstallRequest> {
 
     // Fall back to path segments after the action if no `?slug=` was given.
     // For the `//` forms the URL is a base and `path_segments()` works; for the
-    // no-`//` form (`tabularis:install/<slug>`) the URL is cannot-be-a-base,
+    // no-`//` form (`tabularis-extended:install/<slug>`) the URL is cannot-be-a-base,
     // so `path_segments()` returns `None` and we split `path()` by hand.
     let slug = query_slug.or_else(|| {
         let mut segments: Vec<&str> = match url.path_segments() {
@@ -112,7 +116,7 @@ pub fn parse_install_url(raw: &str) -> Option<PluginInstallRequest> {
             .map(|s| s.to_string())
     })?;
     if !is_valid_slug(&slug) {
-        log::warn!("Rejected tabularis:// URL — bad slug: {:?}", slug);
+        log::warn!("Rejected tabularis-extended:// URL — bad slug: {:?}", slug);
         return None;
     }
 
@@ -148,7 +152,7 @@ fn is_valid_slug(s: &str) -> bool {
 /// dropped.
 pub fn handle_url(app: &AppHandle, raw: &str) {
     let Some(req) = parse_install_url(raw) else {
-        log::info!("Ignoring tabularis:// URL: {}", raw);
+        log::info!("Ignoring tabularis-extended:// URL: {}", raw);
         return;
     };
 
@@ -196,7 +200,7 @@ mod tests {
     #[test]
     fn parses_canonical_install_url() {
         let req =
-            parse_install_url("tabularis://install/duckdb?version=0.2.0&registry=https%3A%2F%2Fr.example")
+            parse_install_url("tabularis-extended://install/duckdb?version=0.2.0&registry=https%3A%2F%2Fr.example")
                 .expect("valid URL");
         assert_eq!(req.slug, "duckdb");
         assert_eq!(req.version.as_deref(), Some("0.2.0"));
@@ -207,7 +211,7 @@ mod tests {
     fn parses_query_based_install_url() {
         // Format emitted by the Tabularium frontend's "Open in App" button.
         let req = parse_install_url(
-            "tabularis://install?registry=https%3A%2F%2Fregistry.tabularis.dev&slug=firestore-tabularis&version=0.2.0",
+            "tabularis-extended://install?registry=https%3A%2F%2Fregistry.tabularis.dev&slug=firestore-tabularis&version=0.2.0",
         )
         .expect("valid URL");
         assert_eq!(req.slug, "firestore-tabularis");
@@ -217,10 +221,34 @@ mod tests {
 
     #[test]
     fn parses_minimal_install_url() {
-        let req = parse_install_url("tabularis://install/csv").expect("valid URL");
+        let req = parse_install_url("tabularis-extended://install/csv").expect("valid URL");
         assert_eq!(req.slug, "csv");
         assert!(req.version.is_none());
         assert!(req.registry.is_none());
+    }
+
+    #[test]
+    fn fork_never_accepts_the_official_scheme() {
+        assert_eq!(DEEP_LINK_SCHEME, "tabularis-extended");
+        assert!(parse_install_url("tabularis://install/duckdb").is_none());
+        assert!(parse_install_url("tabularis://install?slug=duckdb").is_none());
+        assert!(parse_install_url("tabularis:install/duckdb").is_none());
+        assert!(parse_install_url("tabularis-extended://install/duckdb").is_some());
+    }
+
+    #[test]
+    fn fork_never_registers_the_official_scheme() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        assert_eq!(
+            config["plugins"]["deep-link"]["desktop"]["schemes"],
+            serde_json::json!([DEEP_LINK_SCHEME])
+        );
+        let lib = include_str!("../lib.rs");
+        assert!(lib.contains("deep_link.register(plugins::deep_link::DEEP_LINK_SCHEME)"));
+        assert!(!lib.contains("register(\"tabularis\")"));
+        assert!(lib.contains("starts_with(&scheme_prefix)"));
+        assert!(!lib.contains("starts_with(\"tabularis:\")"));
     }
 
     #[test]
@@ -231,29 +259,29 @@ mod tests {
 
     #[test]
     fn rejects_unknown_actions() {
-        assert!(parse_install_url("tabularis://browse/foo").is_none());
+        assert!(parse_install_url("tabularis-extended://browse/foo").is_none());
     }
 
     #[test]
     fn rejects_missing_slug() {
-        assert!(parse_install_url("tabularis://install/").is_none());
-        assert!(parse_install_url("tabularis://install").is_none());
+        assert!(parse_install_url("tabularis-extended://install/").is_none());
+        assert!(parse_install_url("tabularis-extended://install").is_none());
     }
 
     #[test]
     fn parses_no_double_slash_form() {
         // Some launchers strip the `//`, leaving a cannot-be-a-base URL.
-        let req = parse_install_url("tabularis:install/duckdb").expect("valid URL");
+        let req = parse_install_url("tabularis-extended:install/duckdb").expect("valid URL");
         assert_eq!(req.slug, "duckdb");
         assert!(req.version.is_none());
 
-        let req = parse_install_url("tabularis:install/duckdb?version=1.2.3").expect("valid URL");
+        let req = parse_install_url("tabularis-extended:install/duckdb?version=1.2.3").expect("valid URL");
         assert_eq!(req.slug, "duckdb");
         assert_eq!(req.version.as_deref(), Some("1.2.3"));
     }
 
     #[test]
     fn rejects_bad_slug_in_no_double_slash_form() {
-        assert!(parse_install_url("tabularis:install/../etc").is_none());
+        assert!(parse_install_url("tabularis-extended:install/../etc").is_none());
     }
 }

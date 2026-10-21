@@ -402,14 +402,14 @@ pub fn open_plugins_dir(app: AppHandle) -> Result<(), String> {
 }
 
 /// Fetches a rich plugin preview from a Tabularium registry, used by the
-/// `tabularis://` deep-link confirmation modal. When `registry_url` is
+/// `tabularis-extended://` deep-link confirmation modal. When `registry_url` is
 /// omitted the user's configured registry (or the built-in default) is
 /// queried instead. Returns `RegistryPluginWithStatus` populated with the
 /// installed version and a resolved `install_action` so the modal can show
 /// Install / Update / "already installed".
 ///
 /// NB: the deeplink *preview* talks to the Tabularium API directly (no static
-/// `registry.json` support). This is intentional — `tabularis://` links target
+/// `registry.json` support). This is intentional — `tabularis-extended://` links target
 /// the new registry — so there is deliberately no `COMPAT(registry-ga)` marker
 /// here. (`install_plugin` itself DOES support static registries, so the
 /// catalogue install path stays fully backwards-compatible.)

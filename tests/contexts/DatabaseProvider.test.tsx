@@ -598,7 +598,7 @@ describe('DatabaseProvider', () => {
 
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith('set_window_title', {
-        title: 'tabularis - Local MySQL (testdb)',
+        title: 'Tabularis Extended - Local MySQL (testdb)',
       });
     });
   });

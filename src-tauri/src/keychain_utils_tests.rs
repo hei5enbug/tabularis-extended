@@ -67,3 +67,8 @@ fn non_empty_password_is_stored_verbatim() {
         StoredPasswordChange::Store(" ")
     );
 }
+
+#[test]
+fn keychain_services_are_namespaced_to_the_fork() {
+    assert_eq!(crate::keychain_utils::SERVICE_NAME, "tabularis-extended");
+}

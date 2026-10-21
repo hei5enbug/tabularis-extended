@@ -57,13 +57,25 @@ struct GitHubAsset {
     size: u64,
 }
 
+/// The fork never contacts the official release feed, neither GitHub releases
+/// nor the updater plugin endpoints, so the official build is never offered
+/// as an update.
+const OFFICIAL_UPDATE_FEED_ENABLED: bool = false;
+/// Installation source reported to the frontend while the feed is disabled.
+const UPDATES_DISABLED_SOURCE: &str = "tabularis-extended";
+const UPDATES_DISABLED_MESSAGE: &str = "Updates are disabled in Tabularis Extended";
+
 // Constants
 const GITHUB_REPO: &str = "TabularisDB/tabularis";
 const CACHE_DURATION_SECS: u64 = 43200; // 12 hours
 
 #[tauri::command]
 pub fn get_installation_source() -> Option<String> {
-    detect_installation_source()
+    installation_source_with_feed(detect_installation_source(), OFFICIAL_UPDATE_FEED_ENABLED)
+}
+
+fn installation_source_with_feed(detected: Option<String>, feed_enabled: bool) -> Option<String> {
+    detected.or_else(|| (!feed_enabled).then(|| UPDATES_DISABLED_SOURCE.to_string()))
 }
 
 // Helper functions
@@ -188,6 +200,9 @@ fn release_channel<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> String {
 // Tauri commands
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle, force: bool) -> Result<UpdateCheckResult, String> {
+    if !OFFICIAL_UPDATE_FEED_ENABLED {
+        return Err(UPDATES_DISABLED_MESSAGE.to_string());
+    }
     // Package-managed installations should not use the built-in updater.
     if is_managed_package() {
         return Err("Updates are managed by the package manager".to_string());
@@ -336,6 +351,9 @@ pub async fn check_for_updates(app: AppHandle, force: bool) -> Result<UpdateChec
 
 #[tauri::command]
 pub async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
+    if !OFFICIAL_UPDATE_FEED_ENABLED {
+        return Err(UPDATES_DISABLED_MESSAGE.to_string());
+    }
     if is_managed_package() {
         return Err("Updates are managed by the package manager".to_string());
     }
@@ -387,6 +405,29 @@ pub async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn official_update_feed_is_disabled_and_reported_as_the_installation_source() {
+        assert!(!OFFICIAL_UPDATE_FEED_ENABLED);
+        assert_eq!(
+            installation_source_with_feed(None, OFFICIAL_UPDATE_FEED_ENABLED).as_deref(),
+            Some("tabularis-extended")
+        );
+        assert_eq!(
+            installation_source_with_feed(Some("Flathub".into()), false).as_deref(),
+            Some("Flathub")
+        );
+        assert_eq!(installation_source_with_feed(None, true), None);
+    }
+
+    #[test]
+    fn tauri_config_has_no_official_update_endpoint() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_eq!(config["plugins"]["updater"]["endpoints"], serde_json::json!([]));
+        assert_eq!(config["bundle"]["createUpdaterArtifacts"], false);
+        assert!(!include_str!("../tauri.conf.json").contains("TabularisDB"));
+    }
 
     // Version parsing tests
     #[test]

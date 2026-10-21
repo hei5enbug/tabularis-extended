@@ -1,13 +1,17 @@
 use directories::ProjectDirs;
 use std::path::{Path, PathBuf};
 
+/// Folder name of the fork's profile and app-data directories. It differs from
+/// the official app's `tabularis` so the two installations never share state.
+pub const APP_DIR_NAME: &str = "tabularis-extended";
+
 fn project_dirs() -> Option<ProjectDirs> {
-    ProjectDirs::from("", "", "tabularis")
+    ProjectDirs::from("", "", APP_DIR_NAME)
 }
 
 /// On Windows the `directories` crate nests a `config`/`data` leaf under
-/// `%APPDATA%\tabularis`; strip it so every kind of app data shares a single
-/// `tabularis` folder. On other platforms the path is returned unchanged.
+/// `%APPDATA%\tabularis-extended`; strip it so every kind of app data shares a single
+/// `tabularis-extended` folder. On other platforms the path is returned unchanged.
 /// Pure on its inputs so it stays unit-testable on any host.
 pub(crate) fn unnested_app_dir(dir: &Path, strip_leaf: bool) -> PathBuf {
     if strip_leaf {
@@ -26,7 +30,7 @@ pub fn get_default_app_config_dir() -> PathBuf {
     match project_dirs() {
         Some(proj_dirs) => unnested_app_dir(proj_dirs.config_dir(), cfg!(target_os = "windows")),
         // Fallback for weird environments
-        None => PathBuf::from(".config/tabularis"),
+        None => PathBuf::from(format!(".config/{APP_DIR_NAME}")),
     }
 }
 
@@ -37,7 +41,7 @@ pub fn get_default_app_data_dir() -> PathBuf {
     match project_dirs() {
         Some(proj_dirs) => unnested_app_dir(proj_dirs.data_dir(), cfg!(target_os = "windows")),
         // Fallback for weird environments
-        None => PathBuf::from(".local/share/tabularis"),
+        None => PathBuf::from(format!(".local/share/{APP_DIR_NAME}")),
     }
 }
 
@@ -56,8 +60,8 @@ pub fn get_app_config_dir() -> PathBuf {
 }
 
 /// Directory for user data that belongs to the connections (custom connection
-/// icons, ...). On Linux this resolves to `~/.local/share/tabularis`; on
-/// macOS/Windows it shares the same `tabularis` folder used by
+/// icons, ...). On Linux this resolves to `~/.local/share/tabularis-extended`; on
+/// macOS/Windows it shares the same `tabularis-extended` folder used by
 /// [`get_app_config_dir`]. A custom storage location redirects it too, so the
 /// icons referenced by `connections.json` travel with the connections.
 pub fn get_app_data_dir() -> PathBuf {

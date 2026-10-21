@@ -14,6 +14,9 @@ const translations: Record<string, string> = {
   "update.managedByPackageManager": "Updates managed by {{source}}",
   "update.managedByPackageManagerDesc":
     "Use your package manager to update Tabularis.",
+  "update.disabledInExtended": "Automatic updates are disabled",
+  "update.disabledInExtendedDesc":
+    "Tabularis Extended never contacts the official Tabularis update feed.",
 };
 
 vi.mock("lucide-react", () => ({
@@ -128,6 +131,16 @@ describe("InfoTab", () => {
   it("shows the custom package manager name", () => {
     renderInfoTab({ installationSource: "Solus" });
     expect(screen.getByText("Updates managed by Solus")).toBeInTheDocument();
+    expect(screen.queryByText("Release channel")).not.toBeInTheDocument();
+  });
+
+  it("explains that the fork has no update feed and offers no update controls", () => {
+    renderInfoTab({ installationSource: "tabularis-extended" });
+    expect(screen.getByText("Automatic updates are disabled")).toBeInTheDocument();
+    expect(
+      screen.getByText("Tabularis Extended never contacts the official Tabularis update feed."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Updates managed by/)).not.toBeInTheDocument();
     expect(screen.queryByText("Release channel")).not.toBeInTheDocument();
   });
 

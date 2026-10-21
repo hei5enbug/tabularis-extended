@@ -1030,6 +1030,8 @@
     "currentVersion": "Current version",
     "managedByPackageManager": "Updates managed by {{source}}",
     "managedByPackageManagerDesc": "Use your package manager to update Tabularis.",
+    "disabledInExtended": "Automatic updates are disabled",
+    "disabledInExtendedDesc": "Tabularis Extended is installed from its own build. It never contacts the official Tabularis update feed.",
     "nightlyWarning": "Nightly builds are unstable pre-releases. Only assets built for the nightly channel are installed."
   },
   "ai": {

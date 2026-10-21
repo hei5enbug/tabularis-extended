@@ -44,11 +44,14 @@ pub fn get_plugins_dir() -> Result<PathBuf, String> {
     Ok(plugins_dir)
 }
 
-/// Plugins directory used by builds before the project dirs were unified under
-/// `tabularis` (the old `com.debba.tabularis` identifier). On Linux this equals
-/// the current directory, so callers must guard against migrating onto itself.
+/// Plugins directory used by earlier fork builds that carried a reverse-DNS
+/// project identifier. It is deliberately derived from the fork's own folder
+/// name: the official app's legacy directory must never be read or moved.
+/// On Linux this equals the current directory, so callers must guard against
+/// migrating onto itself.
 fn legacy_plugins_dir() -> Option<PathBuf> {
-    ProjectDirs::from("com", "debba", "tabularis").map(|pd| pd.data_dir().join("plugins"))
+    ProjectDirs::from("com", "debba", crate::paths::APP_DIR_NAME)
+        .map(|pd| pd.data_dir().join("plugins"))
 }
 
 fn dir_has_entries(dir: &Path) -> bool {

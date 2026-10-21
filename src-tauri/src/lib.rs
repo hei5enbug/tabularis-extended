@@ -201,6 +201,19 @@ pub fn run() {
 
     let args = cli::parse();
 
+    if args.list_drivers {
+        match plugins::driver_listing::list_drivers_json() {
+            Ok(listing) => {
+                println!("{listing}");
+                return;
+            }
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if args.mcp {
         // Initialize the logger so plugin-loading and driver RPC errors (which
         // use the `log` crate) are visible. The custom logger writes to stderr
@@ -247,7 +260,7 @@ pub fn run() {
     sqlx::any::install_default_drivers();
 
     tauri::Builder::default()
-        // Singleton: a second launch (typically a `tabularis://...` URL
+        // Singleton: a second launch (typically a `tabularis-extended://...` URL
         // clicked while the app is already running) hands its argv to the
         // first instance and exits. With `features = ["deep-link"]` the plugin
         // usually auto-routes those URLs through `on_open_url`, but on
@@ -259,7 +272,8 @@ pub fn run() {
         // intercept duplicate launches before any heavy initialisation.
         .plugin(tauri_plugin_single_instance::init(|app, argv, _cwd| {
             log::info!("Duplicate launch detected — forwarded to existing instance");
-            if let Some(url) = argv.iter().find(|a| a.starts_with("tabularis:")) {
+            let scheme_prefix = format!("{}:", crate::plugins::deep_link::DEEP_LINK_SCHEME);
+            if let Some(url) = argv.iter().find(|a| a.starts_with(&scheme_prefix)) {
                 crate::plugins::deep_link::handle_url(app, url);
             }
             if let Some(win) = tauri::Manager::get_webview_window(app, "main") {
@@ -324,19 +338,14 @@ pub fn run() {
             // `None` means no preference has been saved yet → load all installed plugins.
             let active_ext_drivers = startup_config.active_external_drivers.as_deref();
 
-            // Register built-in drivers
-            tauri::async_runtime::block_on(async {
-                drivers::registry::register_driver(drivers::mysql::MysqlDriver::new()).await;
-                drivers::registry::register_driver(drivers::postgres::PostgresDriver::new()).await;
-                drivers::registry::register_driver(drivers::sqlite::SqliteDriver::new()).await;
-
+            // Register built-in drivers (MySQL, SQLite) and enabled plugins
+            tauri::async_runtime::block_on(drivers::registry::register_startup_drivers(
                 // Load only enabled external plugins (or all if no preference saved).
                 crate::plugins::manager::load_plugins_with_configs(
                     startup_config.plugins.clone().unwrap_or_default(),
                     active_ext_drivers,
-                )
-                .await;
-            });
+                ),
+            ));
 
             let native = tauri::async_runtime::block_on(service_native::NativeCore::gui(app.handle().clone()))
                 .map_err(|_| std::io::Error::other("Service initialization failed"))?;
@@ -373,7 +382,7 @@ pub fn run() {
                 });
             }
 
-            // Subscribe to `tabularis://` deep links so a registry's
+            // Subscribe to `tabularis-extended://` deep links so a registry's
             // "Open in App" button can hand us a plugin slug + version.
             // The handler emits a frontend event; the React side opens the
             // install confirmation modal. See `plugins::deep_link`.
@@ -381,13 +390,13 @@ pub fn run() {
             // On Linux/Windows the scheme is only auto-registered when the
             // app is installed from a bundled package. Under `tauri dev`
             // the binary lives in `target/debug/...`, so call
-            // `register("tabularis")` here — it writes the desktop / xdg-mime
+            // `register("tabularis-extended")` here — it writes the desktop / xdg-mime
             // entry pointing at the current binary so Firefox & friends can
-            // route `tabularis://...` to us. The call is a no-op on macOS
+            // route `tabularis-extended://...` to us. The call is a no-op on macOS
             // (handled by Info.plist) and idempotent across restarts.
             //
             // Inside Snap/Flatpak the exported `.desktop` entry already
-            // carries `MimeType=x-scheme-handler/tabularis`, and the sandbox
+            // carries `MimeType=x-scheme-handler/tabularis-extended`, and the sandbox
             // has neither `xdg-mime` nor write access to the host's
             // mimeapps.list — so skip the call instead of logging a failure.
             {
@@ -397,12 +406,12 @@ pub fn run() {
                 #[cfg(any(target_os = "linux", all(debug_assertions, target_os = "windows")))]
                 match crate::sandbox::current() {
                     Some(sandbox) => log::info!(
-                        "Skipping tabularis:// scheme registration: handled by the {} desktop entry",
+                        "Skipping tabularis-extended:// scheme registration: handled by the {} desktop entry",
                         sandbox.name()
                     ),
                     None => {
-                        if let Err(e) = deep_link.register("tabularis") {
-                            log::warn!("Failed to register tabularis:// scheme: {}", e);
+                        if let Err(e) = deep_link.register(plugins::deep_link::DEEP_LINK_SCHEME) {
+                            log::warn!("Failed to register tabularis-extended:// scheme: {}", e);
                         }
                     }
                 }
@@ -415,7 +424,7 @@ pub fn run() {
                     }
                 });
                 // Cold-start path: when the OS launched us *because of* a
-                // tabularis:// URL, on_open_url won't fire — the URL is
+                // tabularis-extended:// URL, on_open_url won't fire — the URL is
                 // already consumed by the launch handshake. Pull it out via
                 // get_current() and route it through the same handler.
                 if let Ok(Some(urls)) = deep_link.get_current() {

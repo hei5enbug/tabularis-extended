@@ -126,7 +126,7 @@ fn argv(arguments: &[&str]) -> Vec<std::ffi::OsString> {
 fn 딥링크_위치_인자와_알_수_없는_인자는_일반_실행에서_기본값으로_복구한다() {
     // given
     let arguments = [
-        vec!["tabularis", "tabularis://connect?id=1"],
+        vec!["tabularis", "tabularis-extended://connect?id=1"],
         vec!["tabularis", "--unknown"],
         vec!["tabularis", "-psn_0_12345"],
     ];
@@ -186,4 +186,30 @@ fn 유효한_서비스_호출은_엄격_경로로_해석한다() {
     assert!(
         matches!(&actual.command,Some(Command::Service(args)) if args.request.as_deref()==Some("request.json"))
     );
+}
+
+#[test]
+fn 드라이버_목록_플래그는_psn_인자가_있어도_파싱한다() {
+    // given
+    let arguments = [
+        vec!["tabularis-extended", "--list-drivers"],
+        vec!["tabularis-extended", "-psn_0_12345", "--list-drivers"],
+        vec!["tabularis-extended", "--list-drivers", "--unknown-extra"],
+    ];
+    // when
+    let actual = arguments.map(|arguments| parse_args(argv(&arguments)).unwrap());
+    // then
+    assert!(actual[0].list_drivers && actual[1].list_drivers);
+    assert!(actual.iter().all(|args| args.command.is_none() && !args.mcp));
+    assert!(!actual[2].list_drivers, "an unknown argument falls back to GUI defaults");
+}
+#[test]
+fn 드라이버_목록은_기본_실행과_서비스_모드에서_꺼져_있고_서비스와는_배타적이다() {
+    // given
+    let default = parse_args(argv(&["tabularis-extended"])).unwrap();
+    let service = parse_args(argv(&["tabularis-extended", "service", "--stdio"])).unwrap();
+    let mixed = parse_args(argv(&["tabularis-extended", "--list-drivers", "service", "--stdio"]));
+    // then
+    assert!(!default.list_drivers && !service.list_drivers);
+    assert!(mixed.is_err());
 }

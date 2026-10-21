@@ -21,4 +21,11 @@ describe("versionCompare", () => {
     expect(isVersionAtMost("0.10.0", "0.10.0")).toBe(true);
     expect(isVersionAtMost("0.10.1", "0.10.0")).toBe(false);
   });
+
+  it("ignores build metadata such as the fork suffix", () => {
+    expect(compareVersions("0.27.0+extended.1", "0.27.0")).toBe(0);
+    expect(isVersionNewer("0.27.0+extended.1", "0.27.0")).toBe(false);
+    expect(isVersionAtMost("0.27.0", "0.27.0+extended.1")).toBe(true);
+    expect(isVersionNewer("0.27.1", "0.27.0+extended.1")).toBe(true);
+  });
 });

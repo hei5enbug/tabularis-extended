@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 
 /**
  * Payload emitted by the Rust backend when the OS hands us a
- * `tabularis://install/<slug>?version=&registry=` URL. Field names match
+ * `tabularis-extended://install/<slug>?version=&registry=` URL. Field names match
  * the camelCased Serde rename of `plugins::deep_link::PluginInstallRequest`.
  */
 export interface DeepLinkInstallRequest {
@@ -42,7 +42,7 @@ export function useDeepLinkInstall(): UseDeepLinkInstallResult {
     let cleanup: UnlistenFn | null = null;
     let mounted = true;
 
-    // Live event listener for warm handoffs — a tabularis:// URL clicked
+    // Live event listener for warm handoffs — a tabularis-extended:// URL clicked
     // while the app is already running fires here.
     listen<DeepLinkInstallRequest>(EVENT_NAME, (event) => {
       if (!mounted) return;
@@ -61,7 +61,7 @@ export function useDeepLinkInstall(): UseDeepLinkInstallResult {
       });
 
     // Cold-start replay: when the OS launched Tabularis *because of* the
-    // tabularis:// URL, the event was emitted before this listener existed.
+    // tabularis-extended:// URL, the event was emitted before this listener existed.
     // The Rust side stashes it in app state; we drain it here.
     invoke<DeepLinkInstallRequest | null>("consume_pending_deep_link_install")
       .then((req) => {

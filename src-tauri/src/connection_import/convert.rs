@@ -287,11 +287,11 @@ mod tests {
             connections: vec![base_conn()],
             ..Default::default()
         };
-        let payload = build_payload(&env, &[res(0, "import")], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[res(0, "import")], &["postgresql".into()], &[]);
         assert_eq!(payload.connections.len(), 1);
         assert_eq!(payload.groups.len(), 1);
         let c = &payload.connections[0];
-        assert_eq!(c.params.driver, "postgres");
+        assert_eq!(c.params.driver, "postgresql");
         assert_eq!(c.group_id.as_deref(), Some(payload.groups[0].id.as_str()));
         assert_eq!(c.params.save_in_keychain, Some(false));
     }
@@ -303,7 +303,7 @@ mod tests {
             connections: vec![base_conn()],
             ..Default::default()
         };
-        let payload = build_payload(&env, &[res(0, "skip")], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[res(0, "skip")], &["postgresql".into()], &[]);
         assert!(payload.connections.is_empty());
     }
 
@@ -329,7 +329,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let payload = build_payload(&env, &[res(0, "import")], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[res(0, "import")], &["postgresql".into()], &[]);
         assert_eq!(payload.ssh_connections.len(), 1);
         let ssh = &payload.ssh_connections[0];
         let conn = &payload.connections[0];
@@ -350,7 +350,7 @@ mod tests {
         let mut r = res(0, "import");
         r.group_id = Some("existing-group".into());
         let groups = [group("existing-group", "My Group")];
-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
+        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
         // No new group is minted; the connection joins the chosen one.
         assert!(payload.groups.is_empty());
         assert_eq!(
@@ -368,7 +368,7 @@ mod tests {
         };
         let mut r = res(0, "import");
         r.new_group_name = Some("Fresh Group".into());
-        let payload = build_payload(&env, &[r], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[r], &["postgresql".into()], &[]);
         assert_eq!(payload.groups.len(), 1);
         assert_eq!(payload.groups[0].name, "Fresh Group");
         assert_eq!(
@@ -388,7 +388,7 @@ mod tests {
         r.new_group_name = Some("Child".into());
         r.new_group_parent_id = Some("parent-id".into());
         let groups = [group("parent-id", "Parent")];
-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
+        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
         // A new nested group is minted; the parent stays untouched.
         assert_eq!(payload.groups.len(), 1);
         assert_eq!(payload.groups[0].name, "Child");
@@ -415,7 +415,7 @@ mod tests {
             subgroup("child-id", "Child", "parent-id"),
             subgroup("other-child", "Child", "somewhere-else"),
         ];
-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
+        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
         // The existing subgroup under the requested parent is reused.
         assert!(payload.groups.is_empty());
         assert_eq!(payload.connections[0].group_id.as_deref(), Some("child-id"));
@@ -431,7 +431,7 @@ mod tests {
         let mut r = res(0, "import");
         r.new_group_name = Some("  my group ".into()); // case/space-insensitive match
         let groups = [group("g1", "My Group")];
-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
+        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
         assert!(payload.groups.is_empty());
         assert_eq!(payload.connections[0].group_id.as_deref(), Some("g1"));
     }
@@ -446,7 +446,7 @@ mod tests {
         };
         let mut r = res(0, "import");
         r.group_id = Some(String::new());
-        let payload = build_payload(&env, &[r], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[r], &["postgresql".into()], &[]);
         assert!(payload.groups.is_empty());
         assert_eq!(payload.connections[0].group_id, None);
     }
@@ -458,7 +458,7 @@ mod tests {
             connections: vec![base_conn()],
             ..Default::default()
         };
-        let payload = build_payload(&env, &[res(0, "import")], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[res(0, "import")], &["postgresql".into()], &[]);
         assert_eq!(payload.groups.len(), 1);
         assert_eq!(payload.groups[0].name, "Work");
     }
@@ -472,7 +472,7 @@ mod tests {
         };
         let mut r = res(0, "replace");
         r.replace_existing_id = Some("existing-123".into());
-        let payload = build_payload(&env, &[r], &["postgres".into()], &[]);
+        let payload = build_payload(&env, &[r], &["postgresql".into()], &[]);
         assert_eq!(payload.connections[0].id, "existing-123");
     }
 }

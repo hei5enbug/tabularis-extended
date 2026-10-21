@@ -6594,8 +6594,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "tabularis"
-version = "0.27.0"
+name = "tabularis-extended"
+version = "0.27.0+extended.1"
 dependencies = [
  "aes-gcm",
  "argon2",

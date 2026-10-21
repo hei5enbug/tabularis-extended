@@ -32,8 +32,8 @@ pub async fn open_connection_window(
     }
 
     let window_title = match title {
-        Some(t) => format!("tabularis - {}", t),
-        None => "tabularis".to_string(),
+        Some(t) => format!("Tabularis Extended - {}", t),
+        None => "Tabularis Extended".to_string(),
     };
 
     let url = format!("/?connect={}", encode(&connection_id));

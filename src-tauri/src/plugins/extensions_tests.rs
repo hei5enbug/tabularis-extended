@@ -4,7 +4,7 @@ use super::*;
 use serde_json::json;
 
 fn extension() -> Value {
-    json!({"id":"spatial-fixture","name":"Spatial fixture","version":"1.0.0","description":"fixture","kind":"extension","min_runtime_version":"0.26.1-spatial.1","required_service_protocol":1,"ui_extensions":[{"slot":"data-grid.toolbar.actions","module":"ui/index.js"}],"ui_assets":[{"path":"ui/style.css","mime":"text/css"},{"path":"ui/worker.js","mime":"application/javascript"}]})
+    json!({"id":"spatial-fixture","name":"Spatial fixture","version":"1.0.0","description":"fixture","kind":"extension","min_runtime_version":"0.27.0+extended.1","required_service_protocol":1,"ui_extensions":[{"slot":"data-grid.toolbar.actions","module":"ui/index.js"}],"ui_assets":[{"path":"ui/style.css","mime":"text/css"},{"path":"ui/worker.js","mime":"application/javascript"}]})
 }
 fn bundle(root: &Path, relative: &str, value: &Value) -> PathBuf {
     let path = root.join(relative);

@@ -2,6 +2,7 @@
 //! connection-resolution error paths.
 
 use super::*;
+use crate::drivers::{mysql, postgres, sqlite};
 use serde_json::{json, Map, Value};
 
 #[test]

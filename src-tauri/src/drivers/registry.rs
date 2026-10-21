@@ -51,6 +51,23 @@ pub async fn register_driver(driver: impl DatabaseDriver + 'static) {
     reg.insert(id, Arc::new(driver));
 }
 
+/// Driver ids the host registers itself. PostgreSQL and SQL Server are not
+/// listed: they exist only as plugins (`postgresql`, `sqlserver`).
+pub const BUILTIN_DRIVER_IDS: [&str; 2] = ["mysql", "sqlite"];
+
+/// Registers the built-in drivers: MySQL and SQLite.
+pub async fn register_builtin_drivers() {
+    register_driver(crate::drivers::mysql::MysqlDriver::new()).await;
+    register_driver(crate::drivers::sqlite::SqliteDriver::new()).await;
+}
+
+/// Startup registration shared by the GUI and the standalone MCP process:
+/// the built-in drivers first, then whatever `load_plugins` registers.
+pub async fn register_startup_drivers(load_plugins: impl std::future::Future<Output = ()>) {
+    register_builtin_drivers().await;
+    load_plugins.await;
+}
+
 /// Look up a driver by its `id` (matches `ConnectionParams.driver`).
 /// Returns `None` if no driver with that id is registered.
 pub async fn get_driver(id: &str) -> Option<Arc<dyn DatabaseDriver>> {

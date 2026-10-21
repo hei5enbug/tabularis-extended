@@ -5355,7 +5355,7 @@ pub async fn open_er_diagram_window(
         .map(|s| format!("/{}", s))
         .unwrap_or_default();
     let title = format!(
-        "tabularis - {} ({}{})",
+        "Tabularis Extended - {} ({}{})",
         database_name, connection_name, schema_suffix
     );
     let mut url = format!(

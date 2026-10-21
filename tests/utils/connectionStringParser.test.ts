@@ -183,19 +183,34 @@ describe("connectionStringParser", () => {
     });
 
     it("should resolve aliases against builtin drivers when no drivers are provided", () => {
-      const postgresql = parseConnectionString(
-        "postgresql://user@host/db",
-      );
-      expect(postgresql.success).toBe(true);
-      if (postgresql.success) {
-        expect(postgresql.params.driver).toBe("postgres");
-      }
-
       const mariadb = parseConnectionString("mariadb://user@host/db");
       expect(mariadb.success).toBe(true);
       if (mariadb.success) {
         expect(mariadb.params.driver).toBe("mysql");
       }
+    });
+
+    it("PostgreSQL 플러그인이 없으면 PostgreSQL URI를 지원하지 않는다", () => {
+      // given
+      const uri = "postgresql://user@host/db";
+
+      // when
+      const result = parseConnectionString(uri);
+
+      // then
+      expect(result.success).toBe(false);
+    });
+
+    it("공식 PostgreSQL 플러그인이 있으면 postgres URI도 공식 드라이버로 해석한다", () => {
+      // given
+      const drivers = [createRemoteDriver("postgresql", "postgres://user:pass@localhost:5432/db")];
+
+      // when
+      const result = parseConnectionString("postgres://user@host/db", drivers);
+
+      // then
+      expect(result.success).toBe(true);
+      if (result.success) expect(result.params.driver).toBe("postgresql");
     });
 
     it("should parse sqlite3:// as sqlite via protocol alias", () => {
@@ -522,7 +537,8 @@ describe("connectionStringParser", () => {
 
     it("should include aliases for builtin drivers when no drivers are provided", () => {
       const protocols = getSupportedConnectionStringProtocols();
-      expect(protocols).toContain("postgresql");
+      expect(protocols).not.toContain("postgresql");
+      expect(protocols).not.toContain("postgres");
       expect(protocols).toContain("mariadb");
     });
   });

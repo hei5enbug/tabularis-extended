@@ -36,7 +36,7 @@ interface PluginInstallConfirmModalProps {
 type PluginPreview = RegistryPluginWithStatus;
 
 /**
- * Shown when a `tabularis://install/<slug>` URL arrives via the OS deep-link
+ * Shown when a `tabularis-extended://install/<slug>` URL arrives via the OS deep-link
  * handler. The user must explicitly confirm — a malicious or accidental link
  * cannot trigger a silent install.
  *

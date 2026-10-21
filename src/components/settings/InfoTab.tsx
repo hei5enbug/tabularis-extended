@@ -38,6 +38,9 @@ import { OpenSourceLibrariesModal } from "../modals/OpenSourceLibrariesModal";
 import { SocialLinks } from "../SocialLinks";
 import { TONE_SOFT_BG_CLASS, TONE_TEXT_CLASS, type Tone } from "../../utils/tones";
 
+/** Installation source the host reports when the official update feed is disabled. */
+const UPDATES_DISABLED_SOURCE = "tabularis-extended";
+
 export function InfoTab() {
   const { t } = useTranslation();
   const { settings, updateSetting } = useSettings();
@@ -80,7 +83,7 @@ export function InfoTab() {
         <div className="p-2">
           <img
             src="/logo.png"
-            alt="tabularis"
+            alt="Tabularis Extended"
             className="w-16 h-16 rounded-2xl mx-auto mb-4 shadow-lg shadow-accent-primary/30"
             style={{
               backgroundColor: !currentTheme?.id?.includes("-light")
@@ -220,15 +223,19 @@ export function InfoTab() {
           {installationSource ? (
             <div className="bg-accent-warning/10 border border-accent-warning/30 px-4 py-3 rounded-lg">
               <div className="text-sm font-medium text-accent-warning">
-                {t("update.managedByPackageManager", {
-                  source:
-                    ({ aur: "AUR", snap: "Snap Store", flatpak: "Flathub" } as Record<string, string>)[
-                      installationSource
-                    ] ?? installationSource,
-                })}
+                {installationSource === UPDATES_DISABLED_SOURCE
+                  ? t("update.disabledInExtended")
+                  : t("update.managedByPackageManager", {
+                      source:
+                        ({ aur: "AUR", snap: "Snap Store", flatpak: "Flathub" } as Record<string, string>)[
+                          installationSource
+                        ] ?? installationSource,
+                    })}
               </div>
               <div className="text-xs mt-1 text-accent-warning/70">
-                {t("update.managedByPackageManagerDesc")}
+                {installationSource === UPDATES_DISABLED_SOURCE
+                  ? t("update.disabledInExtendedDesc")
+                  : t("update.managedByPackageManagerDesc")}
               </div>
             </div>
           ) : (

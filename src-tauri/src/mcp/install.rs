@@ -108,6 +108,11 @@ fn get_all_clients() -> Vec<McpClient> {
     ]
 }
 
+/// Key under which the fork registers itself in MCP client configs. The
+/// official app uses `tabularis`; that entry is never read, replaced or
+/// removed from here.
+pub(crate) const MCP_SERVER_KEY: &str = "tabularis-extended";
+
 fn is_tabularis_in_mcp_servers(path: &PathBuf) -> bool {
     if !path.exists() {
         return false;
@@ -116,7 +121,7 @@ fn is_tabularis_in_mcp_servers(path: &PathBuf) -> bool {
         .ok()
         .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
         .and_then(|j| j.get("mcpServers").cloned())
-        .map(|s| s.get("tabularis").is_some())
+        .map(|s| s.get(MCP_SERVER_KEY).is_some())
         .unwrap_or(false)
 }
 
@@ -128,9 +133,9 @@ fn is_command_client_installed(path: &PathBuf) -> bool {
     }
     fs::read_to_string(path)
         .map(|c| {
-            c.contains("\"tabularis\"")
-                || c.contains("[mcp_servers.tabularis]")
-                || c.contains("[mcp_servers.\"tabularis\"]")
+            c.contains(&format!("\"{MCP_SERVER_KEY}\""))
+                || c.contains(&format!("[mcp_servers.{MCP_SERVER_KEY}]"))
+                || c.contains(&format!("[mcp_servers.\"{MCP_SERVER_KEY}\"]"))
         })
         .unwrap_or(false)
 }
@@ -147,7 +152,7 @@ fn build_command_client_invocation(
                 "add".to_string(),
                 "--scope".to_string(),
                 "user".to_string(),
-                "tabularis".to_string(),
+                MCP_SERVER_KEY.to_string(),
                 exe_str.to_string(),
                 "--".to_string(),
                 "--mcp".to_string(),
@@ -158,7 +163,7 @@ fn build_command_client_invocation(
             vec![
                 "mcp".to_string(),
                 "add".to_string(),
-                "tabularis".to_string(),
+                MCP_SERVER_KEY.to_string(),
                 "--".to_string(),
                 exe_str.to_string(),
                 "--mcp".to_string(),
@@ -213,6 +218,42 @@ pub async fn get_mcp_status<R: Runtime>(
     Ok(statuses)
 }
 
+/// Adds the fork's server entry to a JSON client config and leaves every
+/// other entry, including the official `tabularis` one, as it was. An
+/// unreadable or non-JSON config is refused instead of being replaced.
+fn write_server_entry(config_path: &std::path::Path, exe_str: &str) -> Result<(), String> {
+    let mut config: serde_json::Value = if config_path.exists() {
+        let content = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
+        if content.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&content)
+                .map_err(|e| format!("Config is not valid JSON, left unchanged: {e}"))?
+        }
+    } else {
+        json!({})
+    };
+
+    let root = config
+        .as_object_mut()
+        .ok_or("Config root is not a JSON object, left unchanged")?;
+    let servers = root
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("mcpServers is not a JSON object, left unchanged")?;
+    servers.insert(
+        MCP_SERVER_KEY.to_string(),
+        json!({
+            "command": exe_str,
+            "args": ["--mcp"]
+        }),
+    );
+
+    let new_content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    fs::write(config_path, new_content).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn install_mcp_config<R: Runtime>(
     _app: AppHandle<R>,
@@ -261,24 +302,7 @@ pub async fn install_mcp_config<R: Runtime>(
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let mut config: serde_json::Value = if config_path.exists() {
-        let content = fs::read_to_string(config_path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&content).unwrap_or(json!({}))
-    } else {
-        json!({})
-    };
-
-    if config.get("mcpServers").is_none() {
-        config["mcpServers"] = json!({});
-    }
-
-    config["mcpServers"]["tabularis"] = json!({
-        "command": exe_str,
-        "args": ["--mcp"]
-    });
-
-    let new_content = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    fs::write(config_path, new_content).map_err(|e| e.to_string())?;
+    write_server_entry(config_path, &exe_str)?;
 
     Ok(client.name.to_string())
 }
@@ -309,18 +333,21 @@ mod tests {
     #[test]
     fn builds_codex_manual_command() {
         assert_eq!(
-            build_manual_command("codex", "/Applications/Tabularis.app/tabularis").as_deref(),
-            Some("codex mcp add tabularis -- /Applications/Tabularis.app/tabularis --mcp")
+            build_manual_command("codex", "/Applications/Tabularis Extended.app/tabularis-extended").as_deref(),
+            Some("codex mcp add tabularis-extended -- /Applications/Tabularis Extended.app/tabularis-extended --mcp")
         );
     }
 
     #[test]
     fn builds_claude_code_manual_command() {
         assert_eq!(
-            build_manual_command("claude_code", "/Applications/Tabularis.app/tabularis")
-                .as_deref(),
+            build_manual_command(
+                "claude_code",
+                "/Applications/Tabularis Extended.app/tabularis-extended"
+            )
+            .as_deref(),
             Some(
-                "claude mcp add --scope user tabularis /Applications/Tabularis.app/tabularis -- --mcp"
+                "claude mcp add --scope user tabularis-extended /Applications/Tabularis Extended.app/tabularis-extended -- --mcp"
             )
         );
     }
@@ -332,13 +359,79 @@ mod tests {
         fs::write(
             &config_path,
             r#"
-[mcp_servers.tabularis]
-command = "/Applications/Tabularis.app/tabularis"
+[mcp_servers.tabularis-extended]
+command = "/Applications/Tabularis Extended.app/tabularis-extended"
 args = ["--mcp"]
 "#,
         )
         .unwrap();
 
         assert!(is_command_client_installed(&config_path));
+    }
+
+    #[test]
+    fn official_entries_do_not_count_as_the_fork_being_installed() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let toml = temp_dir.path().join("config.toml");
+        fs::write(&toml, "[mcp_servers.tabularis]\ncommand = \"/official\"\n").unwrap();
+        let json = temp_dir.path().join("claude.json");
+        fs::write(
+            &json,
+            r#"{"mcpServers":{"tabularis":{"command":"/official","args":["--mcp"]}}}"#,
+        )
+        .unwrap();
+
+        assert!(!is_command_client_installed(&toml));
+        assert!(!is_command_client_installed(&json));
+        assert!(!is_tabularis_in_mcp_servers(&json));
+    }
+
+    #[test]
+    fn install_keeps_an_existing_official_entry_and_adds_the_fork_key() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("mcp.json");
+        let official = json!({"command": "/Applications/Tabularis.app/tabularis", "args": ["--mcp"], "env": {"A": "1"}});
+        let other = json!({"command": "other"});
+        fs::write(
+            &path,
+            serde_json::to_string_pretty(&json!({
+                "mcpServers": {"tabularis": official, "other": other},
+                "theme": "dark"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        write_server_entry(&path, "/fork/tabularis-extended").unwrap();
+
+        let after: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_string(&after["mcpServers"]["tabularis"]).unwrap(),
+            serde_json::to_string(&official).unwrap()
+        );
+        assert_eq!(after["mcpServers"]["other"], other);
+        assert_eq!(after["theme"], "dark");
+        assert_eq!(
+            after["mcpServers"][MCP_SERVER_KEY],
+            json!({"command": "/fork/tabularis-extended", "args": ["--mcp"]})
+        );
+        assert!(is_tabularis_in_mcp_servers(&path));
+    }
+
+    #[test]
+    fn install_creates_a_missing_config_and_refuses_invalid_ones() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let fresh = temp_dir.path().join("fresh.json");
+        write_server_entry(&fresh, "/fork/tabularis-extended").unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&fresh).unwrap()).unwrap();
+        assert_eq!(written["mcpServers"][MCP_SERVER_KEY]["args"], json!(["--mcp"]));
+        assert!(written["mcpServers"].get("tabularis").is_none());
+
+        let broken = temp_dir.path().join("broken.json");
+        fs::write(&broken, "{not json").unwrap();
+        assert!(write_server_entry(&broken, "/fork/tabularis-extended").is_err());
+        assert_eq!(fs::read_to_string(&broken).unwrap(), "{not json");
     }
 }

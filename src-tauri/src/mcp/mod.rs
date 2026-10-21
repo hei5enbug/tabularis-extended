@@ -9,7 +9,6 @@ use crate::config::{
 use crate::credential_cache;
 use crate::drivers::driver_trait::{DatabaseDriver, SqlDialect};
 use crate::drivers::registry as driver_registry;
-use crate::drivers::{mysql, postgres, sqlite};
 use crate::heartbeat;
 use crate::models::{ConnectionParams, K8sConnection, SshConnection};
 use crate::paths;
@@ -329,17 +328,16 @@ async fn resolve_db_params(
     Ok((conn, db_params))
 }
 
-/// Populate the driver registry for the standalone MCP subprocess: the three
-/// built-in drivers plus any installed plugin drivers, honoring the user's
-/// `active_external_drivers` preference. Without this, MCP can only reach
-/// mysql/postgres/sqlite connections — every other driver fails with
-/// "Unsupported driver".
+/// Populate the driver registry for the standalone MCP subprocess: the
+/// built-in MySQL and SQLite drivers plus any installed plugin drivers,
+/// honoring the user's `active_external_drivers` preference. Without this,
+/// MCP can only reach mysql/sqlite connections — every other driver fails
+/// with "Unsupported driver".
 pub(crate) async fn register_drivers_for_mcp() {
-    driver_registry::register_driver(mysql::MysqlDriver::new()).await;
-    driver_registry::register_driver(postgres::PostgresDriver::new()).await;
-    driver_registry::register_driver(sqlite::SqliteDriver::new()).await;
-
-    plugins::manager::reload_plugins_from_disk_config().await;
+    driver_registry::register_startup_drivers(
+        plugins::manager::reload_plugins_from_disk_config(),
+    )
+    .await;
 
     // Must run after driver registration above — the migration resolves each
     // connection's driver dialect via the same registry, so it needs plugin

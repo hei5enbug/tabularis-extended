@@ -10,7 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::{extensions, install_cancellation, installer, runtime_version};
 
-const HOST_VERSION: &str = "0.26.1-spatial.1";
+const HOST_VERSION: &str = "0.27.0+extended.1";
 const OUTPUT_LIMIT: u64 = 8 * 1024 * 1024;
 const POISONING_KEYS: [&str; 8] = [
     "NODE_OPTIONS",
@@ -41,7 +41,7 @@ fn 배포_호스트_버전과_컴파일러_최소_버전은_다섯_메타데이�
         cargo.contains(&format!("version = \"{HOST_VERSION}\"")),
         cargo.contains("rust-version = \"1.96.0\""),
         lock.contains(&format!(
-            "name = \"tabularis\"\nversion = \"{HOST_VERSION}\""
+            "name = \"tabularis-extended\"\nversion = \"{HOST_VERSION}\""
         )),
         frontend.contains(&format!("APP_VERSION = \"{HOST_VERSION}\"")),
         runtime_version::evaluate_min_runtime_version(

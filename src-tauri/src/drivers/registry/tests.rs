@@ -156,3 +156,47 @@ fn local_path_driver_flag_tracks_set_and_clear() {
     set_local_path_driver(id, false);
     assert!(!is_local_path_driver(id));
 }
+
+fn ids_of_builtin_registrations(manifests: &[PluginManifest]) -> Vec<String> {
+    manifests
+        .iter()
+        .filter(|m| BUILTIN_DRIVER_IDS.contains(&m.id.as_str()))
+        .map(|m| m.id.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn builtin_registration_contains_only_mysql_and_sqlite() {
+    let _guard = REGISTRY_TEST_LOCK.lock().await;
+    register_builtin_drivers().await;
+
+    assert_eq!(BUILTIN_DRIVER_IDS, ["mysql", "sqlite"]);
+    let manifests = list_drivers().await;
+    assert_eq!(ids_of_builtin_registrations(&manifests), ["mysql", "sqlite"]);
+    assert!(manifests
+        .iter()
+        .filter(|m| m.is_builtin)
+        .all(|m| BUILTIN_DRIVER_IDS.contains(&m.id.as_str())));
+    for retired in ["postgres", "postgresql", "sqlserver", "mssql"] {
+        assert!(get_driver(retired).await.is_none(), "{retired} must not be built in");
+    }
+}
+
+#[tokio::test]
+async fn startup_registration_runs_builtins_before_plugins_for_gui_and_mcp() {
+    let _guard = REGISTRY_TEST_LOCK.lock().await;
+    // The GUI passes `load_plugins_with_configs`, the MCP process passes
+    // `reload_plugins_from_disk_config`; both go through this function.
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = observed.clone();
+    register_startup_drivers(async move {
+        seen.lock().unwrap().push((
+            is_registered("mysql").await,
+            is_registered("sqlite").await,
+            is_registered("postgres").await,
+        ));
+    })
+    .await;
+
+    assert_eq!(*observed.lock().unwrap(), [(true, true, false)]);
+}

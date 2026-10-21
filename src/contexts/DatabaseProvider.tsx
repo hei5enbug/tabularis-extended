@@ -149,7 +149,7 @@ export const DatabaseProvider = ({ children }: { children: ReactNode }) => {
             usesMultiDatabaseLayout(activeCapabilities, selectedDatabases)
               ? (activeSchema ?? activeDatabaseName)
               : activeDatabaseName;
-          title = `tabularis - ${activeConnectionName} (${dbDisplay}${schemaSuffix})`;
+          title = `Tabularis Extended - ${activeConnectionName} (${dbDisplay}${schemaSuffix})`;
         }
         await invoke('set_window_title', { title });
       } catch (e) {

@@ -12,7 +12,7 @@ use std::{
 };
 
 pub const SERVICE_PROTOCOL: u64 = 1;
-pub const EXTENSION_RUNTIME_VERSION: &str = "0.26.1-spatial.1";
+pub const EXTENSION_RUNTIME_VERSION: &str = "0.27.0+extended.1";
 pub const ASSET_MAX_BYTES: u64 = 16 * 1024 * 1024;
 static ACTIVE: Lazy<Mutex<HashMap<String, PluginManifest>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));

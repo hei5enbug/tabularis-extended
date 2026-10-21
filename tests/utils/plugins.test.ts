@@ -36,6 +36,11 @@ describe('plugins', () => {
   });
 
   describe('versionGte', () => {
+    it('should ignore build metadata on the host version', () => {
+      expect(versionGte('0.27.0+extended.1', '0.27.0')).toBe(true);
+      expect(versionGte('0.27.0+extended.1', '0.27.1')).toBe(false);
+    });
+
     it('should return true for equal versions', () => {
       expect(versionGte('1.0.0', '1.0.0')).toBe(true);
       expect(versionGte('0.9.1', '0.9.1')).toBe(true);

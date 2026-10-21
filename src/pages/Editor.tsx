@@ -659,7 +659,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
   useEffect(() => {
     const updateTitle = async () => {
       try {
-        let title = "tabularis";
+        let title = "Tabularis Extended";
         if (activeConnectionName && activeDatabaseName) {
           const schemaSuffix =
             activeSchema && activeCapabilities?.schemas === true
@@ -672,7 +672,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
           } else {
             dbDisplay = activeDatabaseName;
           }
-          title = `tabularis - ${activeConnectionName} (${dbDisplay}${schemaSuffix})`;
+          title = `Tabularis Extended - ${activeConnectionName} (${dbDisplay}${schemaSuffix})`;
         }
         await invoke("set_window_title", { title });
       } catch (e) {

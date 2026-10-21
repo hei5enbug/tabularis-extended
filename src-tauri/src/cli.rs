@@ -1,7 +1,7 @@
 //! Command-line argument parsing for the Tabularis binary.
 //!
 //! Keeping this in its own module means `lib.rs` does not have to know about
-//! clap, and the flag surface (`--mcp`, `--debug`, `--explain`, `--help`,
+//! clap, and the flag surface (`--mcp`, `--list-drivers`, `--debug`, `--explain`, `--help`,
 //! `--version`) lives in one place.
 
 use clap::{Parser, Subcommand};
@@ -14,6 +14,10 @@ pub struct Args {
     /// Start in MCP Server mode (Model Context Protocol)
     #[arg(long)]
     pub mcp: bool,
+
+    /// List driver manifests without connecting to a database, then exit
+    #[arg(long)]
+    pub list_drivers: bool,
 
     /// Enable debug logging (including sqlx queries)
     #[arg(long)]
@@ -90,6 +94,7 @@ impl Args {
         Self {
             command: None,
             mcp: false,
+            list_drivers: false,
             debug: false,
             explain: None,
         }
@@ -145,8 +150,8 @@ pub(crate) fn parse_args(argv: Vec<std::ffi::OsString>) -> Result<Args, clap::Er
             return Err(service_error("Invalid service arguments"));
         }
     }
-    if args.mcp && args.command.is_some() {
-        return Err(service_error("MCP and service modes are exclusive"));
+    if (args.mcp || args.list_drivers) && args.command.is_some() {
+        return Err(service_error("MCP, driver listing, and service modes are exclusive"));
     }
     Ok(args)
 }
@@ -156,7 +161,7 @@ pub(crate) fn parse_args(argv: Vec<std::ffi::OsString>) -> Result<Args, clap::Er
 /// - `--help` / `--version` surface as `Err(DisplayHelp|DisplayVersion)` with the
 ///   formatted message attached; let clap print them and exit cleanly.
 /// - Any other parse failure of a non-service launch falls back to defaults so
-///   that GUI launches (e.g. macOS passing `-psn_*`, or a `tabularis://` deep
+///   that GUI launches (e.g. macOS passing `-psn_*`, or a `tabularis-extended://` deep
 ///   link passed as a positional argument) still reach the Tauri builder.
 /// - The `service` subcommand is strict: invalid arguments exit with an error.
 pub fn parse() -> Args {

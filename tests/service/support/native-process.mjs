@@ -163,7 +163,7 @@ function provision(inputs, root) {
   const declarationsMatch = (actual, expected, key) => Array.isArray(actual) && actual.length === expected.length
     && expected.every((entry) => actual.filter((value) => value?.[key] === entry[key] && Object.keys(value).length === Object.keys(entry).length && Object.entries(entry).every(([name, value]) => value === actual.find((item) => item?.[key] === entry[key])?.[name])).length === 1);
   requireCondition(spatial.id === "spatial" && spatial.kind === "extension" && spatial.service_protocol === 1 && spatial.required_service_protocol === 1
-    && spatial.min_runtime_version === "0.26.1-spatial.1" && declarationsMatch(spatial.ui_extensions, expectedSlots, "slot") && declarationsMatch(spatial.ui_assets, expectedAssets, "path")
+    && spatial.min_runtime_version === "0.27.0+extended.1" && declarationsMatch(spatial.ui_extensions, expectedSlots, "slot") && declarationsMatch(spatial.ui_assets, expectedAssets, "path")
     && Array.isArray(release.files) && release.files.length === entries.size - 1, "SPATIAL_PACKAGE_NOT_READY");
   const seen = new Set();
   for (const file of release.files) {

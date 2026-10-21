@@ -38,7 +38,7 @@ export function canUpdateToLatest(
 
 /** Returns true if versionA >= versionB (semver comparison) */
 export function versionGte(versionA: string, versionB: string): boolean {
-  const parse = (v: string) => v.split(".").map((n) => parseInt(n, 10) || 0);
+  const parse = (v: string) => v.split("+")[0].split(".").map((n) => parseInt(n, 10) || 0);
   const a = parse(versionA);
   const b = parse(versionB);
   const len = Math.max(a.length, b.length);

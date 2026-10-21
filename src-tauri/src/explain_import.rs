@@ -86,7 +86,7 @@ pub fn spawn_visual_explain_window<R: Runtime, M: Manager<R>>(
         "visual-explain",
         WebviewUrl::App("/visual-explain".into()),
     )
-    .title("tabularis - Visual Explain")
+    .title("Tabularis Extended - Visual Explain")
     .inner_size(1280.0, 820.0)
     .min_inner_size(900.0, 600.0)
     .center()

@@ -2,7 +2,9 @@ use keyring::Entry;
 
 use crate::sandbox::{self, Sandbox};
 
-const SERVICE_NAME: &str = "tabularis";
+/// Keychain service of the fork. The official app stores its secrets under
+/// `tabularis`; sharing that name would expose or overwrite them.
+pub const SERVICE_NAME: &str = "tabularis-extended";
 
 fn service_secret_slot(
     connection_id: &str,

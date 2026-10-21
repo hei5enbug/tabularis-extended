@@ -16,7 +16,7 @@ use tauri::{AppHandle, Runtime};
 #[cfg(test)]
 mod tests;
 
-const SERVICE_NAME: &str = "tabularis";
+const SERVICE_NAME: &str = crate::keychain_utils::SERVICE_NAME;
 const KEYCHAIN_USER: &str = "connections-backup";
 
 pub const FILE_PREFIX: &str = "tabularis-backup-";

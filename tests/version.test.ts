@@ -8,19 +8,23 @@ describe('version', () => {
   });
 
   it('should follow semantic versioning format', () => {
-    // Semantic versioning: MAJOR.MINOR.PATCH
-    const semverRegex = /^\d+\.\d+\.\d+$/;
+    // Semantic versioning: MAJOR.MINOR.PATCH with optional build metadata
+    const semverRegex = /^\d+\.\d+\.\d+(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$/;
     expect(APP_VERSION).toMatch(semverRegex);
   });
 
   it('should have numeric version components', () => {
-    const parts = APP_VERSION.split('.');
+    const parts = APP_VERSION.split('+')[0].split('.');
     expect(parts).toHaveLength(3);
     
     parts.forEach(part => {
       expect(Number.isInteger(Number(part))).toBe(true);
       expect(Number(part)).toBeGreaterThanOrEqual(0);
     });
+  });
+
+  it('should carry the fork build metadata', () => {
+    expect(APP_VERSION).toBe('0.27.0+extended.1');
   });
 
   it('should not contain whitespace', () => {

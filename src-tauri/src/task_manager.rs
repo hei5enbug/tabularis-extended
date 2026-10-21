@@ -373,7 +373,7 @@ pub async fn open_task_manager_window(app: AppHandle) -> Result<(), String> {
         "task-manager",
         WebviewUrl::App("/task-manager".into()),
     )
-    .title("tabularis - Task Manager")
+    .title("Tabularis Extended - Task Manager")
     .inner_size(900.0, 600.0)
     .min_inner_size(700.0, 450.0)
     .center()

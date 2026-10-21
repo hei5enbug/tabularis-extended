@@ -73,7 +73,7 @@ pub fn export_logs(log_buffer: State<SharedLogBuffer>, file_path: String) -> Res
     }
 
     let mut content = String::new();
-    content.push_str("Tabularis Application Logs\n");
+    content.push_str("Tabularis Extended Application Logs\n");
     content.push_str("==========================\n\n");
 
     for entry in entries {

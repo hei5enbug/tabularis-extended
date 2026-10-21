@@ -1,5 +1,6 @@
 function parseVersion(version: string): number[] {
-  return version.split(".").map((part) => Number.parseInt(part, 10) || 0);
+  // Build metadata (`0.27.0+extended.1`) never affects precedence.
+  return version.split("+")[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
 }
 
 export function compareVersions(versionA: string, versionB: string): number {

@@ -233,7 +233,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             params: ConnectionParams {
-                driver: "postgres".into(),
+                driver: "postgresql".into(),
                 host: Some(host.into()),
                 port: Some(5432),
                 username: Some("user".into()),
@@ -278,7 +278,7 @@ mod tests {
             vec![conn("c1", "Prod", "db.example.com", "app", Some("g1"))],
         );
         let existing = vec![conn("existing", "Existing Prod", "db.example.com", "app", None)];
-        let preview = preview(&p, &existing, &["postgres".into()]);
+        let preview = preview(&p, &existing, &["postgresql".into()]);
 
         assert_eq!(preview.source_name, "Tabularis");
         assert_eq!(preview.items[0].group_name.as_deref(), Some("Work"));
