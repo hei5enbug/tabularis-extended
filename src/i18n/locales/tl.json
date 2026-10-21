@@ -241,8 +241,8 @@
   },
   "mcp": {
     "title": "Integrasyon ng MCP Server",
-    "subtitle": "Ikonekta ang Tabularis sa Claude Desktop, Cursor, at iba pa",
-    "description": "Pinapayagan ng Model Context Protocol (MCP) ang mga AI assistant (tulad ng Claude) na kumonekta sa iyong mga lokal na tool. Nag-e-expose ang Tabularis ng MCP server na pinapayagan ang AI na basahin ang schema ng iyong database at ligtas na magpatakbo ng mga query.",
+    "subtitle": "Ikonekta ang Tabularis Extended sa Claude Desktop, Cursor, at iba pa",
+    "description": "Pinapayagan ng Model Context Protocol (MCP) ang mga AI assistant (tulad ng Claude) na kumonekta sa iyong mga lokal na tool. Nag-e-expose ang Tabularis Extended ng MCP server na pinapayagan ang AI na basahin ang schema ng iyong database at ligtas na magpatakbo ng mga query.",
     "checking": "Sinusuri ang configuration...",
     "configPath": "Config File",
     "notFound": "Hindi nahanap ang config file (gumawa nang manual)",
@@ -276,7 +276,7 @@
       "allowListDesc": "Read-only ang lahat ng ibang koneksyon. Tanging ang mga naka-check dito ang maaaring magpatakbo ng write.",
       "approvalTitle": "Approval gate",
       "approvalMode": "Kailangan ng approval",
-      "approvalModeDesc": "I-pause ang mga write (o bawat query) at hilingin sa user na aprubahan sa loob ng Tabularis bago tumama sa database.",
+      "approvalModeDesc": "I-pause ang mga write (o bawat query) at hilingin sa user na aprubahan sa loob ng Tabularis Extended bago tumama sa database.",
       "modeOff": "Off",
       "modeWritesOnly": "Mga write lang",
       "modeAll": "Lahat ng query",
@@ -285,7 +285,7 @@
       "preflightExplain": "Pre-flight EXPLAIN",
       "preflightExplainDesc": "Magpatakbo ng EXPLAIN sa query bago ipakita ang approval modal para makita ng user ang execution plan.",
       "approvalAlwaysOnTop": "Dalhin sa harap ang approval dialog",
-      "approvalAlwaysOnTopDesc": "Kapag kailangan ng approval ang non-read MCP action, dalhin sa harap ang Tabularis at panatilihin itong nasa ibabaw ng ibang window pansamantala.",
+      "approvalAlwaysOnTopDesc": "Kapag kailangan ng approval ang non-read MCP action, dalhin sa harap ang Tabularis Extended at panatilihin itong nasa ibabaw ng ibang window pansamantala.",
       "approvalNotifySound": "Magpadala ng notification at tumugtog ng tunog",
       "approvalNotifySoundDesc": "Magpakita ng native system notification at tumugtog ng maikling alert sound kapag may bagong MCP approval request."
     }
@@ -744,7 +744,7 @@
     "plugins": {
       "runtimeTitle": "Runtime ng plugin",
       "callTimeout": "Timeout ng tawag",
-      "callTimeoutDesc": "Pinakamahabang oras na hinihintay ng Tabularis ang sagot ng plugin sa isang request (kasama ang mga query). Ilagay ang 0 para alisin ang limitasyon. Maaaring i-override ng bawat plugin ang value na ito sa sarili nitong settings.",
+      "callTimeoutDesc": "Pinakamahabang oras na hinihintay ng Tabularis Extended ang sagot ng plugin sa isang request (kasama ang mga query). Ilagay ang 0 para alisin ang limitasyon. Maaaring i-override ng bawat plugin ang value na ito sa sarili nitong settings.",
       "title": "Plugins",
       "overviewTitle": "Plugin Center",
       "overviewDesc": "Mag-install ng extension, pamahalaan ang plugin driver, at kontrolin ang runtime settings.",
@@ -919,16 +919,16 @@
       "changeFolder": "Palitan ang folder…",
       "openFolder": "Buksan ang folder",
       "resetToDefault": "Gamitin ang default na lokasyon",
-      "concurrencyWarning": "Binabasa ng Tabularis ang folder na ito sa pagsisimula. Iwasang magpatakbo ng dalawang instance sa parehong folder nang sabay, halimbawa sa dalawang makina habang nag-sync.",
+      "concurrencyWarning": "Binabasa ng Tabularis Extended ang folder na ito sa pagsisimula. Iwasang magpatakbo ng dalawang instance sa parehong folder nang sabay, halimbawa sa dalawang makina habang nag-sync.",
       "newFolder": "Bagong folder",
       "modeExisting": "Gamitin ang data na nasa folder na ito",
-      "modeExistingDesc": "May laman na itong Tabularis data, halimbawa na-sync mula sa ibang makina.",
+      "modeExistingDesc": "May laman na itong Tabularis Extended data, halimbawa na-sync mula sa ibang makina.",
       "modeCopy": "Kopyahin ang kasalukuyang data ko sa folder na ito",
       "modeCopyDesc": "Pinapanatili ang mga file na nasa folder na. Hindi kinokopya ang mga naka-install na plugin.",
       "modeEmpty": "Magsimula sa walang lamang folder",
       "apply": "Ilapat",
       "restartRequired": "Kailangan i-restart",
-      "restartRequiredDesc": "Gagamitin ng Tabularis ang {{path}} pagkatapos ng restart.",
+      "restartRequiredDesc": "Gagamitin ng Tabularis Extended ang {{path}} pagkatapos ng restart.",
       "restartNow": "I-restart ngayon"
     },
     "backup": {
@@ -991,7 +991,7 @@
       "core_other": "May {{count}} update sa core",
       "plugins_one": "May {{count}} update sa plugin",
       "plugins_other": "May {{count}} update sa mga plugin",
-      "coreDetails": "Available na ang Tabularis {{version}}. Buksan ang Impormasyon para tingnan ang update sa core.",
+      "coreDetails": "Available na ang Tabularis Extended {{version}}. Buksan ang Impormasyon para tingnan ang update sa core.",
       "pluginDetails_one": "May update para sa: {{plugins}}",
       "pluginDetails_other": "May mga update para sa: {{plugins}}",
       "toastTitle": "May mga update sa plugin",
@@ -1015,7 +1015,7 @@
     "error": "Error sa Update",
     "currentVersion": "Kasalukuyang bersyon",
     "managedByPackageManager": "Ang mga update ay pinamamahalaan ng {{source}}",
-    "managedByPackageManagerDesc": "Gamitin ang iyong package manager para i-update ang Tabularis."
+    "managedByPackageManagerDesc": "Gamitin ang iyong package manager para i-update ang Tabularis Extended."
   },
   "ai": {
     "assist": "AI Assist",
@@ -1115,7 +1115,7 @@
     },
     "advanced": "Advanced",
     "pipesAsConcat": "I-set ang PIPES_AS_CONCAT sql_mode sa connect",
-    "pipesAsConcatHint": "Panatilihing naka-enable — awtomatikong nilalaktawan ng Tabularis ito sa mga server na tumatanggi (Vitess/PlanetScale).",
+    "pipesAsConcatHint": "Panatilihing naka-enable — awtomatikong nilalaktawan ng Tabularis Extended ito sa mga server na tumatanggi (Vitess/PlanetScale).",
     "chooseContext": "Pumili ng context...",
     "chooseK8s": "Pumili ng connection...",
     "chooseNamespace": "Pumili ng namespace...",
@@ -2003,7 +2003,7 @@
       "processCount_other": "{{count}} system process ang tumatakbo"
     },
     "tabularisProcess": {
-      "title": "Tabularis Process",
+      "title": "Tabularis Extended Process",
       "cpu": "CPU",
       "ram": "RAM",
       "diskRead": "Disk Read/s",
@@ -2210,7 +2210,7 @@
     "approve": "Aprubahan",
     "deny": "Tanggihan",
     "notificationTitle": "Kailangan ng MCP approval",
-    "notificationBody": "Buksan ang Tabularis para suriin ang nakabinbing MCP approval."
+    "notificationBody": "Buksan ang Tabularis Extended para suriin ang nakabinbing MCP approval."
   },
   "discordCallout": {
     "title": "Bagong Discord community!",

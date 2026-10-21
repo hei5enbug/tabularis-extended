@@ -44,6 +44,7 @@ import {
   connectionOrderAfterMove,
   migrationDirectionForDriver,
 } from "../utils/connections";
+import { connectionSaveIssueText } from "../utils/connectionEdit";
 import { fuzzyFilter } from "../utils/fuzzy";
 import { useOpenConnectionInNewWindow } from "../hooks/useOpenConnectionInNewWindow";
 import { useConnectionTags } from "../hooks/useConnectionTags";
@@ -128,6 +129,18 @@ export const Connections = () => {
     useState<SavedConnection | null>(null);
   const connections = contextConnections as SavedConnection[];
   const [error, setError] = useState<string | null>(null);
+  // Localized text for a stale change or a failed secret rollback, naming
+  // the affected connections; `null` for any other error.
+  const describeSaveIssue = useCallback(
+    (cause: unknown): string | null => {
+      const names = Object.fromEntries(
+        connections.map((connection) => [connection.id, connection.name]),
+      );
+      const text = connectionSaveIssueText(cause, names);
+      return text ? t(text.key, text.options) : null;
+    },
+    [connections, t],
+  );
   const [connectingId, setConnectingId] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
@@ -194,10 +207,11 @@ export const Connections = () => {
         void undoMigration(outcome.connectionId).then((result) => {
           if (!result.ok) {
             showToast(
-              t("migration.toast.undoFailed", {
-                name: outcome.connectionName,
-                error: result.error ?? "unknown error",
-              }),
+              describeSaveIssue(result.error) ??
+                t("migration.toast.undoFailed", {
+                  name: outcome.connectionName,
+                  error: result.error ?? "unknown error",
+                }),
               { kind: "error", duration: 0 },
             );
           }
@@ -295,10 +309,11 @@ export const Connections = () => {
         // concurrently, or the write itself errored) — Undo is still offered
         // since flipping back to the built-in driver is safe either way.
         showToast(
-          t("migration.toast.failed", {
-            name: outcome.connectionName,
-            error: outcome.error ?? "unknown error",
-          }),
+          describeSaveIssue(outcome.error) ??
+            t("migration.toast.failed", {
+              name: outcome.connectionName,
+              error: outcome.error ?? "unknown error",
+            }),
           {
             kind: "error",
             duration: 0,
@@ -307,7 +322,7 @@ export const Connections = () => {
         );
       }
     },
-    [builtinId, defaultPluginId, undoMigration, catalogueRegistry, installedPlugins, showToast, t],
+    [builtinId, defaultPluginId, undoMigration, catalogueRegistry, installedPlugins, showToast, t, describeSaveIssue],
   );
 
   useEffect(() => {
@@ -605,6 +620,8 @@ export const Connections = () => {
           }
         } catch (e) {
           console.error(e);
+          const issue = describeSaveIssue(e);
+          if (issue) setError(issue);
         } finally {
           clearSelection();
           void loadConnections();
@@ -720,6 +737,8 @@ export const Connections = () => {
           void loadConnections();
         } catch (e) {
           console.error(e);
+          const issue = describeSaveIssue(e);
+          if (issue) setError(issue);
         }
       },
     });
@@ -757,10 +776,11 @@ export const Connections = () => {
           void migration.undoMigration(conn.id).then((result) => {
             if (!result.ok) {
               showToast(
-                t("migration.toast.undoFailed", {
-                  name: conn.name,
-                  error: result.error ?? "unknown error",
-                }),
+                describeSaveIssue(result.error) ??
+                  t("migration.toast.undoFailed", {
+                    name: conn.name,
+                    error: result.error ?? "unknown error",
+                  }),
                 { kind: "error", duration: 0 },
               );
             }
@@ -787,7 +807,7 @@ export const Connections = () => {
       void openEdit(newConn);
     } catch (e) {
       console.error(e);
-      setError(t("connections.failDuplicate"));
+      setError(describeSaveIssue(e) ?? t("connections.failDuplicate"));
     }
   };
 

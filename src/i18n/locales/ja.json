@@ -241,8 +241,8 @@
   },
   "mcp": {
     "title": "MCP サーバー連携",
-    "subtitle": "Tabularis を Claude Desktop、Cursor などに接続",
-    "description": "Model Context Protocol (MCP) を使うと、AI アシスタント (Claude など) がローカルツールに接続できます。Tabularis は MCP サーバーを公開しており、AI がデータベーススキーマを読み取り、クエリを安全に実行できるようにします。",
+    "subtitle": "Tabularis Extended を Claude Desktop、Cursor などに接続",
+    "description": "Model Context Protocol (MCP) を使うと、AI アシスタント (Claude など) がローカルツールに接続できます。Tabularis Extended は MCP サーバーを公開しており、AI がデータベーススキーマを読み取り、クエリを安全に実行できるようにします。",
     "checking": "設定を確認中...",
     "configPath": "設定ファイル",
     "notFound": "設定ファイルが見つかりません (手動で作成してください)",
@@ -276,7 +276,7 @@
       "allowListDesc": "他のすべての接続は読み取り専用のままです。ここでチェックされた接続のみ書き込みを実行できます。",
       "approvalTitle": "承認ゲート",
       "approvalMode": "承認が必要",
-      "approvalModeDesc": "書き込み（またはすべてのクエリ）を一時停止し、データベースに到達する前に Tabularis 内でユーザーに承認を求めます。",
+      "approvalModeDesc": "書き込み（またはすべてのクエリ）を一時停止し、データベースに到達する前に Tabularis Extended 内でユーザーに承認を求めます。",
       "modeOff": "オフ",
       "modeWritesOnly": "書き込みのみ",
       "modeAll": "すべてのクエリ",
@@ -285,7 +285,7 @@
       "preflightExplain": "プリフライト EXPLAIN",
       "preflightExplainDesc": "承認モーダルを表示する前にクエリに対して EXPLAIN を実行し、ユーザーに実行計画を表示します。",
       "approvalAlwaysOnTop": "承認ダイアログを最前面に表示",
-      "approvalAlwaysOnTopDesc": "読み取り以外の MCP アクションに承認が必要なとき、Tabularis を前面に出して一時的に他のウィンドウより上に表示します。",
+      "approvalAlwaysOnTopDesc": "読み取り以外の MCP アクションに承認が必要なとき、Tabularis Extended を前面に出して一時的に他のウィンドウより上に表示します。",
       "approvalNotifySound": "通知を送信して音を鳴らす",
       "approvalNotifySoundDesc": "新しい MCP 承認リクエストが届いたときに、ネイティブ通知を表示して短い通知音を再生します。"
     }
@@ -725,7 +725,7 @@
     "plugins": {
       "runtimeTitle": "プラグインランタイム",
       "callTimeout": "呼び出しタイムアウト",
-      "callTimeoutDesc": "Tabularis がプラグインからの単一リクエスト(クエリを含む)の応答を待つ最大時間です。0 で制限を無効にします。各プラグインは個別の設定でこの値を上書きできます。",
+      "callTimeoutDesc": "Tabularis Extended がプラグインからの単一リクエスト(クエリを含む)の応答を待つ最大時間です。0 で制限を無効にします。各プラグインは個別の設定でこの値を上書きできます。",
       "title": "プラグイン",
       "overviewTitle": "プラグインセンター",
       "overviewDesc": "拡張機能のインストール、プラグインドライバの管理、実行時設定のコントロールを行います。",
@@ -903,16 +903,16 @@
       "changeFolder": "フォルダーを変更…",
       "openFolder": "フォルダーを開く",
       "resetToDefault": "デフォルトの場所を使用",
-      "concurrencyWarning": "Tabularis は起動時にこのフォルダーを読み込みます。同期中の 2 台のマシンなど、同じフォルダーで 2 つのインスタンスを同時に実行しないでください。",
+      "concurrencyWarning": "Tabularis Extended は起動時にこのフォルダーを読み込みます。同期中の 2 台のマシンなど、同じフォルダーで 2 つのインスタンスを同時に実行しないでください。",
       "newFolder": "新しいフォルダー",
       "modeExisting": "このフォルダーにあるデータをそのまま使用",
-      "modeExistingDesc": "このフォルダーには既に Tabularis のデータ(別のマシンから同期されたものなど)が含まれています。",
+      "modeExistingDesc": "このフォルダーには既に Tabularis Extended のデータ(別のマシンから同期されたものなど)が含まれています。",
       "modeCopy": "現在のデータをこのフォルダーにコピー",
       "modeCopyDesc": "フォルダー内の既存ファイルは保持されます。インストール済みプラグインはコピーされません。",
       "modeEmpty": "空のフォルダーから始める",
       "apply": "適用",
       "restartRequired": "再起動が必要です",
-      "restartRequiredDesc": "再起動後、Tabularis は {{path}} を使用します。",
+      "restartRequiredDesc": "再起動後、Tabularis Extended は {{path}} を使用します。",
       "restartNow": "今すぐ再起動"
     },
     "backup": {
@@ -975,7 +975,7 @@
       "core_other": "コアの更新が {{count}} 件あります",
       "plugins_one": "プラグインの更新が {{count}} 件あります",
       "plugins_other": "プラグインの更新が {{count}} 件あります",
-      "coreDetails": "Tabularis {{version}} が利用可能です。「情報」を開いてコアの更新を確認してください。",
+      "coreDetails": "Tabularis Extended {{version}} が利用可能です。「情報」を開いてコアの更新を確認してください。",
       "pluginDetails_one": "更新可能：{{plugins}}",
       "pluginDetails_other": "更新可能：{{plugins}}",
       "toastTitle": "プラグインの更新があります",
@@ -999,7 +999,7 @@
     "error": "アップデートエラー",
     "currentVersion": "現在のバージョン",
     "managedByPackageManager": "アップデートは {{source}} によって管理されています",
-    "managedByPackageManagerDesc": "Tabularis のアップデートにはパッケージマネージャを使用してください。"
+    "managedByPackageManagerDesc": "Tabularis Extended のアップデートにはパッケージマネージャを使用してください。"
   },
   "ai": {
     "assist": "AI Assist",
@@ -1099,7 +1099,7 @@
     },
     "advanced": "詳細設定",
     "pipesAsConcat": "接続時に sql_mode PIPES_AS_CONCAT を設定",
-    "pipesAsConcatHint": "有効のままにしてください。Tabularis は受け付けないサーバー（Vitess/PlanetScale）では自動的にスキップします。",
+    "pipesAsConcatHint": "有効のままにしてください。Tabularis Extended は受け付けないサーバー（Vitess/PlanetScale）では自動的にスキップします。",
     "chooseContext": "コンテキストを選択...",
     "chooseK8s": "接続を選択...",
     "chooseNamespace": "ネームスペースを選択...",
@@ -1951,7 +1951,7 @@
       "processCount_other": "{{count}} 個のシステムプロセスが実行中"
     },
     "tabularisProcess": {
-      "title": "Tabularis プロセス",
+      "title": "Tabularis Extended プロセス",
       "cpu": "CPU",
       "ram": "RAM",
       "diskRead": "ディスク読み取り/秒",
@@ -2158,7 +2158,7 @@
     "approve": "承認",
     "deny": "拒否",
     "notificationTitle": "MCP の承認が必要です",
-    "notificationBody": "保留中の MCP 承認を確認するには Tabularis を開いてください。"
+    "notificationBody": "保留中の MCP 承認を確認するには Tabularis Extended を開いてください。"
   },
   "discordCallout": {
     "title": "Discord コミュニティが新登場！",
@@ -2294,7 +2294,7 @@
   },
   "deepLink": {
     "installTitle": "レジストリからプラグインをインストール",
-    "installSubtitle": "Tabularium レジストリが Tabularis にプラグインのインストールを要求しました。",
+    "installSubtitle": "Tabularium レジストリが Tabularis Extended にプラグインのインストールを要求しました。",
     "plugin": "プラグイン",
     "version": "バージョン",
     "registry": "レジストリ",

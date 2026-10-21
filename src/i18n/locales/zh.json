@@ -227,8 +227,8 @@
   },
   "mcp": {
     "title": "MCP 服务器集成",
-    "subtitle": "将 Tabularis 连接到 Claude Desktop、Cursor 等",
-    "description": "模型上下文协议 (MCP) 允许 AI 助手（如 Claude）连接到您的本地工具。Tabularis 暴露了一个 MCP 服务器，让 AI 可以安全地读取数据库模式并执行查询。",
+    "subtitle": "将 Tabularis Extended 连接到 Claude Desktop、Cursor 等",
+    "description": "模型上下文协议 (MCP) 允许 AI 助手（如 Claude）连接到您的本地工具。Tabularis Extended 暴露了一个 MCP 服务器，让 AI 可以安全地读取数据库模式并执行查询。",
     "checking": "检查配置中...",
     "configPath": "配置文件",
     "notFound": "未找到配置文件（请手动创建）",
@@ -262,7 +262,7 @@
       "allowListDesc": "其余连接保持只读。仅勾选的连接可以执行写入。",
       "approvalTitle": "审批门",
       "approvalMode": "需要审批",
-      "approvalModeDesc": "在执行前暂停写入(或所有查询)并要求用户在 Tabularis 中批准。",
+      "approvalModeDesc": "在执行前暂停写入(或所有查询)并要求用户在 Tabularis Extended 中批准。",
       "modeOff": "关闭",
       "modeWritesOnly": "仅写入",
       "modeAll": "所有查询",
@@ -271,7 +271,7 @@
       "preflightExplain": "预先 EXPLAIN",
       "preflightExplainDesc": "在显示审批模态之前运行 EXPLAIN,以便用户查看执行计划。",
       "approvalAlwaysOnTop": "将审批对话框置于最前",
-      "approvalAlwaysOnTopDesc": "当非只读的 MCP 操作需要审批时，将 Tabularis 拉到前台，并临时保持在其他窗口之上。",
+      "approvalAlwaysOnTopDesc": "当非只读的 MCP 操作需要审批时，将 Tabularis Extended 拉到前台，并临时保持在其他窗口之上。",
       "approvalNotifySound": "发送通知并播放提示音",
       "approvalNotifySoundDesc": "当新的 MCP 审批请求到达时，显示原生系统通知并播放短促提示音。"
     }
@@ -676,7 +676,7 @@
     "plugins": {
       "runtimeTitle": "插件运行时",
       "callTimeout": "调用超时",
-      "callTimeoutDesc": "Tabularis 等待插件响应单个请求(包括查询)的最长时间。设为 0 可取消限制。每个插件都可以在自己的设置中覆盖此值。",
+      "callTimeoutDesc": "Tabularis Extended 等待插件响应单个请求(包括查询)的最长时间。设为 0 可取消限制。每个插件都可以在自己的设置中覆盖此值。",
       "title": "插件",
       "overviewTitle": "插件中心",
       "overviewDesc": "安装扩展、管理插件驱动，并控制运行时设置。",
@@ -853,16 +853,16 @@
       "changeFolder": "更改文件夹…",
       "openFolder": "打开文件夹",
       "resetToDefault": "使用默认位置",
-      "concurrencyWarning": "Tabularis 在启动时读取此文件夹。请避免同时在同一文件夹上运行两个实例,例如在两台电脑上同步期间。",
+      "concurrencyWarning": "Tabularis Extended 在启动时读取此文件夹。请避免同时在同一文件夹上运行两个实例,例如在两台电脑上同步期间。",
       "newFolder": "新文件夹",
       "modeExisting": "使用此文件夹中已有的数据",
-      "modeExistingDesc": "此文件夹已包含 Tabularis 数据,例如从另一台电脑同步而来。",
+      "modeExistingDesc": "此文件夹已包含 Tabularis Extended 数据,例如从另一台电脑同步而来。",
       "modeCopy": "将我当前的数据复制到此文件夹",
       "modeCopyDesc": "文件夹中已有的文件会被保留。已安装的插件不会被复制。",
       "modeEmpty": "从空文件夹开始",
       "apply": "应用",
       "restartRequired": "需要重启",
-      "restartRequiredDesc": "重启后 Tabularis 将使用 {{path}}。",
+      "restartRequiredDesc": "重启后 Tabularis Extended 将使用 {{path}}。",
       "restartNow": "立即重启"
     },
     "backup": {
@@ -930,7 +930,7 @@
       "core_other": "有 {{count}} 个核心更新可用",
       "plugins_one": "有 {{count}} 个插件更新可用",
       "plugins_other": "有 {{count}} 个插件更新可用",
-      "coreDetails": "Tabularis {{version}} 已发布。打开“关于”以查看核心更新。",
+      "coreDetails": "Tabularis Extended {{version}} 已发布。打开“关于”以查看核心更新。",
       "pluginDetails_one": "以下插件有更新：{{plugins}}",
       "pluginDetails_other": "以下插件有更新：{{plugins}}",
       "toastTitle": "插件更新可用",
@@ -954,7 +954,7 @@
     "error": "更新错误",
     "currentVersion": "当前版本",
     "managedByPackageManager": "更新由 {{source}} 管理",
-    "managedByPackageManagerDesc": "使用您的包管理器更新 Tabularis。"
+    "managedByPackageManagerDesc": "使用您的包管理器更新 Tabularis Extended。"
   },
   "ai": {
     "assist": "AI 辅助",
@@ -1054,7 +1054,7 @@
     },
     "advanced": "高级",
     "pipesAsConcat": "连接时设置 PIPES_AS_CONCAT sql_mode",
-    "pipesAsConcatHint": "保持启用 — Tabularis 会在拒绝它的服务器（Vitess/PlanetScale）上自动跳过。",
+    "pipesAsConcatHint": "保持启用 — Tabularis Extended 会在拒绝它的服务器（Vitess/PlanetScale）上自动跳过。",
     "chooseContext": "选择上下文...",
     "chooseK8s": "选择连接...",
     "chooseNamespace": "选择命名空间...",
@@ -1879,7 +1879,7 @@
       "processCount_other": "{{count}} 个系统进程正在运行"
     },
     "tabularisProcess": {
-      "title": "Tabularis 进程",
+      "title": "Tabularis Extended 进程",
       "cpu": "CPU",
       "ram": "内存",
       "diskRead": "磁盘读取/s",
@@ -2082,7 +2082,7 @@
     "approve": "批准",
     "deny": "拒绝",
     "notificationTitle": "需要 MCP 审批",
-    "notificationBody": "请打开 Tabularis 以查看待处理的 MCP 审批。"
+    "notificationBody": "请打开 Tabularis Extended 以查看待处理的 MCP 审批。"
   },
   "discordCallout": {
     "title": "全新的 Discord 社区！",
@@ -2218,7 +2218,7 @@
   },
   "deepLink": {
     "installTitle": "从注册表安装插件",
-    "installSubtitle": "Tabularium 注册表请求 Tabularis 安装一个插件。",
+    "installSubtitle": "Tabularium 注册表请求 Tabularis Extended 安装一个插件。",
     "plugin": "插件",
     "version": "版本",
     "registry": "注册表",

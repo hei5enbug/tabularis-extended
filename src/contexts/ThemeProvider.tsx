@@ -14,6 +14,7 @@ import { getSystemIsDark, listenForSystemThemeChanges } from "../utils/themeSyst
 import { resolveLegacyTheme, resolveThemeDefinition } from "../utils/themeResolver";
 import { DEFAULT_THEME_SETTINGS, type Theme, type ThemeSettings, type MonacoThemeDefinition } from "../types/theme";
 import type { NativeThemeCatalog, NativeThemeContribution } from "../types/themeCatalog";
+import { isProfileImportAwaitingRestart } from "../utils/profileImportSession";
 
 type SettingsPatch = Partial<ThemeSettings> | ((previous: ThemeSettings) => Partial<ThemeSettings>);
 
@@ -100,7 +101,13 @@ export const ThemeProvider = ({ children }: { children: ReactNode }) => {
     const task = saveQueue.current.catch(() => undefined).then(async () => {
       const previous = settingsRef.current;
       const merged = { ...previous, ...(typeof patch === "function" ? patch(previous) : patch) };
-      await invoke("save_config", { config: { theme: merged.activeThemeId, followSystemTheme: merged.followSystemTheme, lightThemeId: merged.lightThemeId, darkThemeId: merged.darkThemeId } });
+      // After a profile import the theme preferences in memory predate the
+      // imported config.json, so they are not saved over it until the restart.
+      if (isProfileImportAwaitingRestart()) {
+        console.warn("Theme preference not saved: restart to load the imported profile first.");
+      } else {
+        await invoke("save_config", { config: { theme: merged.activeThemeId, followSystemTheme: merged.followSystemTheme, lightThemeId: merged.lightThemeId, darkThemeId: merged.darkThemeId } });
+      }
       settingsRef.current = merged;
       setSettings(merged);
       try { localStorage.removeItem("tabularis_theme_settings"); }

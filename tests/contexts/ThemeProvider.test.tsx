@@ -11,6 +11,7 @@ import { loadStartupConfig } from "../../src/utils/startupConfig";
 import { builtinCatalog } from "../../src/utils/themeCatalog";
 import type { NativeThemeCatalog, NativeThemeContribution } from "../../src/types/themeCatalog";
 import type { Theme } from "../../src/types/theme";
+import { isProfileImportAwaitingRestart } from "../../src/utils/profileImportSession";
 import capabilities from "../../src-tauri/capabilities/default.json";
 
 vi.mock("@tauri-apps/api/core");
@@ -18,6 +19,7 @@ vi.mock("@tauri-apps/api/event");
 const tauriWindow = vi.hoisted(() => ({ onThemeChanged: vi.fn(), setTheme: vi.fn(), theme: vi.fn() }));
 vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => tauriWindow }));
 vi.mock("../../src/themes/themeUtils", async (original) => ({ ...await original<typeof import("../../src/themes/themeUtils")>(), applyThemeToCSS: vi.fn() }));
+vi.mock("../../src/utils/profileImportSession", () => ({ isProfileImportAwaitingRestart: vi.fn() }));
 
 let config: Record<string, unknown>;
 let personal: NativeThemeContribution[];
@@ -436,5 +438,21 @@ describe("native and portal system theme compatibility", () => {
     const { result } = await mount(); expect(result.current.currentTheme.id).toBe("custom-light");
     await act(async () => result.current.deleteCustomTheme("custom-light"));
     expect(result.current.currentTheme.id).toBe("tabularis-light"); expect(result.current.settings.lightThemeId).toBe("tabularis-light");
+  });
+});
+
+describe("ThemeProvider after a profile import", () => {
+  it("공식 프로필을 가져온 뒤 재시작 전에는 테마를 골라도 save_config로 저장하지 않는다", async () => {
+    // given
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { result } = await mount();
+    vi.mocked(isProfileImportAwaitingRestart).mockReturnValue(true);
+
+    // when
+    await act(async () => result.current.setTheme("monokai"));
+
+    // then
+    expect(result.current.currentTheme.id).toBe("monokai");
+    expect(saves()).toHaveLength(0);
   });
 });

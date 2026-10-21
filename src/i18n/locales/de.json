@@ -228,8 +228,8 @@
   },
   "mcp": {
     "title": "MCP-Server-Integration",
-    "subtitle": "Verbinde Tabularis mit Claude Desktop, Cursor und mehr",
-    "description": "Das Model Context Protocol (MCP) ermöglicht KI-Assistenten (wie Claude), sich mit deinen lokalen Tools zu verbinden. Tabularis stellt einen MCP-Server bereit, über den KI dein Datenbankschema lesen und Abfragen sicher ausführen kann.",
+    "subtitle": "Verbinde Tabularis Extended mit Claude Desktop, Cursor und mehr",
+    "description": "Das Model Context Protocol (MCP) ermöglicht KI-Assistenten (wie Claude), sich mit deinen lokalen Tools zu verbinden. Tabularis Extended stellt einen MCP-Server bereit, über den KI dein Datenbankschema lesen und Abfragen sicher ausführen kann.",
     "checking": "Konfiguration wird geprüft...",
     "configPath": "Konfigurationsdatei",
     "notFound": "Konfigurationsdatei nicht gefunden (manuell erstellen)",
@@ -272,7 +272,7 @@
       "preflightExplain": "Vorab-EXPLAIN",
       "preflightExplainDesc": "Führt vor dem Modal ein EXPLAIN aus, damit der Plan sichtbar ist.",
       "approvalAlwaysOnTop": "Freigabedialog in den Vordergrund holen",
-      "approvalAlwaysOnTopDesc": "Wenn eine nicht lesende MCP-Aktion eine Freigabe benötigt, bringt Tabularis sich in den Vordergrund und bleibt vorübergehend über anderen Fenstern.",
+      "approvalAlwaysOnTopDesc": "Wenn eine nicht lesende MCP-Aktion eine Freigabe benötigt, bringt Tabularis Extended sich in den Vordergrund und bleibt vorübergehend über anderen Fenstern.",
       "approvalNotifySound": "Benachrichtigung senden und Ton abspielen",
       "approvalNotifySoundDesc": "Zeigt eine native Systembenachrichtigung an und spielt einen kurzen Hinweiston ab, wenn eine neue MCP-Freigabeanfrage eingeht."
     }
@@ -711,7 +711,7 @@
     "plugins": {
       "runtimeTitle": "Plugin-Laufzeit",
       "callTimeout": "Aufruf-Timeout",
-      "callTimeoutDesc": "Maximale Zeit, die Tabularis auf die Antwort eines Plugins auf eine einzelne Anfrage (inkl. Abfragen) wartet. 0 deaktiviert das Limit. Jedes Plugin kann diesen Wert in seinen eigenen Einstellungen überschreiben.",
+      "callTimeoutDesc": "Maximale Zeit, die Tabularis Extended auf die Antwort eines Plugins auf eine einzelne Anfrage (inkl. Abfragen) wartet. 0 deaktiviert das Limit. Jedes Plugin kann diesen Wert in seinen eigenen Einstellungen überschreiben.",
       "title": "Plugins",
       "overviewTitle": "Plugin-Center",
       "overviewDesc": "Installiere Erweiterungen, verwalte Plugin-Treiber und behalte Laufzeiteinstellungen im Blick.",
@@ -889,16 +889,16 @@
       "changeFolder": "Ordner ändern…",
       "openFolder": "Ordner öffnen",
       "resetToDefault": "Standardspeicherort verwenden",
-      "concurrencyWarning": "Tabularis liest diesen Ordner beim Start. Vermeide es, zwei Instanzen gleichzeitig auf demselben Ordner laufen zu lassen, z. B. auf zwei Rechnern während der Synchronisierung.",
+      "concurrencyWarning": "Tabularis Extended liest diesen Ordner beim Start. Vermeide es, zwei Instanzen gleichzeitig auf demselben Ordner laufen zu lassen, z. B. auf zwei Rechnern während der Synchronisierung.",
       "newFolder": "Neuer Ordner",
       "modeExisting": "Bereits vorhandene Daten in diesem Ordner verwenden",
-      "modeExistingDesc": "Dieser Ordner enthält bereits Tabularis-Daten, z. B. von einem anderen Rechner synchronisiert.",
+      "modeExistingDesc": "Dieser Ordner enthält bereits Tabularis Extended-Daten, z. B. von einem anderen Rechner synchronisiert.",
       "modeCopy": "Meine aktuellen Daten in diesen Ordner kopieren",
       "modeCopyDesc": "Bereits vorhandene Dateien im Ordner bleiben erhalten. Installierte Plugins werden nicht kopiert.",
       "modeEmpty": "Mit einem leeren Ordner beginnen",
       "apply": "Anwenden",
       "restartRequired": "Neustart erforderlich",
-      "restartRequiredDesc": "Tabularis verwendet {{path}} nach einem Neustart.",
+      "restartRequiredDesc": "Tabularis Extended verwendet {{path}} nach einem Neustart.",
       "restartNow": "Jetzt neu starten"
     },
     "backup": {
@@ -961,7 +961,7 @@
       "core_other": "{{count}} Core-Updates verfügbar",
       "plugins_one": "{{count}} Plugin-Update verfügbar",
       "plugins_other": "{{count}} Plugin-Updates verfügbar",
-      "coreDetails": "Tabularis {{version}} ist verfügbar. Öffne Info, um das Core-Update anzusehen.",
+      "coreDetails": "Tabularis Extended {{version}} ist verfügbar. Öffne Info, um das Core-Update anzusehen.",
       "pluginDetails_one": "Update verfügbar für: {{plugins}}",
       "pluginDetails_other": "Updates verfügbar für: {{plugins}}",
       "toastTitle": "Plugin-Updates verfügbar",
@@ -985,7 +985,7 @@
     "error": "Update-Fehler",
     "currentVersion": "Aktuelle Version",
     "managedByPackageManager": "Updates werden von {{source}} verwaltet",
-    "managedByPackageManagerDesc": "Verwende deinen Paketmanager, um Tabularis zu aktualisieren."
+    "managedByPackageManagerDesc": "Verwende deinen Paketmanager, um Tabularis Extended zu aktualisieren."
   },
   "ai": {
     "assist": "AI Assist",
@@ -1085,7 +1085,7 @@
     },
     "advanced": "Erweitert",
     "pipesAsConcat": "sql_mode PIPES_AS_CONCAT bei Verbindung setzen",
-    "pipesAsConcatHint": "Aktiviert lassen — Tabularis überspringt dies automatisch bei Servern, die es ablehnen (Vitess/PlanetScale).",
+    "pipesAsConcatHint": "Aktiviert lassen — Tabularis Extended überspringt dies automatisch bei Servern, die es ablehnen (Vitess/PlanetScale).",
     "chooseContext": "Kontext auswählen...",
     "chooseK8s": "Verbindung auswählen...",
     "chooseNamespace": "Namespace auswählen...",
@@ -1933,7 +1933,7 @@
       "processCount_other": "{{count}} Systemprozesse laufen"
     },
     "tabularisProcess": {
-      "title": "Tabularis-Prozess",
+      "title": "Tabularis Extended-Prozess",
       "cpu": "CPU",
       "ram": "RAM",
       "diskRead": "Datenträger lesen/s",
@@ -2140,7 +2140,7 @@
     "approve": "Freigeben",
     "deny": "Ablehnen",
     "notificationTitle": "MCP-Freigabe erforderlich",
-    "notificationBody": "Öffne Tabularis, um die ausstehende MCP-Freigabe zu prüfen."
+    "notificationBody": "Öffne Tabularis Extended, um die ausstehende MCP-Freigabe zu prüfen."
   },
   "discordCallout": {
     "title": "Neue Discord-Community!",
@@ -2276,7 +2276,7 @@
   },
   "deepLink": {
     "installTitle": "Plugin aus Registry installieren",
-    "installSubtitle": "Eine Tabularium-Registry hat Tabularis gebeten, ein Plugin zu installieren.",
+    "installSubtitle": "Eine Tabularium-Registry hat Tabularis Extended gebeten, ein Plugin zu installieren.",
     "plugin": "Plugin",
     "version": "Version",
     "registry": "Registry",

@@ -10,6 +10,7 @@ import {
   type Settings,
 } from "./SettingsContext";
 import { applyResultFontToDocument, stripSessionFields, applyFontToDocument } from "../utils/settings";
+import { isProfileImportAwaitingRestart } from "../utils/profileImportSession";
 
 const LANGUAGE_APPLICATION_TIMEOUT_MS = 3000;
 
@@ -388,9 +389,15 @@ export const SettingsProvider = ({ children }: { children: ReactNode }) => {
       // (set_last_open_connections, set_last_active_connection); the Rust
       // merge treats any Some as authoritative, so forwarding a stale copy
       // captured at app start would clobber what the session code wrote.
-      persistPromise = invoke<void>("save_config", { config: stripSessionFields(newSettings) }).catch((err) => {
-        console.error("Failed to save settings:", err);
-      });
+      // After a profile import these settings predate the imported
+      // config.json, so saving them would overwrite it until the restart.
+      if (isProfileImportAwaitingRestart()) {
+        console.warn("Settings change not saved: restart to load the imported profile first.");
+      } else {
+        persistPromise = invoke<void>("save_config", { config: stripSessionFields(newSettings) }).catch((err) => {
+          console.error("Failed to save settings:", err);
+        });
+      }
 
       // If font setting changed, update cache immediately
       if (key === "fontFamily" || key === "fontSize") {

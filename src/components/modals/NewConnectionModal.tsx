@@ -19,6 +19,8 @@ import {
   ChevronLeft,
   ChevronRight,
   Plus,
+  RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -78,7 +80,18 @@ import {
   type ConnectionTestLogEntry,
   type ConnectionTestProgressPayload,
 } from "../../utils/connectionTest";
-import { fetchConnectionWithCredentials } from "../../utils/credentials";
+import {
+  fetchConnectionWithCredentials,
+  type SavedConnectionWithCredentials,
+} from "../../utils/credentials";
+import {
+  connectionLabels,
+  connectionSaveIssue,
+  isPasswordOnlyEdit,
+  normalizeK8sPaths,
+  type ConnectionEditSnapshot,
+} from "../../utils/connectionEdit";
+import { ConfirmModal } from "./ConfirmModal";
 import { getDriverIcon, getDriverColorStyle, isUrlIcon } from "../../utils/driverUI";
 import {
   parseConnectionString,
@@ -193,6 +206,10 @@ interface K8sDiscoveryErrors {
 }
 
 type K8sDiscoverySource = keyof K8sDiscoveryErrors;
+
+type SaveIssue =
+  | { kind: "conflict" }
+  | { kind: "recovery"; names: string[] };
 
 type InlineK8sPathCheck =
   | { allowed: true; options?: K8sCommandOptions }
@@ -584,6 +601,17 @@ export const NewConnectionModal = ({
   // images that were uploaded during this session but not committed.
   const wasSavedRef = useRef(false);
   const loadedRevisionRef = useRef(initialConnection?.revision ?? 1);
+  // What the editor loaded, to recognise an edit that changes only the password.
+  const loadedEditRef = useRef<ConnectionEditSnapshot | null>(null);
+  // ── stale edit / failed save ──
+  const [saveIssue, setSaveIssue] = useState<SaveIssue | null>(null);
+  const [isReloadConfirmOpen, setIsReloadConfirmOpen] = useState(false);
+  const [isReloadingLatest, setIsReloadingLatest] = useState(false);
+  const [reloadError, setReloadError] = useState<string | null>(null);
+  const [reloadToken, setReloadToken] = useState(0);
+  const reloadedConnectionRef = useRef<SavedConnectionWithCredentials | null>(
+    null,
+  );
   const originalImagePath = useRef<string | null>(
     initialConnection?.appearance?.icon?.type === "image"
       ? initialConnection.appearance.icon.path
@@ -718,6 +746,15 @@ export const NewConnectionModal = ({
       setFormData((prev) => ({ ...prev, username: "", password: "" }));
     }
   }, []);
+  // Same contract for the password input alone: the username stays visible.
+  const [passwordFieldHidden, setPasswordFieldHiddenState] = useState(false);
+  const setPasswordFieldHidden = useCallback((hidden: boolean) => {
+    setPasswordFieldHiddenState(hidden);
+    if (hidden) {
+      setFormData((prev) => ({ ...prev, password: "" }));
+    }
+  }, []);
+  const passwordInputHidden = credentialFieldsHidden || passwordFieldHidden;
   const extraFieldsSlotContext = useMemo(
     () => ({
       driver,
@@ -725,6 +762,8 @@ export const NewConnectionModal = ({
       setExtraField,
       credentialFieldsHidden,
       setCredentialFieldsHidden,
+      passwordFieldHidden,
+      setPasswordFieldHidden,
       connectionId: initialConnection?.id,
     }),
     [
@@ -733,6 +772,8 @@ export const NewConnectionModal = ({
       setExtraField,
       credentialFieldsHidden,
       setCredentialFieldsHidden,
+      passwordFieldHidden,
+      setPasswordFieldHidden,
       initialConnection?.id,
     ],
   );
@@ -1749,12 +1790,15 @@ export const NewConnectionModal = ({
       if (!shouldApply()) return;
       setAvailableDatabases(databases);
       if (initialConnection) {
-        // Pre-select databases already associated with the connection
-        const existing = Array.isArray(initialConnection.params.database)
-          ? initialConnection.params.database
-          : initialConnection.params.database
-            ? [initialConnection.params.database as string]
-            : [];
+        // Pre-select databases already associated with the connection, as
+        // read with the revision this editor will save against.
+        const existing =
+          loadedEditRef.current?.selectedDatabases ??
+          (Array.isArray(initialConnection.params.database)
+            ? initialConnection.params.database
+            : initialConnection.params.database
+              ? [initialConnection.params.database as string]
+              : []);
         setSelectedDatabasesState((prev) => {
           const merged = Array.from(new Set([...existing, ...prev]));
           return merged.filter((db) => databases.includes(db));
@@ -1779,6 +1823,7 @@ export const NewConnectionModal = ({
   useEffect(() => {
     if (!isOpen) {
       initSequenceRef.current += 1;
+      reloadedConnectionRef.current = null;
       return;
     }
     const initSequence = ++initSequenceRef.current;
@@ -1797,6 +1842,11 @@ export const NewConnectionModal = ({
       setPasswordDirty(false);
       setSshPasswordDirty(false);
       setCredentialFieldsHiddenState(false);
+      setPasswordFieldHiddenState(false);
+      setSaveIssue(null);
+      setIsReloadConfirmOpen(false);
+      setReloadError(null);
+      loadedEditRef.current = null;
       setDbSearchQuery("");
       setConnectionString("");
       setConnectionStringError(null);
@@ -1819,6 +1869,9 @@ export const NewConnectionModal = ({
       setK8sSelectionError(null);
 
       if (initialConnection) {
+        // A reload after a conflict brings the version it already read.
+        const reloaded = reloadedConnectionRef.current;
+        reloadedConnectionRef.current = null;
         setName(initialConnection.name);
         setDriver(initialConnection.params.driver);
         setDetectJsonInTextColumns(
@@ -1827,26 +1880,52 @@ export const NewConnectionModal = ({
         setAppearance(initialConnection.appearance ?? {});
         setTagIds(initialConnection.tag_ids ?? []);
         setEnvironment(initialConnection.environment ?? "");
-        const db = initialConnection.params.database;
         setSshMode(
           initialConnection.params.ssh_connection_id ? "existing" : "inline",
         );
+        let saved: Omit<SavedConnection, "params"> = initialConnection;
         let params = initialConnection.params;
         loadedRevisionRef.current = initialConnection.revision ?? 1;
         try {
-          const fullConn = await fetchConnectionWithCredentials(
-            initialConnection.id,
-          );
+          const fullConn =
+            reloaded ??
+            (await fetchConnectionWithCredentials(initialConnection.id));
           // A response without params would blank the form, so keep the
           // secret-less ones instead of overwriting them with nothing.
           if (fullConn?.params) {
             params = fullConn.params;
             loadedRevisionRef.current = fullConn.revision ?? 1;
+            // The revision belongs to this read, so every field shown and
+            // saved back must come from it too.
+            saved = {
+              id: initialConnection.id,
+              name: fullConn.name ?? initialConnection.name,
+              detect_json_in_text_columns: fullConn.detect_json_in_text_columns,
+              appearance: fullConn.appearance,
+              tag_ids: fullConn.tag_ids,
+              environment: fullConn.environment,
+              revision: fullConn.revision,
+            };
           }
         } catch {
           // fallback: use params without secrets (backend will retrieve from keychain)
         }
         if (!isCurrentInit()) return;
+
+        const db = params.database;
+        if (saved !== initialConnection) {
+          setName(saved.name);
+          setDriver(params.driver);
+          setDetectJsonInTextColumns(saved.detect_json_in_text_columns === true);
+          setAppearance(saved.appearance ?? {});
+          setTagIds(saved.tag_ids ?? []);
+          setEnvironment(saved.environment ?? "");
+          setSshMode(params.ssh_connection_id ? "existing" : "inline");
+          originalImagePath.current =
+            saved.appearance?.icon?.type === "image"
+              ? saved.appearance.icon.path
+              : null;
+        }
 
         const isInlineK8s = !params.k8s_connection_id;
         const pathOptions: K8sCommandOptions = isInlineK8s
@@ -1865,28 +1944,48 @@ export const NewConnectionModal = ({
             };
         setK8sMode(isInlineK8s ? "inline" : "existing");
         initializeK8sPathOverrides(pathOptions);
-        const editDriverForDb = drivers.find(
-          (d) => d.id === initialConnection.params.driver,
-        );
+        const editDriverForDb = drivers.find((d) => d.id === params.driver);
         const editIsMultiDb = isMultiDatabaseCapable(
           editDriverForDb?.capabilities,
         );
+        let loadedFormData: Partial<ConnectionParams>;
+        let loadedSelection: string[];
+        let loadedAllDatabases: boolean;
         if (Array.isArray(db)) {
-          setSelectedDatabasesState(db);
-          setLoadAllDatabases(false);
-          setFormData({ ...paramsForForm, database: db[0] ?? "" });
+          loadedSelection = db;
+          loadedAllDatabases = false;
+          loadedFormData = { ...paramsForForm, database: db[0] ?? "" };
         } else if (editIsMultiDb && db.trim()) {
           // A saved single database on a multi-db driver is an explicit
           // one-element selection.
-          setSelectedDatabasesState([db]);
-          setLoadAllDatabases(false);
-          setFormData({ ...paramsForForm });
+          loadedSelection = [db];
+          loadedAllDatabases = false;
+          loadedFormData = { ...paramsForForm };
         } else {
-          setSelectedDatabasesState([]);
+          loadedSelection = [];
           // Empty database on a multi-db driver = "all databases" mode.
-          setLoadAllDatabases(editIsMultiDb);
-          setFormData({ ...paramsForForm });
+          loadedAllDatabases = editIsMultiDb;
+          loadedFormData = { ...paramsForForm };
         }
+        setSelectedDatabasesState(loadedSelection);
+        setLoadAllDatabases(loadedAllDatabases);
+        setFormData(loadedFormData);
+        loadedEditRef.current = {
+          name: saved.name,
+          driver: params.driver,
+          params: loadedFormData,
+          selectedDatabases: loadedSelection,
+          loadAllDatabases: loadedAllDatabases,
+          detectJsonInTextColumns: saved.detect_json_in_text_columns === true,
+          environment: saved.environment ?? "",
+          appearance: saved.appearance ?? {},
+          tagIds: saved.tag_ids ?? [],
+          sshMode: params.ssh_connection_id ? "existing" : "inline",
+          k8sMode: isInlineK8s ? "inline" : "existing",
+          k8sPaths: isInlineK8s ? normalizeK8sPaths(pathOptions) : {},
+          credentialFieldsHidden: false,
+          passwordFieldHidden: false,
+        };
 
         if (params.k8s_enabled && isInlineK8s) {
           void loadK8sContextsList(pathOptions);
@@ -1965,11 +2064,37 @@ export const NewConnectionModal = ({
     };
     void init();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, initialConnection]);
+  }, [isOpen, initialConnection, reloadToken]);
+
+  // After a conflict, replaces every local edit with the latest saved version.
+  const reloadLatestConnection = async () => {
+    if (!initialConnection) return;
+    const initSequence = initSequenceRef.current;
+    setIsReloadConfirmOpen(false);
+    setIsReloadingLatest(true);
+    setReloadError(null);
+    try {
+      const latest = await fetchConnectionWithCredentials(initialConnection.id);
+      if (initSequenceRef.current !== initSequence) return;
+      if (!latest?.params) {
+        setReloadError(t("newConnection.conflict.reloadMissing"));
+        return;
+      }
+      reloadedConnectionRef.current = latest;
+      setReloadToken((token) => token + 1);
+    } catch (err) {
+      if (initSequenceRef.current === initSequence) {
+        setReloadError(toErrorMessage(err));
+      }
+    } finally {
+      setIsReloadingLatest(false);
+    }
+  };
 
   const handleDriverChange = (newDriver: string) => {
     setDriver(newDriver);
     setCredentialFieldsHiddenState(false);
+    setPasswordFieldHiddenState(false);
     setFormData({
       driver: newDriver,
       host: "",
@@ -2274,6 +2399,8 @@ export const NewConnectionModal = ({
       setErrorFeedback(null);
       setTestLog([]);
       setIsDiagnosticsOpen(false);
+      setSaveIssue(null);
+      setReloadError(null);
 
       if (!name.trim()) {
         setStatus("error");
@@ -2355,6 +2482,30 @@ export const NewConnectionModal = ({
         appearance.icon?.type === "image" ? appearance.icon.path : null;
       const uploadedPathsForAction = [...uploadedPathsRef.current];
       const originalImagePathForAction = originalImagePath.current;
+      // When nothing but the password changed, only the password is written,
+      // so fields the form would normalise (TLS mode, driver, database
+      // selection, plugin extras) keep exactly their saved values.
+      const loadedEdit = loadedEditRef.current;
+      const passwordOnly =
+        initialConnection != null &&
+        loadedEdit !== null &&
+        isPasswordOnlyEdit(loadedEdit, {
+          name,
+          driver,
+          params: formData,
+          selectedDatabases: selectedDatabasesState,
+          loadAllDatabases,
+          detectJsonInTextColumns,
+          environment,
+          appearance,
+          tagIds,
+          sshMode,
+          k8sMode,
+          k8sPaths:
+            k8sMode === "inline" ? normalizeK8sPaths(inlinePaths.options) : {},
+          credentialFieldsHidden,
+          passwordFieldHidden,
+        });
 
       if (
         activeActionRef.current !== actionId ||
@@ -2370,11 +2521,18 @@ export const NewConnectionModal = ({
       setTestResult(null);
       try {
         let savedConnectionId: string;
-        if (initialConnection) {
+        if (initialConnection && passwordOnly) {
+          await invoke<number>("update_connection_password", {
+            id: initialConnection.id,
+            password: formData.password,
+            expectedRevision: loadedRevisionRef.current,
+          });
+          savedConnectionId = initialConnection.id;
+        } else if (initialConnection) {
           // An omitted password means "keep the stored one". While a plugin
-          // hides the login inputs the empty password is deliberate: it is
+          // hides the password input the empty password is deliberate: it is
           // sent as-is so the backend drops the keychain entry too.
-          if (!params.password?.trim() && !credentialFieldsHidden) {
+          if (!params.password?.trim() && !passwordInputHidden) {
             delete params.password;
           }
           if (!params.ssh_password?.trim()) delete params.ssh_password;
@@ -2407,10 +2565,12 @@ export const NewConnectionModal = ({
           }
         }
 
-        await invoke("set_connection_tags", {
-          connectionId: savedConnectionId,
-          tagIds,
-        });
+        if (!passwordOnly) {
+          await invoke("set_connection_tags", {
+            connectionId: savedConnectionId,
+            tagIds,
+          });
+        }
 
         if (
           activeActionRef.current !== actionId ||
@@ -2456,7 +2616,32 @@ export const NewConnectionModal = ({
         setIsPersistencePending(false);
         handleClose();
       } catch (err) {
-        if (
+        const issue = connectionSaveIssue(err);
+        if (issue && activeActionRef.current === actionId) {
+          // These failures need the user to act: name them instead of a
+          // generic failure, and never retry with a newer revision behind
+          // the user's back.
+          setStatus("error");
+          setMessage("");
+          setErrorFeedback(null);
+          setTestResult(null);
+          if (issue.kind === "conflict") {
+            setSaveIssue({ kind: "conflict" });
+          } else {
+            const knownNames: Record<string, string> = initialConnection
+              ? {
+                  [initialConnection.id]:
+                    loadedEditRef.current?.name ?? initialConnection.name,
+                }
+              : issue.connectionIds.length === 1
+                ? { [issue.connectionIds[0]]: name }
+                : {};
+            setSaveIssue({
+              kind: "recovery",
+              names: connectionLabels(issue.connectionIds, knownNames),
+            });
+          }
+        } else if (
           activeActionRef.current === actionId &&
           actionSnapshotRef.current === startingSnapshot
         ) {
@@ -2538,16 +2723,17 @@ export const NewConnectionModal = ({
 
       // While a plugin hides the host login inputs, an imported login would sit
       // in invisible fields and reach a driver that rejects it, so the
-      // username/password of the string are ignored. A driver switch resets
-      // that flag, so the login is applied as usual.
+      // username/password of the string are ignored (only the password when
+      // just that input is hidden). A driver switch resets both flags, so the
+      // login is applied as usual.
       if (driverChanged || !credentialFieldsHidden) {
         parsedFields.username = parsed.username || "";
-        // A passthrough URI carries its own credentials, so the password field
-        // is left untouched rather than blanked — writing "" here would
-        // overwrite the password already stored for this connection.
-        if (!parsed.connection_uri) {
-          parsedFields.password = parsed.password || "";
-        }
+      }
+      // A passthrough URI carries its own credentials, so the password field
+      // is left untouched rather than blanked — writing "" here would
+      // overwrite the password already stored for this connection.
+      if ((driverChanged || !passwordInputHidden) && !parsed.connection_uri) {
+        parsedFields.password = parsed.password || "";
       }
 
       if (parsedIsMultiDb) {
@@ -2565,6 +2751,7 @@ export const NewConnectionModal = ({
       if (driverChanged) {
         setDriver(newDriver);
         setCredentialFieldsHiddenState(false);
+        setPasswordFieldHiddenState(false);
       }
 
       setFormData((prev) => ({
@@ -2811,8 +2998,9 @@ export const NewConnectionModal = ({
 
           {!initialConnection?.id && <p className="text-xs text-muted">{t("serviceQuery.saveBeforeAuth")}</p>}
 
-          {/* User + Password (a plugin may hide them via the extra_fields slot) */}
-          {!credentialFieldsHidden && (
+          {/* User + Password (a plugin may hide both, or only the password,
+              via the extra_fields slot) */}
+          {!credentialFieldsHidden && !(isUriPassthrough && passwordFieldHidden) && (
             <div
               className={clsx(
                 "grid gap-3",
@@ -2827,20 +3015,22 @@ export const NewConnectionModal = ({
                   placeholder={t("newConnection.usernamePlaceholder")}
                 />
               )}
-              <FieldInput
-                label={t("newConnection.password")}
-                value={formData.password}
-                onChange={(v) => {
-                  setPasswordDirty(true);
-                  updateField("password", v);
-                }}
-                type="password"
-                placeholder={
-                  initialConnection && !passwordDirty && !formData.password
-                    ? "••••••••"
-                    : t("newConnection.passwordPlaceholder")
-                }
-              />
+              {!passwordFieldHidden && (
+                <FieldInput
+                  label={t("newConnection.password")}
+                  value={formData.password}
+                  onChange={(v) => {
+                    setPasswordDirty(true);
+                    updateField("password", v);
+                  }}
+                  type="password"
+                  placeholder={
+                    initialConnection && !passwordDirty && !formData.password
+                      ? "••••••••"
+                      : t("newConnection.passwordPlaceholder")
+                  }
+                />
+              )}
             </div>
           )}
 
@@ -3001,7 +3191,7 @@ export const NewConnectionModal = ({
           <p className="text-xs text-muted">
             {t("newConnection.pipesAsConcatHint", {
               defaultValue:
-                "Leave enabled — Tabularis automatically skips it on servers that reject it (Vitess/PlanetScale).",
+                "Leave enabled — Tabularis Extended automatically skips it on servers that reject it (Vitess/PlanetScale).",
             })}
           </p>
         </div>
@@ -4561,6 +4751,75 @@ export const NewConnectionModal = ({
 
         {/* ── Footer: test status + actions (form step only) ── */}
         {step === "form" && !activeDriverNotInstalled && <div className="border-t border-default bg-base">
+          {saveIssue && (
+            <div
+              role="alert"
+              className={clsx(
+                "mx-5 mt-3 flex items-start gap-3 rounded-lg border px-3 py-2.5",
+                saveIssue.kind === "conflict"
+                  ? "border-accent-warning/40 bg-accent-warning/10"
+                  : "border-accent-error/40 bg-accent-error/10",
+              )}
+            >
+              {saveIssue.kind === "conflict" ? (
+                <AlertTriangle
+                  size={15}
+                  className="mt-0.5 shrink-0 text-accent-warning"
+                />
+              ) : (
+                <AlertCircle
+                  size={15}
+                  className="mt-0.5 shrink-0 text-accent-error"
+                />
+              )}
+              <div className="min-w-0 flex-1 space-y-1 text-xs">
+                <p className="font-semibold text-primary">
+                  {saveIssue.kind === "conflict"
+                    ? t("newConnection.conflict.title")
+                    : t("newConnection.recovery.title")}
+                </p>
+                <p className="text-secondary leading-relaxed">
+                  {saveIssue.kind === "conflict"
+                    ? t("newConnection.conflict.message")
+                    : t("newConnection.recovery.message", {
+                        count: saveIssue.names.length,
+                      })}
+                </p>
+                {saveIssue.kind === "recovery" && (
+                  <ul
+                    aria-label={t("newConnection.recovery.affected")}
+                    className="list-disc pl-4 font-medium text-primary"
+                  >
+                    {saveIssue.names.map((connectionName, index) => (
+                      <li key={`${connectionName}-${index}`}>{connectionName}</li>
+                    ))}
+                  </ul>
+                )}
+                {reloadError && (
+                  <p className="text-accent-error break-words">
+                    {t("newConnection.conflict.reloadFailed", {
+                      error: reloadError,
+                    })}
+                  </p>
+                )}
+              </div>
+              {saveIssue.kind === "conflict" && (
+                <button
+                  type="button"
+                  onClick={() => setIsReloadConfirmOpen(true)}
+                  disabled={isReloadingLatest}
+                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-strong bg-elevated px-2.5 py-1.5 text-xs font-medium text-secondary transition-colors hover:bg-surface-secondary hover:text-primary disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus"
+                >
+                  {isReloadingLatest ? (
+                    <Loader2 size={12} className="animate-spin" />
+                  ) : (
+                    <RefreshCw size={12} />
+                  )}
+                  {t("newConnection.conflict.reload")}
+                </button>
+              )}
+            </div>
+          )}
           <div className="px-5 py-3 flex items-center gap-3">
           {/* Test button */}
           <button
@@ -4699,6 +4958,16 @@ export const NewConnectionModal = ({
         onClose={() => setIsSshDiagnosticsOpen(false)}
         error={sshTestError}
         log={sshTestLog}
+      />
+      <ConfirmModal
+        isOpen={isReloadConfirmOpen}
+        onClose={() => setIsReloadConfirmOpen(false)}
+        title={t("newConnection.conflict.confirmTitle")}
+        message={t("newConnection.conflict.confirmMessage")}
+        confirmLabel={t("newConnection.conflict.confirmReload")}
+        variant="warning"
+        overlayClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-[110] backdrop-blur-sm"
+        onConfirm={() => void reloadLatestConnection()}
       />
     </Modal>
   );

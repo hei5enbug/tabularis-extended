@@ -248,8 +248,8 @@
   },
   "mcp": {
     "title": "Integración del Servidor MCP",
-    "subtitle": "Conecta Tabularis a Claude Desktop, Cursor y más",
-    "description": "El Model Context Protocol (MCP) permite a los asistentes de IA (como Claude) conectarse a tus herramientas locales. Tabularis expone un servidor MCP que permite a la IA leer el esquema de tu base de datos y ejecutar consultas de forma segura.",
+    "subtitle": "Conecta Tabularis Extended a Claude Desktop, Cursor y más",
+    "description": "El Model Context Protocol (MCP) permite a los asistentes de IA (como Claude) conectarse a tus herramientas locales. Tabularis Extended expone un servidor MCP que permite a la IA leer el esquema de tu base de datos y ejecutar consultas de forma segura.",
     "checking": "Verificando configuración...",
     "configPath": "Archivo de Configuración",
     "notFound": "Archivo de configuración no encontrado (crear manualmente)",
@@ -292,7 +292,7 @@
       "preflightExplain": "EXPLAIN previo",
       "preflightExplainDesc": "Ejecuta un EXPLAIN antes de mostrar el modal para que el usuario vea el plan.",
       "approvalAlwaysOnTop": "Traer el diálogo de aprobación al frente",
-      "approvalAlwaysOnTopDesc": "Cuando una acción MCP que no sea de lectura necesite aprobación, trae Tabularis al frente y lo mantiene temporalmente por encima de las demás ventanas.",
+      "approvalAlwaysOnTopDesc": "Cuando una acción MCP que no sea de lectura necesite aprobación, trae Tabularis Extended al frente y lo mantiene temporalmente por encima de las demás ventanas.",
       "approvalNotifySound": "Enviar notificación y reproducir sonido",
       "approvalNotifySoundDesc": "Muestra una notificación nativa del sistema y reproduce un sonido corto cuando llega una nueva solicitud de aprobación MCP."
     }
@@ -736,7 +736,7 @@
     "plugins": {
       "runtimeTitle": "Ejecución de plugins",
       "callTimeout": "Tiempo de espera de llamadas",
-      "callTimeoutDesc": "Tiempo máximo que Tabularis espera la respuesta de un plugin a una sola solicitud (incluidas las consultas). Usa 0 para desactivar el límite. Cada plugin puede sobrescribir este valor en su propia configuración.",
+      "callTimeoutDesc": "Tiempo máximo que Tabularis Extended espera la respuesta de un plugin a una sola solicitud (incluidas las consultas). Usa 0 para desactivar el límite. Cada plugin puede sobrescribir este valor en su propia configuración.",
       "title": "Plugins",
       "overviewTitle": "Centro de plugins",
       "overviewDesc": "Instala extensiones, gestiona drivers de plugins y mantén bajo control los ajustes de ejecución.",
@@ -914,16 +914,16 @@
       "changeFolder": "Cambiar carpeta…",
       "openFolder": "Abrir carpeta",
       "resetToDefault": "Usar ubicación predeterminada",
-      "concurrencyWarning": "Tabularis lee esta carpeta al iniciarse. Evita ejecutar dos instancias sobre la misma carpeta al mismo tiempo, por ejemplo en dos equipos mientras se sincroniza.",
+      "concurrencyWarning": "Tabularis Extended lee esta carpeta al iniciarse. Evita ejecutar dos instancias sobre la misma carpeta al mismo tiempo, por ejemplo en dos equipos mientras se sincroniza.",
       "newFolder": "Nueva carpeta",
       "modeExisting": "Usar los datos que ya hay en esta carpeta",
-      "modeExistingDesc": "Esta carpeta ya contiene datos de Tabularis, por ejemplo sincronizados desde otro equipo.",
+      "modeExistingDesc": "Esta carpeta ya contiene datos de Tabularis Extended, por ejemplo sincronizados desde otro equipo.",
       "modeCopy": "Copiar mis datos actuales a esta carpeta",
       "modeCopyDesc": "Los archivos que ya están en la carpeta se conservan. Los plugins instalados no se copian.",
       "modeEmpty": "Empezar con una carpeta vacía",
       "apply": "Aplicar",
       "restartRequired": "Reinicio necesario",
-      "restartRequiredDesc": "Tabularis usará {{path}} después de reiniciar.",
+      "restartRequiredDesc": "Tabularis Extended usará {{path}} después de reiniciar.",
       "restartNow": "Reiniciar ahora"
     },
     "backup": {
@@ -986,7 +986,7 @@
       "core_other": "{{count}} actualizaciones del núcleo disponibles",
       "plugins_one": "{{count}} actualización de plugin disponible",
       "plugins_other": "{{count}} actualizaciones de plugins disponibles",
-      "coreDetails": "Tabularis {{version}} está disponible. Abre Información para consultar la actualización del núcleo.",
+      "coreDetails": "Tabularis Extended {{version}} está disponible. Abre Información para consultar la actualización del núcleo.",
       "pluginDetails_one": "Actualización disponible para: {{plugins}}",
       "pluginDetails_other": "Actualizaciones disponibles para: {{plugins}}",
       "toastTitle": "Actualizaciones de plugins disponibles",
@@ -1013,7 +1013,7 @@
     "error": "Error de Actualización",
     "currentVersion": "Versión actual",
     "managedByPackageManager": "Actualizaciones gestionadas por {{source}}",
-    "managedByPackageManagerDesc": "Usa tu gestor de paquetes para actualizar Tabularis."
+    "managedByPackageManagerDesc": "Usa tu gestor de paquetes para actualizar Tabularis Extended."
   },
   "ai": {
     "assist": "Asistente IA",
@@ -1113,7 +1113,7 @@
     },
     "advanced": "Avanzado",
     "pipesAsConcat": "Establecer sql_mode PIPES_AS_CONCAT al conectar",
-    "pipesAsConcatHint": "Déjalo activado: Tabularis lo omite automáticamente en servidores que lo rechazan (Vitess/PlanetScale).",
+    "pipesAsConcatHint": "Déjalo activado: Tabularis Extended lo omite automáticamente en servidores que lo rechazan (Vitess/PlanetScale).",
     "chooseContext": "Elige un contexto...",
     "chooseK8s": "Elige una conexión...",
     "chooseNamespace": "Elige un namespace...",
@@ -1887,7 +1887,7 @@
       "processCount_other": "{{count}} procesos del sistema en ejecución"
     },
     "tabularisProcess": {
-      "title": "Proceso Tabularis",
+      "title": "Proceso Tabularis Extended",
       "cpu": "CPU",
       "ram": "RAM",
       "diskRead": "Lectura Disco/s",
@@ -2074,7 +2074,7 @@
     "approve": "Aprobar",
     "deny": "Denegar",
     "notificationTitle": "Se necesita aprobación MCP",
-    "notificationBody": "Abrí Tabularis para revisar la aprobación MCP pendiente."
+    "notificationBody": "Abrí Tabularis Extended para revisar la aprobación MCP pendiente."
   },
   "discordCallout": {
     "title": "¡Nueva comunidad Discord!",
@@ -2210,7 +2210,7 @@
   },
   "deepLink": {
     "installTitle": "Instalar plugin desde el registro",
-    "installSubtitle": "Un registro de Tabularium pidió a Tabularis que instale un plugin.",
+    "installSubtitle": "Un registro de Tabularium pidió a Tabularis Extended que instale un plugin.",
     "plugin": "Plugin",
     "version": "Versión",
     "registry": "Registro",

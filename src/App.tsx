@@ -20,6 +20,8 @@ import { WhatsNewModal } from "./components/modals/WhatsNewModal";
 import { AiApprovalGate } from "./components/modals/AiApprovalGate";
 import { PluginInstallConfirmModal } from "./components/modals/PluginInstallConfirmModal";
 import { SshAskpassGate } from "./components/modals/SshAskpassGate";
+import { OfficialProfileImportModal } from "./components/modals/OfficialProfileImportModal";
+import { useOfficialProfileImportPrompt } from "./hooks/useOfficialProfileImportPrompt";
 import { useUpdate } from "./hooks/useUpdate";
 import { useChangelog } from "./hooks/useChangelog";
 import { useSettings } from "./hooks/useSettings";
@@ -52,6 +54,7 @@ export function App() {
   useResultTypeColors();
   const [isDebugMode, setIsDebugMode] = useState(false);
   const deepLinkInstall = useDeepLinkInstall();
+  const profileImportPrompt = useOfficialProfileImportPrompt();
   const [isCommunityModalDismissed, setIsCommunityModalDismissed] = useState(false);
 
   const lastSeenVersion = localStorage.getItem(WHATS_NEW_VERSION_KEY);
@@ -176,13 +179,31 @@ export function App() {
         error={updateError}
       />
 
+      <OfficialProfileImportModal
+        isOpen={profileImportPrompt.isOpen}
+        onClose={profileImportPrompt.dismiss}
+        status={profileImportPrompt.status}
+      />
+
+      {/* Dismissing the welcome writes settings, which would end the chance
+          to import the official profile, so it waits for that prompt. */}
       <CommunityModal
-        isOpen={!isSettingsLoading && settings.showWelcome !== false && !isCommunityModalDismissed}
+        isOpen={
+          !isSettingsLoading &&
+          settings.showWelcome !== false &&
+          !isCommunityModalDismissed &&
+          !profileImportPrompt.holdsOtherPrompts
+        }
         onClose={dismissCommunityModal}
       />
 
       <WhatsNewModal
-        isOpen={isWhatsNewOpen && !isSettingsLoading && (settings.showWelcome === false || isCommunityModalDismissed)}
+        isOpen={
+          isWhatsNewOpen &&
+          !isSettingsLoading &&
+          (settings.showWelcome === false || isCommunityModalDismissed) &&
+          !profileImportPrompt.holdsOtherPrompts
+        }
         onClose={dismissWhatsNew}
         entries={whatsNewEntries}
         isLoading={isChangelogLoading}

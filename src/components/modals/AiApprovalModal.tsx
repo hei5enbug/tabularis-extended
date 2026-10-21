@@ -5,7 +5,9 @@ import {
   Check,
   Clock3,
   Database,
+  KeyRound,
   Layers2,
+  Lock,
   Maximize2,
   Minimize2,
   Pencil,
@@ -31,6 +33,15 @@ import { VisualExplainView } from "../explain/VisualExplainView";
 import type { ExplainViewMode } from "@tabularis/explain/react";
 import { isDestructiveApproval } from "../../utils/aiActivity";
 import { parseApprovalExplainPlan } from "../../utils/approvalExplain";
+import {
+  connectionChangeRows,
+  formatApprovalJson,
+  formatApprovalQuery,
+  isLockedApproval,
+  parseServiceApprovalRequest,
+  serviceOperation,
+  type ServiceApprovalRequest,
+} from "../../utils/serviceApproval";
 
 interface AiApprovalModalProps {
   approval: PendingApproval;
@@ -94,12 +105,31 @@ export function AiApprovalModal({
   }, [explainPlan, selectedNodeId]);
 
   const destructive = isDestructiveApproval(approval);
-  const serviceApproval = approval.queryKind.startsWith("service:");
+  // Bound to one exact request: approve or deny only, never edit.
+  const locked = isLockedApproval(approval);
+  const serviceRequest = useMemo(
+    () =>
+      locked
+        ? parseServiceApprovalRequest({
+            query: approval.query,
+            service: approval.service,
+            queryKind: approval.queryKind,
+            connectionId: approval.connectionId,
+          })
+        : null,
+    [
+      locked,
+      approval.query,
+      approval.service,
+      approval.queryKind,
+      approval.connectionId,
+    ],
+  );
 
   const handleApprove = async () => {
     setSubmitting(true);
     try {
-      const final = !serviceApproval && editing && editedQuery.trim() !== approval.query.trim()
+      const final = !locked && editing && editedQuery.trim() !== approval.query.trim()
         ? editedQuery
         : undefined;
       await onApprove(final);
@@ -169,70 +199,78 @@ export function AiApprovalModal({
 
         {/* Content */}
         <div className="p-5 space-y-4 overflow-y-auto">
-          <section>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-xs uppercase font-bold text-muted">
-                {t("aiApproval.query")}
-              </label>
-              <button
-                disabled={serviceApproval}
-                onClick={() => setEditing((v) => !v)}
-                className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-primary hover:bg-surface-tertiary rounded transition-colors"
-              >
-                <Pencil size={11} />
-                {editing
-                  ? t("aiApproval.lockQuery")
-                  : t("aiApproval.editQuery")}
-              </button>
-            </div>
-            <div className="rounded-lg overflow-hidden border border-default">
-              <Editor
-                height="180px"
-                defaultLanguage="sql"
-                theme={getMonacoThemeId(editorTheme.id)}
-                value={editing ? editedQuery : approval.query}
-                onChange={(v) => setEditedQuery(v ?? "")}
-                beforeMount={(monaco) => loadMonacoTheme(editorTheme, monaco)}
-                options={{
-                  readOnly: serviceApproval || !editing,
-                  minimap: { enabled: false },
-                  scrollBeyondLastLine: false,
-                  fontSize: 12,
-                  padding: { top: 12, bottom: 12 },
-                  wordWrap: "on",
-                }}
-              />
-            </div>
-          </section>
+          {locked ? (
+            <ServiceRequestSummary
+              approval={approval}
+              request={serviceRequest}
+            />
+          ) : (
+            <>
+              <section>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs uppercase font-bold text-muted">
+                    {t("aiApproval.query")}
+                  </label>
+                  <button
+                    onClick={() => setEditing((v) => !v)}
+                    className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-primary hover:bg-surface-tertiary rounded transition-colors"
+                  >
+                    <Pencil size={11} />
+                    {editing
+                      ? t("aiApproval.lockQuery")
+                      : t("aiApproval.editQuery")}
+                  </button>
+                </div>
+                <div className="rounded-lg overflow-hidden border border-default">
+                  <Editor
+                    height="180px"
+                    defaultLanguage="sql"
+                    theme={getMonacoThemeId(editorTheme.id)}
+                    value={editing ? editedQuery : approval.query}
+                    onChange={(v) => setEditedQuery(v ?? "")}
+                    beforeMount={(monaco) => loadMonacoTheme(editorTheme, monaco)}
+                    options={{
+                      readOnly: !editing,
+                      minimap: { enabled: false },
+                      scrollBeyondLastLine: false,
+                      fontSize: 12,
+                      padding: { top: 12, bottom: 12 },
+                      wordWrap: "on",
+                    }}
+                  />
+                </div>
+              </section>
 
-          <section>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-xs uppercase font-bold text-muted">
-                {t("aiApproval.preflightPlan")}
-              </label>
-              {explainPlan && (
-                <button
-                  onClick={() => setPlanExpanded(true)}
-                  className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-primary hover:bg-surface-tertiary rounded transition-colors"
-                  title={t("aiApproval.expandPlan")}
-                >
-                  <Maximize2 size={11} />
-                  {t("aiApproval.expandPlan")}
-                </button>
-              )}
-            </div>
-            {explainPlan && planSummary ? (
-              <PlanSummaryBox plan={explainPlan} summary={planSummary} />
-            ) : (
-              <div className="rounded-lg border border-default bg-base p-4 text-xs text-muted">
-                {approval.explainError
-                  ? t("aiApproval.explainFailed", {
-                      error: approval.explainError,
-                    })
-                  : t("aiApproval.explainUnavailable")}
-              </div>
-            )}
-          </section>
+              <section>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs uppercase font-bold text-muted">
+                    {t("aiApproval.preflightPlan")}
+                  </label>
+                  {explainPlan && (
+                    <button
+                      onClick={() => setPlanExpanded(true)}
+                      className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-primary hover:bg-surface-tertiary rounded transition-colors"
+                      title={t("aiApproval.expandPlan")}
+                    >
+                      <Maximize2 size={11} />
+                      {t("aiApproval.expandPlan")}
+                    </button>
+                  )}
+                </div>
+                {explainPlan && planSummary ? (
+                  <PlanSummaryBox plan={explainPlan} summary={planSummary} />
+                ) : (
+                  <div className="rounded-lg border border-default bg-base p-4 text-xs text-muted">
+                    {approval.explainError
+                      ? t("aiApproval.explainFailed", {
+                          error: approval.explainError,
+                        })
+                      : t("aiApproval.explainUnavailable")}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
 
           <section>
             <label className="text-xs uppercase font-bold text-muted mb-2 block">
@@ -324,6 +362,126 @@ export function AiApprovalModal({
         </div>
       )}
     </div>
+  );
+}
+
+interface ServiceRequestSummaryProps {
+  approval: PendingApproval;
+  request: ServiceApprovalRequest | null;
+}
+
+/**
+ * Read-only account of a request bound to one exact operation: what it does,
+ * which connection it targets and, for connection changes, every field it sets.
+ */
+function ServiceRequestSummary({ approval, request }: ServiceRequestSummaryProps) {
+  const { t } = useTranslation();
+  const operation = request?.operation ?? serviceOperation(approval);
+  const changes = request ? connectionChangeRows(request) : null;
+  const credentialRetarget =
+    approval.service?.credentialRetarget === true ||
+    request?.credentialRetarget === true;
+  const target = request?.connectionId
+    ? approval.connectionName && approval.connectionName !== request.connectionId
+      ? `${approval.connectionName} (${request.connectionId})`
+      : request.connectionId
+    : t("aiApproval.service.newConnection");
+
+  return (
+    <>
+      {credentialRetarget && (
+        <div
+          role="alert"
+          className="flex gap-3 rounded-lg border border-accent-error/50 bg-accent-error/10 p-4"
+        >
+          <KeyRound size={18} className="mt-0.5 shrink-0 text-accent-error" />
+          <div className="min-w-0">
+            <p className="text-sm font-semibold text-primary">
+              {t("aiApproval.service.retargetTitle")}
+            </p>
+            <p className="mt-1 text-xs leading-relaxed text-secondary">
+              {t("aiApproval.service.retargetBody", {
+                connection: approval.connectionName || target,
+              })}
+            </p>
+          </div>
+        </div>
+      )}
+
+      <section className="space-y-3">
+        <div className="flex items-center justify-between gap-3">
+          <h3 className="text-xs uppercase font-bold text-muted">
+            {t("aiApproval.service.request")}
+          </h3>
+          <span className="flex items-center gap-1 text-xs text-muted">
+            <Lock size={11} />
+            {t("aiApproval.service.locked")}
+          </span>
+        </div>
+        <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1.5 rounded-lg border border-default bg-base p-3 text-xs">
+          <dt className="text-muted">{t("aiApproval.service.operation")}</dt>
+          <dd className="font-mono text-primary break-all">{operation}</dd>
+          {changes && (
+            <>
+              <dt className="text-muted">{t("aiApproval.service.target")}</dt>
+              <dd className="text-primary break-all">{target}</dd>
+            </>
+          )}
+        </dl>
+        {changes ? (
+          changes.length > 0 ? (
+            <div className="overflow-hidden rounded-lg border border-default">
+              <table className="w-full text-xs">
+                <caption className="sr-only">
+                  {t("aiApproval.service.changes")}
+                </caption>
+                <thead className="bg-base text-muted">
+                  <tr>
+                    <th scope="col" className="px-3 py-1.5 text-left font-semibold">
+                      {t("aiApproval.service.field")}
+                    </th>
+                    <th scope="col" className="px-3 py-1.5 text-left font-semibold">
+                      {t("aiApproval.service.value")}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {changes.map((row) => (
+                    <tr key={row.field} className="border-t border-default">
+                      <td className="px-3 py-1.5 align-top font-mono text-secondary whitespace-nowrap">
+                        {row.field}
+                      </td>
+                      <td className="px-3 py-1.5 font-mono text-primary break-all">
+                        {row.value}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <p className="text-xs text-muted">{t("aiApproval.service.noChanges")}</p>
+          )
+        ) : (
+          <pre
+            aria-label={t("aiApproval.service.request")}
+            className="max-h-64 overflow-auto rounded-lg border border-default bg-base p-3 font-mono text-xs text-primary whitespace-pre-wrap break-all"
+          >
+            {request ? formatApprovalJson(request.input) : approval.query}
+          </pre>
+        )}
+        {request && (
+          <details className="text-xs">
+            <summary className="cursor-pointer text-muted hover:text-primary focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus">
+              {t("aiApproval.service.rawRequest")}
+            </summary>
+            <pre className="mt-2 max-h-64 overflow-auto rounded-lg border border-default bg-base p-3 font-mono text-xs text-secondary whitespace-pre-wrap break-all">
+              {formatApprovalQuery(approval.query)}
+            </pre>
+          </details>
+        )}
+      </section>
+    </>
   );
 }
 

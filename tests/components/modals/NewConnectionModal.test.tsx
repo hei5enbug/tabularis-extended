@@ -1,6 +1,6 @@
 import { useState, type ComponentProps, type ReactNode } from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, render, screen, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { save } from "@tauri-apps/plugin-dialog";
 import { NewConnectionModal } from "../../../src/components/modals/NewConnectionModal";
@@ -1704,4 +1704,381 @@ describe("NewConnectionModal revision on save", () => {
       });
     },
   );
+});
+
+// Simulates a driver plugin that needs a login name but no password and
+// hides only the host password input through `setPasswordFieldHidden`.
+interface PasswordToggleContext {
+  passwordFieldHidden?: boolean;
+  setPasswordFieldHidden?: (hidden: boolean) => void;
+}
+
+function PluginPasswordToggle({ context }: SlotComponentProps) {
+  const c = context as PasswordToggleContext;
+  return (
+    <input
+      type="checkbox"
+      aria-label="plugin-token-auth"
+      checked={c.passwordFieldHidden === true}
+      onChange={(e) => c.setPasswordFieldHidden?.(e.target.checked)}
+    />
+  );
+}
+
+function renderModalWithPasswordToggle(initialConnection: InitialConnection) {
+  const registry = registryWith({
+    pluginId: "token-driver",
+    slot: "connection-modal.extra_fields",
+    component: PluginPasswordToggle,
+  });
+  return render(
+    <PluginSlotContext.Provider value={registry}>
+      <NewConnectionModal
+        isOpen={true}
+        onClose={vi.fn()}
+        onSave={vi.fn()}
+        initialConnection={initialConnection}
+      />
+    </PluginSlotContext.Provider>,
+  );
+}
+
+describe("NewConnectionModal extra_fields slot password toggle", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(invoke).mockImplementation(async (command) =>
+      command === "get_connection_by_id"
+        ? Promise.reject(new Error("use initial params"))
+        : "ok",
+    );
+    sshMocks.loadSshConnections.mockResolvedValue([]);
+    k8sMocks.loadK8sConnections.mockResolvedValue([]);
+    eventMocks.listen.mockResolvedValue(eventMocks.unlisten);
+  });
+
+  it("플러그인이 비밀번호 입력란만 숨기면 사용자 이름 입력란은 값과 함께 그대로 보인다", async () => {
+    // given
+    renderModalWithPasswordToggle(
+      createInitialConnection({ username: "sa", password: "secret" }),
+    );
+    const username = await screen.findByPlaceholderText(
+      "newConnection.usernamePlaceholder",
+    );
+    await waitFor(() => expect(username).toHaveValue("sa"));
+
+    // when
+    fireEvent.click(screen.getByLabelText("plugin-token-auth"));
+
+    // then
+    expect(
+      screen.getByPlaceholderText("newConnection.usernamePlaceholder"),
+    ).toHaveValue("sa");
+    expect(screen.queryByText("newConnection.password")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("plugin-token-auth")).toBeChecked();
+  });
+
+  it("비밀번호 입력란이 숨겨진 채 저장하면 사용자 이름은 그대로 두고 빈 비밀번호를 보낸다", async () => {
+    // given
+    renderModalWithPasswordToggle(
+      createInitialConnection({
+        username: "sa",
+        password: "secret",
+        save_in_keychain: true,
+      }),
+    );
+    const username = await screen.findByPlaceholderText(
+      "newConnection.usernamePlaceholder",
+    );
+    await waitFor(() => expect(username).toHaveValue("sa"));
+    fireEvent.click(screen.getByLabelText("plugin-token-auth"));
+
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+
+    // then
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("update_connection", expect.anything());
+    });
+    expect(updateConnectionPayload()).toMatchObject({
+      username: "sa",
+      password: "",
+    });
+    expect(invoke).not.toHaveBeenCalledWith(
+      "update_connection_password",
+      expect.anything(),
+    );
+  });
+});
+
+const savedVersion = {
+  id: "connection-1",
+  name: "Existing K8s database",
+  params: {
+    driver: "mysql",
+    host: "old-host.example",
+    port: 3306,
+    username: "app",
+    password: "old-secret",
+    database: "shop",
+    ssl_mode: "require",
+    save_in_keychain: true,
+    extra: { region: "eu-west-1" },
+  },
+  revision: 4,
+};
+
+const latestVersion = {
+  ...savedVersion,
+  name: "Renamed elsewhere",
+  params: { ...savedVersion.params, host: "new-host.example" },
+  revision: 6,
+};
+
+function mockConnectionReads(versions: unknown[]) {
+  let reads = 0;
+  return (command: string) => {
+    if (command !== "get_connection_by_id") return false;
+    const version = versions[Math.min(reads, versions.length - 1)];
+    reads += 1;
+    return version;
+  };
+}
+
+function renderSavedConnection() {
+  const onSave = vi.fn();
+  render(
+    <NewConnectionModal
+      isOpen={true}
+      onClose={vi.fn()}
+      onSave={onSave}
+      initialConnection={{ ...savedVersion, revision: 4 }}
+    />,
+  );
+  return { onSave };
+}
+
+async function waitForLoadedHost(host: string) {
+  await waitFor(() =>
+    expect(screen.getByPlaceholderText("localhost")).toHaveValue(host),
+  );
+}
+
+function invokedCommands(): string[] {
+  return vi.mocked(invoke).mock.calls.map(([command]) => command);
+}
+
+describe("NewConnectionModal password-only edit", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    const read = mockConnectionReads([savedVersion]);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      const version = read(command);
+      if (version) return version;
+      if (command === "update_connection_password") return 5;
+      return undefined;
+    });
+    sshMocks.loadSshConnections.mockResolvedValue([]);
+    k8sMocks.loadK8sConnections.mockResolvedValue([]);
+  });
+
+  it("비밀번호만 바꿔 저장하면 불러온 revision으로 update_connection_password만 호출한다", async () => {
+    // given
+    const { onSave } = renderSavedConnection();
+    await waitForLoadedHost("old-host.example");
+    fireEvent.change(
+      screen.getByPlaceholderText("newConnection.passwordPlaceholder"),
+      { target: { value: "new-secret" } },
+    );
+
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+
+    // then
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(invoke).toHaveBeenCalledWith("update_connection_password", {
+      id: "connection-1",
+      password: "new-secret",
+      expectedRevision: 4,
+    });
+    expect(invokedCommands()).not.toContain("update_connection");
+    expect(invokedCommands()).not.toContain("set_connection_tags");
+    expect(invokedCommands()).not.toContain("set_connection_appearance");
+  });
+
+  it("비밀번호와 다른 항목을 함께 바꾸면 기존처럼 update_connection으로 저장한다", async () => {
+    // given
+    const { onSave } = renderSavedConnection();
+    await waitForLoadedHost("old-host.example");
+    fireEvent.change(
+      screen.getByPlaceholderText("newConnection.passwordPlaceholder"),
+      { target: { value: "new-secret" } },
+    );
+    fireEvent.change(screen.getByPlaceholderText("localhost"), {
+      target: { value: "other-host.example" },
+    });
+
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+
+    // then
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    expect(invoke).toHaveBeenCalledWith(
+      "update_connection",
+      expect.objectContaining({
+        expectedRevision: 4,
+        params: expect.objectContaining({
+          host: "other-host.example",
+          password: "new-secret",
+          ssl_mode: "require",
+          extra: { region: "eu-west-1" },
+        }),
+      }),
+    );
+    expect(invokedCommands()).not.toContain("update_connection_password");
+  });
+});
+
+describe("NewConnectionModal stale edit conflict", () => {
+  let updateResults: Array<() => Promise<unknown>>;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    updateResults = [];
+    const read = mockConnectionReads([savedVersion, latestVersion]);
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      const version = read(command);
+      if (version) return version;
+      if (command === "update_connection") {
+        const next = updateResults.shift();
+        return next ? next() : undefined;
+      }
+      return undefined;
+    });
+    sshMocks.loadSshConnections.mockResolvedValue([]);
+    k8sMocks.loadK8sConnections.mockResolvedValue([]);
+  });
+
+  async function saveEditedHost(host: string) {
+    await waitForLoadedHost("old-host.example");
+    fireEvent.change(screen.getByPlaceholderText("localhost"), {
+      target: { value: host },
+    });
+    fireEvent.click(screen.getByText("newConnection.save"));
+    return screen.findByRole("alert");
+  }
+
+  it("다른 곳에서 바뀐 연결을 저장하면 충돌 안내를 보여주고 덮어쓰지 않는다", async () => {
+    // given
+    updateResults.push(() => Promise.reject("CONNECTION_CONFLICT"));
+    const { onSave } = renderSavedConnection();
+    await waitForLoadedHost("old-host.example");
+    fireEvent.change(screen.getByPlaceholderText("localhost"), {
+      target: { value: "my-host.example" },
+    });
+
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+
+    // then
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("newConnection.conflict.title");
+    expect(alert).toHaveTextContent("newConnection.conflict.message");
+    expect(
+      invokedCommands().filter((command) => command === "update_connection"),
+    ).toHaveLength(1);
+    expect(invokedCommands()).not.toContain("set_connection_tags");
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByPlaceholderText("localhost")).toHaveValue("my-host.example");
+  });
+
+  it("최신 버전 불러오기를 누르면 확인을 받기 전에는 아무것도 다시 읽지 않는다", async () => {
+    // given
+    updateResults.push(() => Promise.reject("CONNECTION_CONFLICT"));
+    renderSavedConnection();
+    const alert = await saveEditedHost("my-host.example");
+
+    // when
+    fireEvent.click(within(alert).getByText("newConnection.conflict.reload"));
+
+    // then
+    expect(
+      screen.getByText("newConnection.conflict.confirmMessage"),
+    ).toBeInTheDocument();
+    expect(
+      invokedCommands().filter((command) => command === "get_connection_by_id"),
+    ).toHaveLength(1);
+    expect(screen.getByPlaceholderText("localhost")).toHaveValue("my-host.example");
+  });
+
+  it("확인 후 최신 저장본을 다시 불러오면 로컬 변경을 버리고 최신 값으로 채운다", async () => {
+    // given
+    updateResults.push(() => Promise.reject("CONNECTION_CONFLICT"));
+    renderSavedConnection();
+    const alert = await saveEditedHost("my-host.example");
+    fireEvent.click(within(alert).getByText("newConnection.conflict.reload"));
+
+    // when
+    fireEvent.click(screen.getByText("newConnection.conflict.confirmReload"));
+
+    // then
+    await waitForLoadedHost("new-host.example");
+    expect(
+      screen.getByPlaceholderText("newConnection.namePlaceholder"),
+    ).toHaveValue("Renamed elsewhere");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("newConnection.conflict.confirmMessage"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("다시 불러온 뒤 저장하면 새로 읽은 revision을 기준으로 저장한다", async () => {
+    // given
+    updateResults.push(() => Promise.reject("CONNECTION_CONFLICT"));
+    const { onSave } = renderSavedConnection();
+    const alert = await saveEditedHost("my-host.example");
+    fireEvent.click(within(alert).getByText("newConnection.conflict.reload"));
+    fireEvent.click(screen.getByText("newConnection.conflict.confirmReload"));
+    await waitForLoadedHost("new-host.example");
+
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+
+    // then
+    await waitFor(() => expect(onSave).toHaveBeenCalled());
+    const updates = vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === "update_connection");
+    expect(updates).toHaveLength(2);
+    expect(updates[1][1]).toMatchObject({
+      name: "Renamed elsewhere",
+      expectedRevision: 6,
+      params: { host: "new-host.example" },
+    });
+  });
+
+  it("이전 자격 증명을 복원하지 못하면 영향받은 연결을 이름으로 알려준다", async () => {
+    // given
+    updateResults.push(() =>
+      Promise.reject("CONNECTION_RECOVERY_REQUIRED:connection-1"),
+    );
+    renderSavedConnection();
+    await waitForLoadedHost("old-host.example");
+    fireEvent.change(screen.getByPlaceholderText("localhost"), {
+      target: { value: "my-host.example" },
+    });
+
+    // when
+    fireEvent.click(screen.getByText("newConnection.save"));
+
+    // then
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("newConnection.recovery.title");
+    expect(
+      within(
+        within(alert).getByRole("list", { name: "newConnection.recovery.affected" }),
+      ).getByText("Existing K8s database"),
+    ).toBeInTheDocument();
+    expect(alert).not.toHaveTextContent("connection-1");
+    expect(screen.queryByText("newConnection.conflict.reload")).not.toBeInTheDocument();
+  });
 });

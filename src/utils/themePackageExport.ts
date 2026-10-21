@@ -55,7 +55,7 @@ export function exportThemePackage(contribution: CatalogTheme, manifest: ThemePa
   return createThemeArchive(new Map([
     [".tabularium", JSON.stringify(validated, null, 2) + "\n"],
     [validated.theme_variants[0].file, JSON.stringify(definition, null, 2) + "\n"],
-    ["README.md", `# ${contribution.entry.name}\n\nExported from Tabularis. Review attribution and obtain redistribution rights before publication.\n`],
+    ["README.md", `# ${contribution.entry.name}\n\nExported from Tabularis Extended. Review attribution and obtain redistribution rights before publication.\n`],
     ["LICENSE.txt", licenseText],
   ]));
 }

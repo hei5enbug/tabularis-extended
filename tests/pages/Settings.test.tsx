@@ -223,7 +223,7 @@ describe("update navigation", () => {
     const infoButton = screen.getByRole("button", { name: /^Info/ });
     const coreBadge = within(infoButton).getByText("1");
     fireEvent.focus(infoButton);
-    expect(screen.getByRole("tooltip")).toHaveTextContent("Tabularis 0.25.0 è disponibile");
+    expect(screen.getByRole("tooltip")).toHaveTextContent("Tabularis Extended 0.25.0 è disponibile");
     // Same pill everywhere: the rail, Info and Plugins counters share tone and shape.
     for (const badge of [railBadge, coreBadge, pluginBadge]) {
       expect(badge).toHaveClass("rounded-full");

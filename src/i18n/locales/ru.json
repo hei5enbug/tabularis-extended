@@ -241,8 +241,8 @@
   },
   "mcp": {
     "title": "Интеграция MCP-сервера",
-    "subtitle": "Подключить Tabularis к Claude Desktop, Cursor и другим клиентам",
-    "description": "Model Context Protocol (MCP) позволяет AI-ассистентам (например, Claude) подключаться к локальным инструментам. Tabularis предоставляет MCP-сервер, через который AI читает схему базы данных и выполняет запросы.",
+    "subtitle": "Подключить Tabularis Extended к Claude Desktop, Cursor и другим клиентам",
+    "description": "Model Context Protocol (MCP) позволяет AI-ассистентам (например, Claude) подключаться к локальным инструментам. Tabularis Extended предоставляет MCP-сервер, через который AI читает схему базы данных и выполняет запросы.",
     "checking": "Проверка конфигурации...",
     "configPath": "Файл конфигурации",
     "notFound": "Файл конфигурации не найден (создайте вручную)",
@@ -276,7 +276,7 @@
       "allowListDesc": "Отметьте подключения, которым разрешена запись. Остальные — только для чтения.",
       "approvalTitle": "Подтверждение операций",
       "approvalMode": "Требовать подтверждение",
-      "approvalModeDesc": "Приостанавливать запись (или любой запрос) и запрашивать подтверждение в Tabularis перед отправкой в базу данных.",
+      "approvalModeDesc": "Приостанавливать запись (или любой запрос) и запрашивать подтверждение в Tabularis Extended перед отправкой в базу данных.",
       "modeOff": "Выключено",
       "modeWritesOnly": "Только запись",
       "modeAll": "Все запросы",
@@ -285,7 +285,7 @@
       "preflightExplain": "Предварительный EXPLAIN",
       "preflightExplainDesc": "Выполнить EXPLAIN перед показом окна подтверждения, чтобы пользователь видел план выполнения.",
       "approvalAlwaysOnTop": "Выводить диалог подтверждения поверх всех окон",
-      "approvalAlwaysOnTopDesc": "Когда действие MCP не только на чтение требует подтверждения, Tabularis выводится на передний план и временно остаётся поверх других окон.",
+      "approvalAlwaysOnTopDesc": "Когда действие MCP не только на чтение требует подтверждения, Tabularis Extended выводится на передний план и временно остаётся поверх других окон.",
       "approvalNotifySound": "Отправлять уведомление и проигрывать звук",
       "approvalNotifySoundDesc": "Показывает системное уведомление и воспроизводит короткий сигнал, когда приходит новый запрос на подтверждение MCP."
     }
@@ -882,16 +882,16 @@
       "changeFolder": "Изменить папку…",
       "openFolder": "Открыть папку",
       "resetToDefault": "Использовать расположение по умолчанию",
-      "concurrencyWarning": "Tabularis читает эту папку при запуске. Не запускайте два экземпляра с одной папкой одновременно, например на двух компьютерах во время синхронизации.",
+      "concurrencyWarning": "Tabularis Extended читает эту папку при запуске. Не запускайте два экземпляра с одной папкой одновременно, например на двух компьютерах во время синхронизации.",
       "newFolder": "Новая папка",
       "modeExisting": "Использовать данные, уже находящиеся в этой папке",
-      "modeExistingDesc": "В этой папке уже есть данные Tabularis, например синхронизированные с другого компьютера.",
+      "modeExistingDesc": "В этой папке уже есть данные Tabularis Extended, например синхронизированные с другого компьютера.",
       "modeCopy": "Скопировать мои текущие данные в эту папку",
       "modeCopyDesc": "Файлы, уже находящиеся в папке, сохраняются. Установленные плагины не копируются.",
       "modeEmpty": "Начать с пустой папки",
       "apply": "Применить",
       "restartRequired": "Требуется перезапуск",
-      "restartRequiredDesc": "После перезапуска Tabularis будет использовать {{path}}.",
+      "restartRequiredDesc": "После перезапуска Tabularis Extended будет использовать {{path}}.",
       "restartNow": "Перезапустить сейчас"
     },
     "backup": {
@@ -954,7 +954,7 @@
       "core_other": "Доступно {{count}} обновлений ядра",
       "plugins_one": "Доступно {{count}} обновление плагина",
       "plugins_other": "Доступно {{count}} обновлений плагинов",
-      "coreDetails": "Доступен Tabularis {{version}}. Откройте раздел «О программе», чтобы посмотреть обновление ядра.",
+      "coreDetails": "Доступен Tabularis Extended {{version}}. Откройте раздел «О программе», чтобы посмотреть обновление ядра.",
       "pluginDetails_one": "Доступно обновление для: {{plugins}}",
       "pluginDetails_other": "Доступны обновления для: {{plugins}}",
       "toastTitle": "Доступны обновления плагинов",
@@ -984,7 +984,7 @@
     "error": "Ошибка обновления",
     "currentVersion": "Текущая версия",
     "managedByPackageManager": "Обновления управляются через {{source}}",
-    "managedByPackageManagerDesc": "Для обновления Tabularis используйте менеджер пакетов."
+    "managedByPackageManagerDesc": "Для обновления Tabularis Extended используйте менеджер пакетов."
   },
   "ai": {
     "assist": "AI-помощник",
@@ -1081,7 +1081,7 @@
     },
     "advanced": "Дополнительно",
     "pipesAsConcat": "Устанавливать sql_mode PIPES_AS_CONCAT при подключении",
-    "pipesAsConcatHint": "Оставьте включённым — Tabularis автоматически пропускает это на серверах, которые его отклоняют (Vitess/PlanetScale).",
+    "pipesAsConcatHint": "Оставьте включённым — Tabularis Extended автоматически пропускает это на серверах, которые его отклоняют (Vitess/PlanetScale).",
     "chooseContext": "Выберите контекст...",
     "chooseK8s": "Выберите подключение...",
     "chooseNamespace": "Выберите пространство имён...",
@@ -1986,7 +1986,7 @@
       "processCount_other": "{{count}} системных процессов"
     },
     "tabularisProcess": {
-      "title": "Процесс Tabularis",
+      "title": "Процесс Tabularis Extended",
       "cpu": "CPU",
       "ram": "RAM",
       "diskRead": "Чтение с диска/с",
@@ -2217,7 +2217,7 @@
     "approve": "Подтвердить",
     "deny": "Отклонить",
     "notificationTitle": "Требуется подтверждение MCP",
-    "notificationBody": "Откройте Tabularis, чтобы проверить ожидающее подтверждение MCP."
+    "notificationBody": "Откройте Tabularis Extended, чтобы проверить ожидающее подтверждение MCP."
   },
   "discordCallout": {
     "title": "Новое сообщество в Discord!",

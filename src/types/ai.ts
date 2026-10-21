@@ -3,6 +3,8 @@
 
 export type AiQueryKind = "select" | "write" | "ddl" | "unknown";
 
+export type ApprovalQueryKind = AiQueryKind | `service:${string}`;
+
 export type AiActivityStatus =
   | "success"
   | "blocked_readonly"
@@ -63,7 +65,8 @@ export interface PendingApproval {
   connectionId: string;
   connectionName: string;
   query: string;
-  queryKind: AiQueryKind;
+  /** `service:<operation>` for approvals raised by the common service layer. */
+  queryKind: ApprovalQueryKind;
   clientHint: string | null;
   explainPlan: unknown | null;
   explainError: string | null;

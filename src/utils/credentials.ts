@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { ConnectionAppearance } from "../contexts/DatabaseContext";
 
 interface ConnectionParams {
   driver: string;
@@ -33,6 +34,10 @@ export interface SavedConnectionWithCredentials {
   params: ConnectionParams;
   /** Change counter of the saved connection; absent means 1. */
   revision?: number;
+  detect_json_in_text_columns?: boolean;
+  appearance?: ConnectionAppearance;
+  tag_ids?: string[];
+  environment?: "development" | "staging" | "production";
 }
 
 export async function fetchConnectionWithCredentials(

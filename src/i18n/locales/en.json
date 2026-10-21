@@ -241,8 +241,8 @@
   },
   "mcp": {
     "title": "MCP Server Integration",
-    "subtitle": "Connect Tabularis to Claude Desktop, Cursor, and more",
-    "description": "The Model Context Protocol (MCP) allows AI assistants (like Claude) to connect to your local tools. Tabularis exposes an MCP server that lets AI read your database schema and execute queries safely.",
+    "subtitle": "Connect Tabularis Extended to Claude Desktop, Cursor, and more",
+    "description": "The Model Context Protocol (MCP) allows AI assistants (like Claude) to connect to your local tools. Tabularis Extended exposes an MCP server that lets AI read your database schema and execute queries safely.",
     "checking": "Checking configuration...",
     "configPath": "Config File",
     "notFound": "Config file not found (create manually)",
@@ -276,7 +276,7 @@
       "allowListDesc": "All other connections stay read-only. Only the connections checked here may execute writes.",
       "approvalTitle": "Approval gate",
       "approvalMode": "Approval required",
-      "approvalModeDesc": "Pause writes (or every query) and ask the user to approve them inside Tabularis before they hit the database.",
+      "approvalModeDesc": "Pause writes (or every query) and ask the user to approve them inside Tabularis Extended before they hit the database.",
       "modeOff": "Off",
       "modeWritesOnly": "Writes only",
       "modeAll": "All queries",
@@ -285,7 +285,7 @@
       "preflightExplain": "Pre-flight EXPLAIN",
       "preflightExplainDesc": "Run an EXPLAIN against the query before showing the approval modal so the user sees the execution plan.",
       "approvalAlwaysOnTop": "Bring approval dialog to the front",
-      "approvalAlwaysOnTopDesc": "When a non-read MCP action needs approval, bring Tabularis to the front and keep it temporarily above other windows.",
+      "approvalAlwaysOnTopDesc": "When a non-read MCP action needs approval, bring Tabularis Extended to the front and keep it temporarily above other windows.",
       "approvalNotifySound": "Send notification and play sound",
       "approvalNotifySoundDesc": "Show a native system notification and play a short alert sound when a new MCP approval request arrives."
     }
@@ -317,6 +317,11 @@
     "failConnect": "Failed to connect to {{name}}. Please check your settings or ensuring the database is running.",
     "failDisconnect": "Failed to disconnect from database",
     "failDuplicate": "Failed to duplicate connection",
+    "saveIssue": {
+      "conflict": "The connection changed elsewhere since this list was loaded, so the change was not applied. Try again.",
+      "recovery_one": "The change failed and the previous credentials of {{names}} could not be restored. Open the connection, enter its password again and save.",
+      "recovery_other": "The change failed and the previous credentials of these connections could not be restored: {{names}}. Open each connection, enter its password again and save."
+    },
     "connecting": "Connecting...",
     "open": "Open",
     "pluginDisabled": "Plugin disabled",
@@ -754,7 +759,7 @@
     "plugins": {
       "runtimeTitle": "Plugin runtime",
       "callTimeout": "Call timeout",
-      "callTimeoutDesc": "Maximum time Tabularis waits for a plugin to answer a single request (queries included). Set 0 to disable the limit. Each plugin can override this value in its own settings.",
+      "callTimeoutDesc": "Maximum time Tabularis Extended waits for a plugin to answer a single request (queries included). Set 0 to disable the limit. Each plugin can override this value in its own settings.",
       "title": "Plugins",
       "overviewTitle": "Plugin Center",
       "overviewDesc": "Install extensions, manage plugin drivers, and keep runtime settings under control.",
@@ -933,16 +938,16 @@
       "changeFolder": "Change folder…",
       "openFolder": "Open folder",
       "resetToDefault": "Use default location",
-      "concurrencyWarning": "Tabularis reads this folder when it starts. Avoid running two instances on the same folder at the same time, for example on two machines while it is still syncing.",
+      "concurrencyWarning": "Tabularis Extended reads this folder when it starts. Avoid running two instances on the same folder at the same time, for example on two machines while it is still syncing.",
       "newFolder": "New folder",
       "modeExisting": "Use the data already in this folder",
-      "modeExistingDesc": "This folder already contains Tabularis data, for example synced from another machine.",
+      "modeExistingDesc": "This folder already contains Tabularis Extended data, for example synced from another machine.",
       "modeCopy": "Copy my current data into this folder",
       "modeCopyDesc": "Files already in the folder are kept. Installed plugins are not copied.",
       "modeEmpty": "Start with an empty folder",
       "apply": "Apply",
       "restartRequired": "Restart required",
-      "restartRequiredDesc": "Tabularis will use {{path}} after a restart.",
+      "restartRequiredDesc": "Tabularis Extended will use {{path}} after a restart.",
       "restartNow": "Restart now"
     },
     "backup": {
@@ -1005,7 +1010,7 @@
       "core_other": "{{count}} core updates available",
       "plugins_one": "{{count}} plugin update available",
       "plugins_other": "{{count}} plugin updates available",
-      "coreDetails": "Tabularis {{version}} is available. Open Info to review the core update.",
+      "coreDetails": "Tabularis Extended {{version}} is available. Open Info to review the core update.",
       "pluginDetails_one": "Update available for: {{plugins}}",
       "pluginDetails_other": "Updates available for: {{plugins}}",
       "toastTitle": "Plugin updates available",
@@ -1029,7 +1034,7 @@
     "error": "Update Error",
     "currentVersion": "Current version",
     "managedByPackageManager": "Updates managed by {{source}}",
-    "managedByPackageManagerDesc": "Use your package manager to update Tabularis.",
+    "managedByPackageManagerDesc": "Use your package manager to update Tabularis Extended.",
     "disabledInExtended": "Automatic updates are disabled",
     "disabledInExtendedDesc": "Tabularis Extended is installed from its own build. It never contacts the official Tabularis update feed.",
     "nightlyWarning": "Nightly builds are unstable pre-releases. Only assets built for the nightly channel are installed."
@@ -1113,6 +1118,22 @@
     "testConnection": "Test Connection",
     "save": "Save",
     "failSave": "Failed to save connection",
+    "conflict": {
+      "title": "This connection changed elsewhere",
+      "message": "It was saved from another window or tool after you opened it, so your changes were not saved. Reload the latest saved version to continue.",
+      "reload": "Reload latest",
+      "confirmTitle": "Discard your changes?",
+      "confirmMessage": "Reloading replaces everything you changed in this dialog with the latest saved version of the connection. Your unsaved changes will be lost.",
+      "confirmReload": "Discard and reload",
+      "reloadFailed": "Could not reload the connection: {{error}}",
+      "reloadMissing": "The latest saved version could not be read."
+    },
+    "recovery": {
+      "title": "Saved credentials need attention",
+      "message_one": "The save failed and the previous credentials of this connection could not be restored. Enter its password again and save.",
+      "message_other": "The save failed and the previous credentials of these connections could not be restored. Enter their passwords again and save.",
+      "affected": "Affected connections"
+    },
     "selectSshConnection": "Select SSH Connection",
     "useSshConnection": "Use Existing SSH Connection",
     "createInlineSsh": "Configure SSH Inline",
@@ -1132,7 +1153,7 @@
     },
     "advanced": "Advanced",
     "pipesAsConcat": "Set PIPES_AS_CONCAT sql_mode on connect",
-    "pipesAsConcatHint": "Leave enabled — Tabularis automatically skips it on servers that reject it (Vitess/PlanetScale).",
+    "pipesAsConcatHint": "Leave enabled — Tabularis Extended automatically skips it on servers that reject it (Vitess/PlanetScale).",
     "chooseContext": "Choose a context...",
     "chooseK8s": "Choose a connection...",
     "chooseNamespace": "Choose a namespace...",
@@ -2024,7 +2045,7 @@
       "processCount_other": "{{count}} system processes running"
     },
     "tabularisProcess": {
-      "title": "Tabularis Process",
+      "title": "Tabularis Extended Process",
       "cpu": "CPU",
       "ram": "RAM",
       "diskRead": "Disk Read/s",
@@ -2231,7 +2252,82 @@
     "approve": "Approve",
     "deny": "Deny",
     "notificationTitle": "MCP approval needed",
-    "notificationBody": "Open Tabularis to review the pending MCP approval."
+    "notificationBody": "Open Tabularis Extended to review the pending MCP approval.",
+    "service": {
+      "request": "Request",
+      "locked": "Approve or deny only: this exact request cannot be edited",
+      "operation": "Operation",
+      "target": "Connection",
+      "newConnection": "New connection",
+      "changes": "Requested change",
+      "field": "Field",
+      "value": "Value",
+      "noChanges": "The request sets no fields.",
+      "rawRequest": "Full request",
+      "retargetTitle": "Stored credentials will be sent to a new target",
+      "retargetBody": "This change points {{connection}} at a different host or database. The password and other secrets saved for it will be sent to the new target when it connects. Approve only if you trust that target."
+    }
+  },
+  "profileImport": {
+    "title": "Import from Tabularis",
+    "subtitle": "Bring your official Tabularis profile into Tabularis Extended",
+    "description": "Tabularis Extended found a profile from the official Tabularis app. Importing copies it into Tabularis Extended:",
+    "items": {
+      "connections": "Connections",
+      "groups": "Groups",
+      "savedQueries": "Saved queries",
+      "notebooks": "Notebooks",
+      "themes": "Themes",
+      "pluginPackages": "Plugin packages",
+      "settings": "Settings"
+    },
+    "untouched": "The official Tabularis app and its data stay untouched: the import only reads them, after saving a backup copy.",
+    "keychainNotice": "macOS will ask you to allow keychain access for each saved password. Choose Allow so the passwords can be copied; a denied prompt stops the import without changing anything.",
+    "laterHint": "Not now keeps this profile empty. You can run the import later from Settings › Storage until Tabularis Extended has data of its own.",
+    "import": "Import",
+    "notNow": "Not now",
+    "importing": "Importing your profile…",
+    "importingKeychain": "Answer the keychain prompts as they appear.",
+    "failedTitle": "The import did not run",
+    "result": {
+      "title": "Import complete",
+      "pluginPackagesCopied": "Plugin packages copied",
+      "secretsStored": "Passwords stored in the keychain",
+      "remapped": "Connections moved to Plus drivers",
+      "pluginPackagesSkipped_one": "1 plugin package was not copied. Install it again from Settings › Plugins:",
+      "pluginPackagesSkipped_other": "{{count}} plugin packages were not copied. Install them again from Settings › Plugins:",
+      "unconverted_one": "1 connection keeps its original driver because its settings cannot be converted automatically:",
+      "unconverted_other": "{{count}} connections keep their original drivers because their settings cannot be converted automatically:",
+      "remapUnavailable": "Connections could not be moved to the Plus drivers; they keep their original drivers.",
+      "skippedLinks_one": "1 symbolic link was skipped.",
+      "skippedLinks_other": "{{count}} symbolic links were skipped.",
+      "backup": "Backup of the official profile: {{path}}",
+      "restartHint": "Restart Tabularis Extended to load the imported settings, themes and plugins. Settings changes are not saved until then.",
+      "restart": "Restart now",
+      "retryRestart": "Try restarting again",
+      "restartFailed": "Tabularis Extended could not restart itself. Try again, or quit and reopen the app."
+    },
+    "errors": {
+      "IMPORT_SOURCE_NOT_FOUND": "No official Tabularis profile was found on this computer, so nothing was imported.",
+      "IMPORT_DESTINATION_NOT_EMPTY": "Tabularis Extended already has data of its own, so nothing was imported. The import only runs into an empty profile.",
+      "IMPORT_SOURCE_IS_DESTINATION": "The official profile and the Tabularis Extended profile are the same folder, so nothing was imported.",
+      "IMPORT_BACKUP_FAILED": "The official profile could not be backed up, so nothing was imported.",
+      "IMPORT_BUILD_FAILED": "The profile could not be copied. Nothing was changed.",
+      "IMPORT_SECRET_FAILED": "A saved password could not be copied to the keychain, for example because access was denied. Nothing was changed; run the import again and allow keychain access.",
+      "IMPORT_PUBLISH_FAILED": "The imported profile could not be put in place. Nothing was changed.",
+      "unknown": "The import failed: {{error}}"
+    },
+    "settings": {
+      "title": "Official Tabularis profile",
+      "label": "Import from Tabularis",
+      "description": "Copies connections, groups, saved queries, notebooks, themes, settings and plugin packages from the official Tabularis app. The official app and its data stay untouched.",
+      "ready_one": "An official Tabularis profile with 1 connection is ready to import.",
+      "ready_other": "An official Tabularis profile with {{count}} connections is ready to import.",
+      "noSource": "No official Tabularis profile was found on this computer.",
+      "notEmpty": "Tabularis Extended already has data of its own, so the import is no longer available.",
+      "statusFailed": "Could not check the official profile: {{error}}",
+      "button": "Import from Tabularis…"
+    }
   },
   "discordCallout": {
     "title": "Brand-new Discord community!",
@@ -2367,7 +2463,7 @@
   },
   "deepLink": {
     "installTitle": "Install plugin from registry",
-    "installSubtitle": "A Tabularium registry asked Tabularis to install a plugin.",
+    "installSubtitle": "A Tabularium registry asked Tabularis Extended to install a plugin.",
     "plugin": "Plugin",
     "version": "Version",
     "registry": "Registry",

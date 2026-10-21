@@ -248,8 +248,8 @@
   },
   "mcp": {
     "title": "Integrazione Server MCP",
-    "subtitle": "Connetti Tabularis a Claude Desktop, Cursor e altri",
-    "description": "Il Model Context Protocol (MCP) permette agli assistenti AI (come Claude) di connettersi ai tuoi strumenti locali. Tabularis espone un server MCP che permette all'AI di leggere lo schema del database ed eseguire query in sicurezza.",
+    "subtitle": "Connetti Tabularis Extended a Claude Desktop, Cursor e altri",
+    "description": "Il Model Context Protocol (MCP) permette agli assistenti AI (come Claude) di connettersi ai tuoi strumenti locali. Tabularis Extended espone un server MCP che permette all'AI di leggere lo schema del database ed eseguire query in sicurezza.",
     "checking": "Verifica configurazione...",
     "configPath": "File di Configurazione",
     "notFound": "File config non trovato (crealo manualmente)",
@@ -283,7 +283,7 @@
       "allowListDesc": "Tutte le altre connessioni restano in sola lettura. Solo quelle selezionate possono eseguire scritture.",
       "approvalTitle": "Approvazione manuale",
       "approvalMode": "Approvazione richiesta",
-      "approvalModeDesc": "Sospendi le scritture (o ogni query) chiedendo conferma all'utente in Tabularis prima dell'esecuzione.",
+      "approvalModeDesc": "Sospendi le scritture (o ogni query) chiedendo conferma all'utente in Tabularis Extended prima dell'esecuzione.",
       "modeOff": "Disattiva",
       "modeWritesOnly": "Solo scritture",
       "modeAll": "Tutte le query",
@@ -292,7 +292,7 @@
       "preflightExplain": "EXPLAIN preliminare",
       "preflightExplainDesc": "Esegui un EXPLAIN della query prima di mostrare il modal di approvazione, così l'utente vede il piano di esecuzione.",
       "approvalAlwaysOnTop": "Porta il dialogo di approvazione in primo piano",
-      "approvalAlwaysOnTopDesc": "Quando un’azione MCP diversa dalla sola lettura richiede approvazione, porta Tabularis in primo piano e tienilo temporaneamente sopra le altre finestre.",
+      "approvalAlwaysOnTopDesc": "Quando un’azione MCP diversa dalla sola lettura richiede approvazione, porta Tabularis Extended in primo piano e tienilo temporaneamente sopra le altre finestre.",
       "approvalNotifySound": "Invia notifica e riproduci un suono",
       "approvalNotifySoundDesc": "Mostra una notifica nativa del sistema e riproduce un breve suono di avviso quando arriva una nuova richiesta di approvazione MCP."
     }
@@ -742,7 +742,7 @@
     "plugins": {
       "runtimeTitle": "Runtime dei plugin",
       "callTimeout": "Timeout delle chiamate",
-      "callTimeoutDesc": "Tempo massimo di attesa di Tabularis per la risposta di un plugin a una singola richiesta (query incluse). Imposta 0 per disattivare il limite. Ogni plugin può sovrascrivere questo valore nelle proprie impostazioni.",
+      "callTimeoutDesc": "Tempo massimo di attesa di Tabularis Extended per la risposta di un plugin a una singola richiesta (query incluse). Imposta 0 per disattivare il limite. Ogni plugin può sovrascrivere questo valore nelle proprie impostazioni.",
       "title": "Plugin",
       "overviewTitle": "Centro Plugin",
       "overviewDesc": "Installa estensioni, gestisci i driver dei plugin e tieni sotto controllo le impostazioni di runtime.",
@@ -920,16 +920,16 @@
       "changeFolder": "Cambia cartella…",
       "openFolder": "Apri cartella",
       "resetToDefault": "Usa percorso predefinito",
-      "concurrencyWarning": "Tabularis legge questa cartella all'avvio. Evita di eseguire due istanze sulla stessa cartella contemporaneamente, ad esempio su due computer durante la sincronizzazione.",
+      "concurrencyWarning": "Tabularis Extended legge questa cartella all'avvio. Evita di eseguire due istanze sulla stessa cartella contemporaneamente, ad esempio su due computer durante la sincronizzazione.",
       "newFolder": "Nuova cartella",
       "modeExisting": "Usa i dati già presenti in questa cartella",
-      "modeExistingDesc": "Questa cartella contiene già dati di Tabularis, ad esempio sincronizzati da un altro computer.",
+      "modeExistingDesc": "Questa cartella contiene già dati di Tabularis Extended, ad esempio sincronizzati da un altro computer.",
       "modeCopy": "Copia i miei dati attuali in questa cartella",
       "modeCopyDesc": "I file già presenti nella cartella vengono mantenuti. I plugin installati non vengono copiati.",
       "modeEmpty": "Inizia con una cartella vuota",
       "apply": "Applica",
       "restartRequired": "Riavvio necessario",
-      "restartRequiredDesc": "Tabularis userà {{path}} dopo il riavvio.",
+      "restartRequiredDesc": "Tabularis Extended userà {{path}} dopo il riavvio.",
       "restartNow": "Riavvia ora"
     },
     "backup": {
@@ -992,7 +992,7 @@
       "core_other": "{{count}} aggiornamenti core disponibili",
       "plugins_one": "{{count}} aggiornamento plugin disponibile",
       "plugins_other": "{{count}} aggiornamenti plugins disponibili",
-      "coreDetails": "Tabularis {{version}} è disponibile. Apri Info per consultare l’aggiornamento del core.",
+      "coreDetails": "Tabularis Extended {{version}} è disponibile. Apri Info per consultare l’aggiornamento del core.",
       "pluginDetails_one": "Aggiornamento disponibile per: {{plugins}}",
       "pluginDetails_other": "Aggiornamenti disponibili per: {{plugins}}",
       "toastTitle": "Aggiornamenti dei plugin disponibili",
@@ -1019,7 +1019,7 @@
     "error": "Errore Aggiornamento",
     "currentVersion": "Versione attuale",
     "managedByPackageManager": "Aggiornamenti gestiti da {{source}}",
-    "managedByPackageManagerDesc": "Usa il tuo package manager per aggiornare Tabularis."
+    "managedByPackageManagerDesc": "Usa il tuo package manager per aggiornare Tabularis Extended."
   },
   "ai": {
     "assist": "AI Assist",
@@ -1119,7 +1119,7 @@
     },
     "advanced": "Avanzate",
     "pipesAsConcat": "Imposta sql_mode PIPES_AS_CONCAT alla connessione",
-    "pipesAsConcatHint": "Lascia attivo — Tabularis lo salta automaticamente sui server che lo rifiutano (Vitess/PlanetScale).",
+    "pipesAsConcatHint": "Lascia attivo — Tabularis Extended lo salta automaticamente sui server che lo rifiutano (Vitess/PlanetScale).",
     "chooseContext": "Scegli un contesto...",
     "chooseK8s": "Scegli una connessione...",
     "chooseNamespace": "Scegli un namespace...",
@@ -1964,7 +1964,7 @@
       "processCount_other": "{{count}} processi di sistema in esecuzione"
     },
     "tabularisProcess": {
-      "title": "Processo Tabularis",
+      "title": "Processo Tabularis Extended",
       "cpu": "CPU",
       "ram": "RAM",
       "diskRead": "Lettura Disco/s",
@@ -2151,7 +2151,7 @@
     "approve": "Approva",
     "deny": "Nega",
     "notificationTitle": "Approvazione MCP necessaria",
-    "notificationBody": "Apri Tabularis per esaminare l’approvazione MCP in sospeso."
+    "notificationBody": "Apri Tabularis Extended per esaminare l’approvazione MCP in sospeso."
   },
   "discordCallout": {
     "title": "Nuova community Discord!",
@@ -2287,7 +2287,7 @@
   },
   "deepLink": {
     "installTitle": "Installa plugin dal registro",
-    "installSubtitle": "Un registro Tabularium ha chiesto a Tabularis di installare un plugin.",
+    "installSubtitle": "Un registro Tabularium ha chiesto a Tabularis Extended di installare un plugin.",
     "plugin": "Plugin",
     "version": "Versione",
     "registry": "Registro",

@@ -6,10 +6,14 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type EventCallback } from "@tauri-apps/api/event";
 import React from "react";
 import type { Settings } from "../../src/contexts/SettingsContext";
+import { isProfileImportAwaitingRestart } from "../../src/utils/profileImportSession";
 
 vi.mock("@tauri-apps/api/core");
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(),
+}));
+vi.mock("../../src/utils/profileImportSession", () => ({
+  isProfileImportAwaitingRestart: vi.fn(),
 }));
 
 // Mock react-i18next
@@ -664,6 +668,57 @@ describe("SettingsProvider", () => {
         expect(result.current.settings.activeExternalDrivers).toEqual(["postgresql"]);
       });
       expect(result.current.settings.fontFamily).toBe("Hack");
+    });
+  });
+});
+
+describe("SettingsProvider after a profile import", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    localStorage.clear();
+    vi.mocked(listen).mockResolvedValue(() => {});
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "get_config") return { language: "en" };
+      if (cmd === "get_ai_models") return {};
+      return undefined;
+    });
+  });
+
+  it("공식 프로필을 가져온 뒤 재시작 전에는 설정을 바꿔도 save_config로 저장하지 않는다", async () => {
+    // given
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      React.createElement(SettingsProvider, null, children);
+    const { result } = renderHook(() => useSettings(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    vi.mocked(isProfileImportAwaitingRestart).mockReturnValue(true);
+
+    // when
+    await act(async () => {
+      await result.current.updateSetting("showWelcome", false);
+    });
+
+    // then
+    expect(result.current.settings.showWelcome).toBe(false);
+    expect(invoke).not.toHaveBeenCalledWith("save_config", expect.anything());
+  });
+
+  it("가져오기가 없었다면 설정 변경을 이전처럼 저장한다", async () => {
+    // given
+    const wrapper = ({ children }: { children: React.ReactNode }) =>
+      React.createElement(SettingsProvider, null, children);
+    const { result } = renderHook(() => useSettings(), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    vi.mocked(isProfileImportAwaitingRestart).mockReturnValue(false);
+
+    // when
+    await act(async () => {
+      await result.current.updateSetting("showWelcome", false);
+    });
+
+    // then
+    expect(invoke).toHaveBeenCalledWith("save_config", {
+      config: expect.objectContaining({ showWelcome: false }),
     });
   });
 });
