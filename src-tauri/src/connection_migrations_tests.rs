@@ -5,7 +5,7 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::connection_migrations::{
-        connections_file_changed_concurrently, migrate_connection_ssl_mode_in_place,
+        migrate_connection_ssl_mode_in_place,
         migrate_postgres_ssl_mode_spelling_at_path, stale_postgres_ssl_mode_replacement,
     };
     use crate::drivers::driver_trait::SqlDialect;
@@ -38,6 +38,7 @@ mod tests {
             appearance: None,
             tag_ids: None,
             environment: None,
+            revision: crate::models::INITIAL_REVISION,
         }
     }
 
@@ -178,13 +179,6 @@ mod tests {
         assert_eq!(conn.params.ssl_mode.as_deref(), Some("require"));
     }
 
-    #[test]
-    fn connections_file_changed_concurrently_detects_any_byte_difference() {
-        assert!(!connections_file_changed_concurrently("{}", "{}"));
-        assert!(connections_file_changed_concurrently("{}", "{ }"));
-        assert!(connections_file_changed_concurrently("", "{}"));
-    }
-
     // --- migrate_postgres_ssl_mode_spelling_at_path: path-based core ---
     //
     // These exercise only the two no-op paths (missing file; a file whose
@@ -193,14 +187,11 @@ mod tests {
     // fully covered above by migrate_connection_ssl_mode_in_place's tests,
     // which take a `dialects` map directly.
     //
-    // NOT covered here: the actual rewrite-and-save success path (Ok(true))
-    // and the concurrent-change skip branch inside this function. Both
-    // require a driver registered under a non-"postgres" id resolving to
+    // NOT covered here: the actual rewrite-and-save success path (Ok(true)).
+    // It requires a driver registered under a non-"postgres" id resolving to
     // Postgres dialect, which needs either a live plugin process or a full
     // DatabaseDriver mock (62 required methods, only 5 with default bodies)
-    // — judged disproportionate for this test. The pure concurrency-guard
-    // logic itself (`connections_file_changed_concurrently`) is fully
-    // covered above in isolation.
+    // — judged disproportionate for this test.
 
     #[tokio::test]
     async fn migrate_postgres_ssl_mode_spelling_at_path_is_a_noop_for_a_missing_file() {

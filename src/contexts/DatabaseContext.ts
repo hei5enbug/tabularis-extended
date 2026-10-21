@@ -69,6 +69,10 @@ export interface SavedConnection {
   };
   group_id?: string;
   sort_order?: number;
+  /** Change counter of this connection; absent means 1. Sent back as
+   * `expectedRevision` so a save over a newer edit is rejected with
+   * CONNECTION_CONFLICT. */
+  revision?: number;
   /** Per-connection opt-in: detect JSON in plain text columns. */
   detect_json_in_text_columns?: boolean;
   appearance?: ConnectionAppearance;

@@ -3,6 +3,7 @@ use super::dispatch::*;
 use serde::Deserialize;
 use serde_json::{json, Value};
 mod azure_cli;
+mod driver_owned_entra;
 mod lifecycle;
 mod newguiinput;
 mod oauth;

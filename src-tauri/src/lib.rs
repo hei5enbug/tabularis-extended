@@ -39,6 +39,7 @@ pub mod connection_cache;
 #[cfg(test)]
 pub mod connection_cache_tests;
 pub mod connection_migrations;
+pub mod connection_store;
 #[cfg(test)]
 pub mod connection_migrations_tests;
 pub mod connection_tags;
@@ -512,6 +513,7 @@ pub fn run() {
             sqlite_database::create_sqlite_database,
             commands::delete_connection,
             commands::update_connection,
+            commands::update_connection_password,
             commands::duplicate_connection,
             commands::get_connections,
             commands::get_connection_by_id,

@@ -16,6 +16,9 @@ use std::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 
+/// Driver that signs in with Entra itself and advertises `entra_token: false`;
+/// the host never acquires a token for it.
+pub const DRIVER_OWNED_ENTRA_DRIVER: &str = "sqlserver-plus";
 pub const AUTH_TTL_MS: u64 = 15 * 60 * 1000;
 pub const REFRESH_MARGIN_MS: u64 = 5 * 60 * 1000;
 const MAX_AUTH_IDENTITIES: usize = 256;
@@ -34,6 +37,9 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn from_connection(connection: &SavedConnection) -> ServiceResult<Option<Self>> {
+        if connection.driver == DRIVER_OWNED_ENTRA_DRIVER {
+            return Ok(None);
+        }
         let settings = connection
             .settings
             .get("extra")
@@ -446,6 +452,9 @@ impl AuthManager {
             .unwrap_or(&connection.settings);
         if settings["auth_mode"].as_str() != Some(requested_mode) {
             return Err(failure(ErrorCode::InvalidArgument));
+        }
+        if connection.driver == DRIVER_OWNED_ENTRA_DRIVER && requested_mode.starts_with("entra_") {
+            return Err(failure(ErrorCode::UnsupportedOperation));
         }
         let config = AuthConfig::from_connection(connection)?;
         let id = format!("a-{}", uuid::Uuid::new_v4());

@@ -44,7 +44,6 @@ pub(super) trait PreparationHook: Send + Sync {
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ServiceMetadata {
-    version: u64,
     #[serde(default)]
     allow_writes: bool,
     auth_revision: String,
@@ -105,7 +104,6 @@ impl ProfileConnections {
             let mut metadata = metadata(record, &fingerprint)?;
             let changed = detect_changes && metadata.settings_fingerprint != fingerprint;
             if changed {
-                metadata.version = next_version(metadata.version)?;
                 metadata.auth_revision = uuid::Uuid::new_v4().to_string();
                 metadata.settings_fingerprint = fingerprint;
             }
@@ -142,6 +140,7 @@ impl ProfileConnections {
                 appearance: None,
                 tag_ids: None,
                 environment: None,
+                revision: crate::models::INITIAL_REVISION,
             };
             let mut record = serde_json::to_value(&connection)
                 .map_err(|_| failure(ErrorCode::InvalidArgument))?;
@@ -219,7 +218,7 @@ impl ProfileConnections {
                 .find(|connection| connection.id == id)
                 .ok_or_else(|| failure(ErrorCode::ConnectionNotFound))?;
             if connection.params.driver != driver {
-                return Err(failure(ErrorCode::VersionConflict));
+                return Err(connection_conflict(connection.revision));
             }
             let record = raw_connection(raw, id)?;
             let fingerprint = settings_fingerprint(&merged_params(
@@ -228,9 +227,9 @@ impl ProfileConnections {
                 &connection.params,
             )?);
             let mut metadata = metadata(record, &fingerprint)?;
-            require_observed_settings(&metadata, &fingerprint)?;
-            require_version(metadata.version, expected_version)?;
-            let version = next_version(metadata.version)?;
+            require_observed_settings(connection.revision, &metadata, &fingerprint)?;
+            require_version(connection.revision, expected_version)?;
+            let version = next_version(connection.revision)?;
             if let Some(lease) = lease {
                 lease.mark_write_dispatched()?;
             }
@@ -248,7 +247,7 @@ impl ProfileConnections {
             if let Some(value) = credential_ref {
                 metadata.credential_ref = value;
             }
-            metadata.version = version;
+            connection.revision = version;
             if patch.get("settings").is_some()
                 || patch.get("allow_writes").is_some()
                 || patch.get("credential_ref").is_some()
@@ -401,8 +400,8 @@ impl ConnectionBackend for ProfileConnections {
                 &connection.params,
             )?);
             let metadata = metadata(record, &fingerprint)?;
-            require_observed_settings(&metadata, &fingerprint)?;
-            require_version(metadata.version, expected_version)?;
+            require_observed_settings(connection.revision, &metadata, &fingerprint)?;
+            require_version(connection.revision, expected_version)?;
             file.connections.retain(|connection| connection.id != id);
             raw_connections(raw)?.retain(|connection| connection["id"] != id);
             Ok(())
@@ -428,22 +427,27 @@ fn next_version(version: u64) -> ServiceResult<u64> {
         .filter(|version| *version <= 9_007_199_254_740_991)
         .ok_or_else(|| failure(ErrorCode::ResourceLimit))
 }
+fn connection_conflict(current: u64) -> crate::services::contracts::ServiceError {
+    let mut error = failure(ErrorCode::ConnectionConflict);
+    error.details = json!({"current_version":current});
+    error
+}
 fn require_version(current: u64, expected: u64) -> ServiceResult<()> {
     if current == expected {
         Ok(())
     } else {
-        let mut error = failure(ErrorCode::VersionConflict);
-        error.details = json!({"current_version":current});
-        Err(error)
+        Err(connection_conflict(current))
     }
 }
-fn require_observed_settings(metadata: &ServiceMetadata, fingerprint: &str) -> ServiceResult<()> {
+fn require_observed_settings(
+    revision: u64,
+    metadata: &ServiceMetadata,
+    fingerprint: &str,
+) -> ServiceResult<()> {
     if metadata.settings_fingerprint == fingerprint {
         Ok(())
     } else {
-        let mut error = failure(ErrorCode::VersionConflict);
-        error.details = json!({"current_version":next_version(metadata.version)?});
-        Err(error)
+        Err(connection_conflict(revision))
     }
 }
 fn checked_ref(id: &str, value: &Value) -> ServiceResult<Option<String>> {
@@ -481,17 +485,13 @@ fn metadata(record: &Value, fingerprint: &str) -> ServiceResult<ServiceMetadata>
         Some(value) => serde_json::from_value(value.clone())
             .map_err(|_| failure(ErrorCode::InvalidArgument))?,
         None => ServiceMetadata {
-            version: 1,
             allow_writes: false,
             auth_revision: uuid::Uuid::new_v4().to_string(),
             settings_fingerprint: fingerprint.into(),
             credential_ref: None,
         },
     };
-    if metadata.version == 0
-        || metadata.version > 9_007_199_254_740_991
-        || uuid::Uuid::parse_str(&metadata.auth_revision).is_err()
-    {
+    if uuid::Uuid::parse_str(&metadata.auth_revision).is_err() {
         return Err(failure(ErrorCode::InvalidArgument));
     }
     if let Some(reference) = &metadata.credential_ref {
@@ -537,7 +537,7 @@ fn public(
         driver: connection.params.driver.clone(),
         settings,
         credential_ref: metadata.credential_ref.clone(),
-        version: metadata.version,
+        version: connection.revision,
         allow_writes: metadata.allow_writes,
         auth_revision: metadata.auth_revision.clone(),
     })
@@ -580,6 +580,7 @@ fn checked_params(
     let mut normalized = serde_json::to_value(ConnectionParams::default())
         .map_err(|_| failure(ErrorCode::InvalidArgument))?;
     normalized["driver"] = driver.into();
+    let driver_owns_entra = driver == "sqlserver-plus";
     let mut extra = serde_json::Map::new();
     for (key, value) in settings {
         if key == "extra" {
@@ -592,7 +593,8 @@ fn checked_params(
         } else if matches!(
             key.as_str(),
             "endpoint" | "auth_mode" | "auth_source" | "tenant_id" | "client_id"
-        ) {
+        ) || (driver_owns_entra && matches!(key.as_str(), "entra_object_id" | "azure_cli_path"))
+        {
             extra.insert(key.clone(), value.clone());
         } else {
             if !NONSECRET_PARAMS.contains(&key.as_str()) {
@@ -611,7 +613,7 @@ fn checked_params(
                 | "client_id"
                 | "trust_server_certificate"
                 | "integrated"
-        );
+        ) || (driver_owns_entra && matches!(key.as_str(), "entra_object_id" | "azure_cli_path"));
         let definition = definitions.iter().find(|definition| definition.key == *key);
         if !fixed && definition.is_none() {
             return Err(failure(ErrorCode::InvalidArgument));
@@ -654,7 +656,8 @@ fn checked_params(
         }
     }
     let auth_mode = extra.get("auth_mode").and_then(Value::as_str);
-    if matches!(auth_mode, Some("entra_user" | "entra_service_principal"))
+    if !driver_owns_entra
+        && matches!(auth_mode, Some("entra_user" | "entra_service_principal"))
         && (normalized
             .get("username")
             .is_some_and(|value| !value.is_null())
@@ -693,6 +696,11 @@ fn checked_params(
         serde_json::from_value(normalized).map_err(|_| failure(ErrorCode::InvalidArgument))?;
     params.connection_id = None;
     Ok(params)
+}
+
+#[cfg(test)]
+pub fn checked_params_for_tests(driver: &str, settings: &Value) -> ServiceResult<ConnectionParams> {
+    checked_params(driver, settings, &[])
 }
 
 const NONSECRET_PARAMS: &[&str] = &[

@@ -1483,6 +1483,56 @@ fn authorize_binding(
     }
 }
 
+/// `sqlserver-plus` owns its Entra sign-in: the driver runs Azure CLI itself
+/// and the host neither acquires nor forwards a token, so only the fields the
+/// driver reads are checked and no `client_id` is involved.
+fn validate_driver_owned_entra(settings: &Value, extra: &Value) -> ServiceResult<()> {
+    let text = |key: &str| {
+        settings
+            .get(key)
+            .or_else(|| extra.get(key))
+            .filter(|value| !value.is_null())
+    };
+    let entra_keys = ["auth_source", "tenant_id", "entra_object_id", "azure_cli_path"];
+    match extra["auth_mode"].as_str() {
+        Some("entra_user") => {}
+        Some("entra_service_principal") => return Err(failure(ErrorCode::InvalidArgument)),
+        _ if entra_keys.iter().any(|key| extra.get(*key).is_some()) => {
+            return Err(failure(ErrorCode::InvalidArgument))
+        }
+        _ => return Ok(()),
+    }
+    let required = |key: &str| {
+        text(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| failure(ErrorCode::InvalidArgument))
+    };
+    let tenant = required("tenant_id")?;
+    if extra["auth_source"] != "azure_cli"
+        || required("username").is_err()
+        || required("entra_object_id").is_err()
+        || tenant.starts_with('-')
+        || !tenant
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        || extra["integrated"] == true
+        || extra["integrated"] == "true"
+    {
+        return Err(failure(ErrorCode::InvalidArgument));
+    }
+    if let Some(path) = extra.get("azure_cli_path") {
+        let valid = path.as_str().is_some_and(|path| {
+            !path.is_empty() && path.trim() == path && std::path::Path::new(path).is_absolute()
+        });
+        if !valid {
+            return Err(failure(ErrorCode::InvalidArgument));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_connection_configuration(driver: &str, settings: &Value) -> ServiceResult<()> {
     validate_settings(settings)?;
     if !settings.is_object() {
@@ -1502,7 +1552,9 @@ pub fn validate_connection_configuration(driver: &str, settings: &Value) -> Serv
             return Err(failure(ErrorCode::InvalidArgument));
         }
     }
-    if matches!(
+    if driver == "sqlserver-plus" {
+        validate_driver_owned_entra(settings, extra)?;
+    } else if matches!(
         extra["auth_mode"].as_str(),
         Some("entra_user" | "entra_service_principal")
     ) {
@@ -1517,7 +1569,7 @@ pub fn validate_connection_configuration(driver: &str, settings: &Value) -> Serv
             return Err(failure(ErrorCode::InvalidArgument));
         }
     }
-    if extra.get("auth_source").is_some() {
+    if driver != "sqlserver-plus" && extra.get("auth_source").is_some() {
         if !matches!(extra["auth_source"].as_str(), Some("oauth" | "azure_cli"))
             || (extra["auth_source"] == "azure_cli"
                 && (!matches!(driver, "sqlserver" | "cosmos-nosql")

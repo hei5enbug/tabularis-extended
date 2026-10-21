@@ -250,6 +250,8 @@ pub enum ErrorCode {
     FeatureTooLarge,
     #[serde(rename = "VERSION_CONFLICT")]
     VersionConflict,
+    #[serde(rename = "CONNECTION_CONFLICT")]
+    ConnectionConflict,
     #[serde(rename = "ETAG_CONFLICT")]
     EtagConflict,
     #[serde(rename = "DOCUMENT_ALREADY_EXISTS")]

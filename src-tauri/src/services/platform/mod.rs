@@ -7,6 +7,8 @@ mod isolation;
 pub use access::ProfileAccess;
 pub use approvals::ServiceApprovals;
 pub use connections::{ConnectionObservation, ProfileConnections};
+#[cfg(test)]
+pub use connections::checked_params_for_tests;
 pub use expander::{
     GuiParamExpander, HeadlessParamExpander, NoopParamExpander, ProfileConnectionResolver,
     ServiceParamExpander,

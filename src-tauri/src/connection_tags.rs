@@ -5,7 +5,7 @@
 use tauri::{AppHandle, Runtime};
 use uuid::Uuid;
 
-use crate::commands::{get_config_path, save_connections_and_invalidate};
+use crate::commands::{get_config_path, update_connections_and_invalidate};
 use crate::models::{ConnectionTag, ConnectionsFile};
 use crate::persistence;
 
@@ -187,10 +187,7 @@ pub async fn create_connection_tag<R: Runtime>(
     color: String,
 ) -> Result<ConnectionTag, String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    let tag = create_tag_impl(&mut file, &name, &color)?;
-    save_connections_and_invalidate(&app, &path, &file)?;
-    Ok(tag)
+    update_connections_and_invalidate(&app, &path, |file| create_tag_impl(file, &name, &color))
 }
 
 #[tauri::command]
@@ -201,9 +198,9 @@ pub async fn update_connection_tag<R: Runtime>(
     color: String,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    update_tag_impl(&mut file, &id, &name, &color)?;
-    save_connections_and_invalidate(&app, &path, &file)
+    update_connections_and_invalidate(&app, &path, |file| {
+        update_tag_impl(file, &id, &name, &color)
+    })
 }
 
 #[tauri::command]
@@ -212,9 +209,7 @@ pub async fn delete_connection_tag<R: Runtime>(
     id: String,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    delete_tag_impl(&mut file, &id)?;
-    save_connections_and_invalidate(&app, &path, &file)
+    update_connections_and_invalidate(&app, &path, |file| delete_tag_impl(file, &id))
 }
 
 #[tauri::command]
@@ -224,9 +219,9 @@ pub async fn set_connection_tags<R: Runtime>(
     tag_ids: Vec<String>,
 ) -> Result<(), String> {
     let path = get_config_path(&app)?;
-    let mut file = persistence::load_connections_file(&path)?;
-    set_connection_tags_impl(&mut file, &connection_id, &tag_ids)?;
-    save_connections_and_invalidate(&app, &path, &file)
+    update_connections_and_invalidate(&app, &path, |file| {
+        set_connection_tags_impl(file, &connection_id, &tag_ids)
+    })
 }
 
 #[cfg(test)]
@@ -245,6 +240,7 @@ mod tests {
             appearance: None,
             tag_ids: tag_ids.map(|v| v.iter().map(|s| s.to_string()).collect()),
             environment: None,
+            revision: crate::models::INITIAL_REVISION,
         }
     }
 

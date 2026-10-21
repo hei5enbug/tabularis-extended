@@ -185,6 +185,17 @@ pub fn delete_db_password(connection_id: &str) -> Result<(), String> {
     }
 }
 
+/// Reads a keychain account, mapping a missing entry to `None` so a caller
+/// can tell "nothing stored" from a keychain failure.
+pub fn get_secret_optional(account: &str) -> Result<Option<String>, String> {
+    let entry = Entry::new(SERVICE_NAME, account).map_err(|e| e.to_string())?;
+    match entry.get_password() {
+        Ok(secret) => Ok(Some(secret)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(keychain_error(e)),
+    }
+}
+
 pub fn set_connection_uri(connection_id: &str, connection_uri: &str) -> Result<(), String> {
     let entry = Entry::new(SERVICE_NAME, &format!("{}:connection_uri", connection_id))
         .map_err(|e| e.to_string())?;

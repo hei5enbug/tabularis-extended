@@ -193,7 +193,11 @@ describe("useBuiltinDriverMigration", () => {
       // update_connection was invoked with the flipped driver.
       expect(invoke).toHaveBeenCalledWith(
         "update_connection",
-        expect.objectContaining({ id: "c1", params: expect.objectContaining({ driver: "postgresql" }) }),
+        expect.objectContaining({
+          id: "c1",
+          params: expect.objectContaining({ driver: "postgresql" }),
+          expectedRevision: 1,
+        }),
       );
       // post-migration test_connection was invoked.
       expect(invoke).toHaveBeenCalledWith(

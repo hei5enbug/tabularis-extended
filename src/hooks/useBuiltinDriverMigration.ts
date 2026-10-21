@@ -270,6 +270,7 @@ export function useBuiltinDriverMigration(
             params: { ...conn?.params, driver: pluginId },
             detectJsonInTextColumns: conn?.detect_json_in_text_columns ? true : null,
             environment: conn?.environment ?? null,
+            expectedRevision: conn?.revision ?? 1,
           });
           await loadConnections();
           await recordMigration(connectionId, fromDriver, pluginId);
@@ -463,6 +464,7 @@ export function useBuiltinDriverMigration(
           params: { ...conn?.params, driver: builtinId },
           detectJsonInTextColumns: conn?.detect_json_in_text_columns ? true : null,
           environment: conn?.environment ?? null,
+          expectedRevision: conn?.revision ?? 1,
         });
         await loadConnections();
         outcome = { ok: true };

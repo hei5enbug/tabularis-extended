@@ -432,7 +432,8 @@ async fn 생성한_연결의_초기_metadata와_auth_revision은_첫_게시부�
     // when
     let actual = created_metadata(&harness.connections, &driver).await;
     // then
-    assert_eq!(actual.1["service_v1"]["version"], 1);
+    assert!(actual.1["service_v1"].get("version").is_none());
+    assert_eq!(actual.0.version, 1);
     assert_eq!(
         actual.1["service_v1"]["auth_revision"],
         actual.0.auth_revision

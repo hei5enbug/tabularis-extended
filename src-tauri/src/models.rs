@@ -336,6 +336,41 @@ pub struct SavedConnection {
     /// write-confirmation warning and the visual identity in the UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment: Option<String>,
+    /// Per-connection change counter. A file without it, or with `0`, reads as
+    /// `1`; `1` is not written back so untouched connections stay byte-stable.
+    #[serde(
+        default = "initial_revision",
+        deserialize_with = "deserialize_revision",
+        skip_serializing_if = "is_initial_revision"
+    )]
+    pub revision: u64,
+}
+
+pub const INITIAL_REVISION: u64 = 1;
+pub const MAX_REVISION: u64 = 9_007_199_254_740_991;
+
+fn initial_revision() -> u64 {
+    INITIAL_REVISION
+}
+
+fn is_initial_revision(revision: &u64) -> bool {
+    *revision == INITIAL_REVISION
+}
+
+fn deserialize_revision<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = u64::deserialize(deserializer)?;
+    Ok(value.clamp(INITIAL_REVISION, MAX_REVISION))
+}
+
+impl SavedConnection {
+    /// Revision a change of this connection must carry, or `None` once the
+    /// counter cannot grow without leaving the range a JSON number keeps exact.
+    pub fn next_revision(&self) -> Option<u64> {
+        self.revision.checked_add(1).filter(|value| *value <= MAX_REVISION)
+    }
 }
 
 /// A user-defined colored label. Tags are purely organizational: a

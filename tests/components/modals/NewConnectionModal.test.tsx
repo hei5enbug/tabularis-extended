@@ -1665,3 +1665,43 @@ describe("NewConnectionModal extra_fields slot credential toggle", () => {
     expect(screen.getByTestId("plugin-extra")).toHaveTextContent("{}");
   });
 });
+
+describe("NewConnectionModal revision on save", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sshMocks.loadSshConnections.mockResolvedValue([]);
+    k8sMocks.loadK8sConnections.mockResolvedValue([]);
+  });
+
+  it.each([
+    { listed: undefined, loaded: undefined, expected: 1 },
+    { listed: 3, loaded: 7, expected: 7 },
+    { listed: 3, loaded: undefined, expected: 1 },
+  ])(
+    "sends the revision loaded for editing (list $listed, loaded $loaded) as expectedRevision",
+    async ({ listed, loaded, expected }) => {
+      const initial = { ...createInitialConnection({}), revision: listed };
+      vi.mocked(invoke).mockImplementation((command) => {
+        if (command === "get_connection_by_id") {
+          return Promise.resolve({ ...initial, revision: loaded });
+        }
+        return Promise.resolve(undefined);
+      });
+      renderModal(initial);
+      await waitFor(() => {
+        expect(
+          screen.getByPlaceholderText("newConnection.namePlaceholder"),
+        ).toHaveValue("Existing K8s database");
+      });
+
+      fireEvent.click(screen.getByText("newConnection.save"));
+
+      await waitFor(() => {
+        expect(invoke).toHaveBeenCalledWith(
+          "update_connection",
+          expect.objectContaining({ expectedRevision: expected }),
+        );
+      });
+    },
+  );
+});

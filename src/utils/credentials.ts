@@ -31,6 +31,8 @@ export interface SavedConnectionWithCredentials {
   id: string;
   name: string;
   params: ConnectionParams;
+  /** Change counter of the saved connection; absent means 1. */
+  revision?: number;
 }
 
 export async function fetchConnectionWithCredentials(

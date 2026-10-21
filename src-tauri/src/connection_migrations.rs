@@ -76,22 +76,6 @@ pub(crate) fn migrate_connection_ssl_mode_in_place(
     true
 }
 
-/// True if `connections.json` changed since `content_before` was captured —
-/// i.e. another process wrote a concurrent edit while this migration was
-/// computing its own rewrite. Pure and synchronous so the concurrency guard
-/// itself can be tested without touching the driver registry or the
-/// filesystem beyond what the caller already read.
-///
-/// Content comparison (not mtime) is used deliberately: some filesystems
-/// have coarse (1-second) mtime resolution, which wouldn't reliably detect
-/// two writes landing within the same second.
-pub(crate) fn connections_file_changed_concurrently(
-    content_before: &str,
-    content_now: &str,
-) -> bool {
-    content_before != content_now
-}
-
 /// Migrates already-persisted `ssl_mode` values on postgres-dialect
 /// connections (driver id other than the builtin `"postgres"`) from the
 /// stale MySQL-style spelling to the Postgres-style spelling the plugin
@@ -110,32 +94,25 @@ pub(crate) fn connections_file_changed_concurrently(
 ///
 /// # Concurrency
 ///
-/// This is the first write path the `--mcp` process exercises against
-/// `connections.json` — previously read-only there. The GUI app enforces
-/// single-instance, but MCP clients (Claude Desktop, Cursor, etc.) spawn
-/// `tabularis --mcp` as an independent subprocess that can run at the same
-/// time as the GUI, and this repo's connection persistence layer has no file
-/// locking anywhere. To avoid silently clobbering a concurrent GUI edit made
-/// while this function is mid read-modify-write, the file's raw content is
-/// compared immediately before writing (`connections_file_changed_concurrently`);
-/// if it changed since this function's own read, the migration is skipped
-/// for this run rather than overwritten. This is safe because the migration
-/// is idempotent and self-terminating — the next process to load
-/// connections (GUI reopen, or MCP's next startup) will see the still-stale
-/// value and retry.
+/// The GUI and the standalone `--mcp` process are independent writers of the
+/// same file. The rewrite runs as a locked read-modify-write on the freshly
+/// loaded file, so it never overwrites a concurrent edit; only the driver
+/// dialect lookup, which is async, happens before the lock. A connection that
+/// appeared in between and whose driver was not resolved is skipped and
+/// picked up by the next run.
 pub async fn migrate_postgres_ssl_mode_spelling_at_path(conn_path: &Path) -> Result<bool, String> {
     if !conn_path.exists() {
         return Ok(false); // Nothing to migrate
     }
 
-    let content_before = fs::read_to_string(conn_path).map_err(|e| e.to_string())?;
-    let mut conn_file = persistence::parse_connections_file(&content_before)?;
+    let content = fs::read_to_string(conn_path).map_err(|e| e.to_string())?;
+    let observed = persistence::parse_connections_file(&content)?;
 
     // Resolve each distinct non-builtin driver id's dialect once, not once
     // per connection — the registry lookup is async and connections commonly
     // share a driver.
     let mut dialects: HashMap<String, Option<SqlDialect>> = HashMap::new();
-    for conn in &conn_file.connections {
+    for conn in &observed.connections {
         let driver_id = &conn.params.driver;
         if driver_id == "postgres" || dialects.contains_key(driver_id) {
             continue; // builtin driver's own dropdown was always correct
@@ -148,31 +125,19 @@ pub async fn migrate_postgres_ssl_mode_spelling_at_path(conn_path: &Path) -> Res
         }
     }
 
-    let mut migrated_count = 0usize;
-    for conn in conn_file.connections.iter_mut() {
-        if migrate_connection_ssl_mode_in_place(conn, &dialects) {
-            migrated_count += 1;
+    persistence::update_connections_file(conn_path, |conn_file| {
+        let mut migrated_count = 0usize;
+        for conn in conn_file.connections.iter_mut() {
+            if migrate_connection_ssl_mode_in_place(conn, &dialects) {
+                migrated_count += 1;
+            }
         }
-    }
-
-    if migrated_count == 0 {
-        return Ok(false); // No migration needed
-    }
-
-    // Bail if another process (e.g. the GUI) saved a concurrent edit while
-    // we were computing the migration above — don't blindly overwrite it.
-    let content_now = fs::read_to_string(conn_path).map_err(|e| e.to_string())?;
-    if connections_file_changed_concurrently(&content_before, &content_now) {
-        eprintln!(
-            "[Migration] connections.json changed concurrently — skipping this run, will retry next launch"
-        );
-        return Ok(false);
-    }
-
-    eprintln!(
-        "[Migration] Rewriting stale ssl_mode spelling on {} postgres-dialect connection(s)",
-        migrated_count
-    );
-    persistence::save_connections_file(conn_path, &conn_file)?;
-    Ok(true)
+        if migrated_count > 0 {
+            eprintln!(
+                "[Migration] Rewriting stale ssl_mode spelling on {} postgres-dialect connection(s)",
+                migrated_count
+            );
+        }
+        Ok(migrated_count > 0)
+    })
 }

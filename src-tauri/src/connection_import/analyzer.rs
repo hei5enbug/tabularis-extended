@@ -222,6 +222,7 @@ mod tests {
             appearance: None,
             tag_ids: None,
             environment: None,
+            revision: crate::models::INITIAL_REVISION,
         }
     }
 

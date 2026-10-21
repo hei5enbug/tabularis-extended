@@ -176,6 +176,7 @@ interface SavedConnection {
   appearance?: ConnectionAppearance;
   tag_ids?: string[];
   environment?: "development" | "staging" | "production";
+  revision?: number;
 }
 
 interface NewConnectionModalProps {
@@ -582,6 +583,7 @@ export const NewConnectionModal = ({
   // Track whether the modal was successfully saved; if not, delete any
   // images that were uploaded during this session but not committed.
   const wasSavedRef = useRef(false);
+  const loadedRevisionRef = useRef(initialConnection?.revision ?? 1);
   const originalImagePath = useRef<string | null>(
     initialConnection?.appearance?.icon?.type === "image"
       ? initialConnection.appearance.icon.path
@@ -1830,13 +1832,17 @@ export const NewConnectionModal = ({
           initialConnection.params.ssh_connection_id ? "existing" : "inline",
         );
         let params = initialConnection.params;
+        loadedRevisionRef.current = initialConnection.revision ?? 1;
         try {
           const fullConn = await fetchConnectionWithCredentials(
             initialConnection.id,
           );
           // A response without params would blank the form, so keep the
           // secret-less ones instead of overwriting them with nothing.
-          if (fullConn?.params) params = fullConn.params;
+          if (fullConn?.params) {
+            params = fullConn.params;
+            loadedRevisionRef.current = fullConn.revision ?? 1;
+          }
         } catch {
           // fallback: use params without secrets (backend will retrieve from keychain)
         }
@@ -2378,6 +2384,7 @@ export const NewConnectionModal = ({
             params,
             detectJsonInTextColumns: detectJsonInTextColumns ? true : null,
             environment: environment || null,
+            expectedRevision: loadedRevisionRef.current,
           });
           savedConnectionId = initialConnection.id;
           await invoke("set_connection_appearance", {

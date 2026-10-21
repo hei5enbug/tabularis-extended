@@ -164,17 +164,40 @@ async fn stale_version의_갱신과_삭제는_현재_version을_반환한다() {
         .update("fixture", original.version, json!({"name":"current"}))
         .await
         .unwrap();
+    let bytes = std::fs::read(harness.connections.path()).unwrap();
     // when
     let actual = stale_changes(&harness.connections, original.version).await;
     // then
-    assert_eq!(
-        actual.0.unwrap_err().details["current_version"],
-        original.version + 1
-    );
-    assert_eq!(
-        actual.1.unwrap_err().details["current_version"],
-        original.version + 1
-    );
+    let update = actual.0.unwrap_err();
+    let delete = actual.1.unwrap_err();
+    assert_eq!(update.code, ErrorCode::ConnectionConflict);
+    assert_eq!(delete.code, ErrorCode::ConnectionConflict);
+    assert_eq!(update.details["current_version"], original.version + 1);
+    assert_eq!(delete.details["current_version"], original.version + 1);
+    assert_eq!(std::fs::read(harness.connections.path()).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn gui가_바꾼_연결의_리비전은_서비스_version으로_이어지고_낡은_서비스_갱신은_충돌한다() {
+    // given
+    let harness = Harness::new().await;
+    let original = harness.connections.get("fixture").await.unwrap();
+    persistence::update_connections_file(harness.connections.path(), |file| {
+        file.connections[0].name = "renamed by gui".into();
+        Ok(())
+    })
+    .unwrap();
+    let bytes = std::fs::read(harness.connections.path()).unwrap();
+    // when
+    let current = harness.connections.get("fixture").await.unwrap();
+    let stale = harness
+        .connections
+        .update("fixture", original.version, json!({"name":"stale"}))
+        .await;
+    // then
+    assert_eq!(current.version, original.version + 1);
+    assert_eq!(stale.unwrap_err().code, ErrorCode::ConnectionConflict);
+    assert_eq!(std::fs::read(harness.connections.path()).unwrap(), bytes);
 }
 async fn stale_changes(
     connections: &ProfileConnections,
@@ -231,15 +254,16 @@ async fn 관찰되지_않은_외부_설정은_같은_version의_갱신과_삭제
     // given
     let harness = Harness::new().await;
     let saved = harness.connections.get("fixture").await.unwrap();
-    let mut legacy = persistence::load_connections_file(harness.connections.path()).unwrap();
-    legacy.connections[0].params.host = Some("external.example".into());
-    persistence::save_connections_file(harness.connections.path(), &legacy).unwrap();
+    let mut raw: Value =
+        serde_json::from_slice(&std::fs::read(harness.connections.path()).unwrap()).unwrap();
+    raw["connections"][0]["params"]["host"] = json!("external.example");
+    std::fs::write(harness.connections.path(), serde_json::to_vec(&raw).unwrap()).unwrap();
     let bytes = std::fs::read(harness.connections.path()).unwrap();
     // when
     let actual = stale_changes(&harness.connections, saved.version).await;
     // then
-    assert_eq!(actual.0.unwrap_err().code, ErrorCode::VersionConflict);
-    assert_eq!(actual.1.unwrap_err().code, ErrorCode::VersionConflict);
+    assert_eq!(actual.0.unwrap_err().code, ErrorCode::ConnectionConflict);
+    assert_eq!(actual.1.unwrap_err().code, ErrorCode::ConnectionConflict);
     assert_eq!(std::fs::read(harness.connections.path()).unwrap(), bytes);
 }
 

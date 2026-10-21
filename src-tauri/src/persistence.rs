@@ -60,7 +60,12 @@ pub fn load_connections(path: &Path) -> Result<Vec<SavedConnection>, String> {
     Ok(file.connections)
 }
 
-pub fn save_connections_file(path: &Path, file: &ConnectionsFile) -> Result<(), String> {
+/// Whole-file replacement guarded by the digest of the content the caller
+/// read. Production writers use [`update_connections_file`], which holds the
+/// profile lock across the whole read-modify-write instead of rejecting a
+/// concurrent change.
+#[cfg(test)]
+pub(crate) fn save_connections_file(path: &Path, file: &ConnectionsFile) -> Result<(), String> {
     let result = (|| {
         let _lock = connections_lock(path)?;
         let (current, raw) = read_connections_locked(path)?;
@@ -70,6 +75,74 @@ pub fn save_connections_file(path: &Path, file: &ConnectionsFile) -> Result<(), 
         publish_connections(path, file, &raw, &current)
     })();
     result.map_err(legacy_error)
+}
+
+/// Error text a stale per-connection revision produces on the GUI path.
+pub const CONNECTION_CONFLICT: &str = "CONNECTION_CONFLICT";
+
+/// Locked read-modify-write of `connections.json`. The profile lock is held
+/// from the read to the atomic replacement, so no concurrent writer's change
+/// is lost and the mutation always sees the current content.
+pub fn update_connections_file<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut ConnectionsFile) -> Result<T, String>,
+) -> Result<T, String> {
+    update_connections_file_guarded(path, mutation, |error| error)
+}
+
+/// [`update_connections_file`] with a compensation step. `on_failure` runs,
+/// still under the lock, when the mutation fails or the file cannot be
+/// replaced, and returns the error to report. A replacement whose only failure
+/// is the final directory sync has already taken effect and counts as success.
+pub(crate) fn update_connections_file_guarded<T>(
+    path: &Path,
+    mutation: impl FnOnce(&mut ConnectionsFile) -> Result<T, String>,
+    on_failure: impl FnOnce(String) -> String,
+) -> Result<T, String> {
+    let _lock = connections_lock(path).map_err(legacy_error)?;
+    let (mut file, raw) = read_connections_locked(path).map_err(legacy_error)?;
+    let previous = file.clone();
+    let result = match mutation(&mut file) {
+        Ok(result) => result,
+        Err(error) => return Err(on_failure(error)),
+    };
+    let changed = serde_json::to_value(&file).map_err(|error| error.to_string())?
+        != serde_json::to_value(&previous).map_err(|error| error.to_string())?;
+    if changed {
+        match publish_connections(path, &file, &raw, &previous) {
+            Ok(()) => {}
+            Err(error) if error.outcome == Outcome::Applied => {
+                eprintln!("[Connections] replaced, but the directory sync was not confirmed");
+            }
+            Err(error) => return Err(on_failure(legacy_error(error))),
+        }
+    }
+    Ok(result)
+}
+
+/// Raises the revision of every connection whose content differs from its
+/// previous state. A writer that already raised it keeps its value; a stale or
+/// unchanged copy never lowers it.
+pub(crate) fn advance_changed_revisions(previous: &ConnectionsFile, file: &mut ConnectionsFile) {
+    let comparable = |connection: &SavedConnection| {
+        let mut connection = connection.clone();
+        connection.revision = crate::models::INITIAL_REVISION;
+        serde_json::to_value(connection).ok()
+    };
+    for connection in &mut file.connections {
+        let Some(old) = previous
+            .connections
+            .iter()
+            .find(|candidate| candidate.id == connection.id)
+        else {
+            continue;
+        };
+        let changed = comparable(old) != comparable(connection);
+        connection.revision = match (changed, old.next_revision()) {
+            (true, Some(next)) => connection.revision.max(next),
+            _ => connection.revision.max(old.revision),
+        };
+    }
 }
 
 fn legacy_error(error: crate::services::contracts::ServiceError) -> String {
@@ -275,13 +348,23 @@ fn read_connections_locked(path: &Path) -> ServiceResult<(ConnectionsFile, Value
     Ok((file, raw))
 }
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_NEXT_PUBLISH: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn publish_connections(
     path: &Path,
     file: &ConnectionsFile,
     raw: &Value,
     previous: &ConnectionsFile,
 ) -> ServiceResult<()> {
+    #[cfg(test)]
+    if FAIL_NEXT_PUBLISH.with(|flag| flag.replace(false)) {
+        return Err(failure(ErrorCode::ResourceLimit));
+    }
     let mut sanitized = file.clone();
+    advance_changed_revisions(previous, &mut sanitized);
     for connection in &mut sanitized.connections {
         if connection.params.save_in_keychain.unwrap_or(false) {
             connection.params.password = None;
@@ -433,15 +516,10 @@ fn preserve_unknown_fields(prev_raw: &Value, prev_typed: &ConnectionsFile, next:
 
 /// Legacy function for backward compatibility - saves using new format
 pub fn save_connections(path: &Path, connections: &[SavedConnection]) -> Result<(), String> {
-    // Load existing groups if any
-    let existing = load_connections_file(path)?;
-    let file = ConnectionsFile {
-        source_revision: existing.source_revision,
-        groups: existing.groups,
-        connections: connections.to_vec(),
-        tags: existing.tags,
-    };
-    save_connections_file(path, &file)
+    update_connections_file(path, |file| {
+        file.connections = connections.to_vec();
+        Ok(())
+    })
 }
 
 pub fn load_groups(path: &Path) -> Result<Vec<ConnectionGroup>, String> {
@@ -450,9 +528,10 @@ pub fn load_groups(path: &Path) -> Result<Vec<ConnectionGroup>, String> {
 }
 
 pub fn save_groups(path: &Path, groups: &[ConnectionGroup]) -> Result<(), String> {
-    let mut file = load_connections_file(path)?;
-    file.groups = groups.to_vec();
-    save_connections_file(path, &file)
+    update_connections_file(path, |file| {
+        file.groups = groups.to_vec();
+        Ok(())
+    })
 }
 
 #[cfg(test)]

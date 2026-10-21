@@ -170,6 +170,7 @@
                 "INVALID_GEOMETRY",
                 "FEATURE_TOO_LARGE",
                 "VERSION_CONFLICT",
+                "CONNECTION_CONFLICT",
                 "ETAG_CONFLICT",
                 "DOCUMENT_ALREADY_EXISTS",
                 "PARTITION_KEY_IMMUTABLE",

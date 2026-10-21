@@ -12,6 +12,7 @@ pub fn failure(code: ErrorCode) -> ServiceError {
             "This write requires connection permission and request approval."
         }
         ErrorCode::VersionConflict => "The saved version has changed.",
+        ErrorCode::ConnectionConflict => "The connection has changed since it was read.",
         ErrorCode::AuthRequired => "Authentication is required.",
         ErrorCode::AuthExpired => "The authentication has expired.",
         ErrorCode::InteractionRequired => "Authentication requires user interaction.",
@@ -46,7 +47,10 @@ pub fn redact_error(error: ServiceError) -> ServiceError {
             .as_u64()
             .filter(|value| *value <= 9_007_199_254_740_991)
     };
-    if error.code == ErrorCode::VersionConflict {
+    if matches!(
+        error.code,
+        ErrorCode::VersionConflict | ErrorCode::ConnectionConflict
+    ) {
         if let Some(version) = error.details.get("current_version").and_then(integer) {
             details.insert("current_version".into(), version.into());
         }
