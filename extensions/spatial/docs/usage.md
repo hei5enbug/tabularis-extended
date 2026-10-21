@@ -25,8 +25,8 @@
 
 ## 지도
 
-수정 호스트에서 패치된 PostgreSQL 드라이버와 Spatial ZIP을 활성화합니다.
-기존 PostgreSQL 연결을 선택하고 PostGIS 공간 컬럼이 있는 쿼리를 실행합니다.
+`0.27.0+extended.1` 호스트에서 `postgresql-plus` 드라이버와 Spatial ZIP을 활성화합니다.
+`postgresql-plus` 연결을 선택하고 PostGIS 공간 컬럼이 있는 쿼리를 실행합니다.
 결과 도구 모음의 `Map`에서 공간 컬럼을 선택합니다.
 테이블 탐색에서는 테이블과 공간 컬럼을 지정해 현재 지도 범위로 조회합니다.
 
@@ -50,7 +50,7 @@ Basemap에서 네트워크 사용과 제공자 라이선스 표시를 확인한 
 
 ## CLI
 
-수정 호스트 실행 파일에 `service` 하위 명령이 추가됩니다.
+`0.27.0+extended.1` 호스트 실행 파일에 `service` 하위 명령이 있습니다.
 각 요청은 공통 JSON envelope를 사용합니다. 아래 내용을 `connections.json`으로 저장합니다.
 
 ```json
@@ -104,7 +104,7 @@ GUI가 없어도 DB 조회와 GeoJSON 내보내기를 실행할 수 있습니다
 
 ## MCP
 
-MCP 클라이언트의 stdio 서버 명령을 수정 호스트 실행 파일, 인자를 `["--mcp"]`로 설정합니다.
+MCP 클라이언트의 stdio 서버 명령을 `0.27.0+extended.1` 호스트 실행 파일, 인자를 `["--mcp"]`로 설정합니다.
 `tools/list`는 공통 operation 도구와 기존 도구를 함께 반환합니다.
 공통 도구의 이름은 `query.execute`, `spatial.export`, `map.open`처럼 operation 이름과 같습니다.
 각 `arguments`에는 위와 같은 전체 envelope를 넣습니다.

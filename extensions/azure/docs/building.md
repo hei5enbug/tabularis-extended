@@ -1,6 +1,6 @@
-# 독립 checkout에서 빌드하기
+# 빌드와 패키징
 
-이 안내는 Cosmos 저장소 하나에서 빌드하고 현재 OS용 생산 ZIP을 만드는 방법을 설명합니다.
+이 안내는 `extensions/azure`에서 Cosmos 드라이버를 빌드하고 현재 OS용 생산 ZIP을 만드는 방법을 설명합니다.
 
 ## 고정 SDK 입력
 
@@ -10,7 +10,7 @@
 | pnpm | `10.30.3` |
 | Rust | `1.96.0` |
 | 공식 Cosmos SDK | `4.10.1` |
-| 최소 host runtime | 기본 조회 `0.26.0`, 전체 서비스 `0.26.1-spatial.1` |
+| 최소 host runtime | 기본 조회 `0.26.0`, 전체 서비스 `0.27.0+extended.1` |
 | service protocol / 공개 SDK API | `1` / `0.2.0` |
 
 `build-support/sdk`에는 service-contracts와 public plugin-api를 빌드하는 고정 입력 22개가 있습니다.
@@ -34,9 +34,9 @@ UI에서 Tauri API를 직접 호출하지 않습니다.
 SDK·Node 런타임은 배포 패키지 안에서 해결하고 개인 설치 경로나 작업 디렉터리를 참조하지 않습니다.
 Azure CLI는 해당 인증 방식을 선택할 때만 필요하며 실행 환경의 PATH로 찾습니다.
 
-## bootstrap 실행
+## 확장 빌드와 검사
 
-고정된 Node와 pnpm을 준비한 뒤 Cosmos checkout에서 실행합니다.
+고정된 Node와 pnpm을 준비한 뒤 `extensions/azure`에서 실행합니다.
 
 ```sh
 pnpm bootstrap
@@ -50,12 +50,18 @@ pnpm test:protocol
 pnpm test:ui
 ```
 
-bootstrap은 SDK 원장을 확인하고 root workspace만 `--frozen-lockfile --ignore-scripts`로 설치합니다.
-그 뒤 service-contracts, plugin-api, 드라이버, UI 순서로 현재 checkout 안에서 빌드합니다.
-별도 host checkout이나 UI 전용 install은 필요하지 않습니다.
+`pnpm bootstrap`은 SDK 원장을 확인하고 이 디렉터리의 workspace만 `--frozen-lockfile --ignore-scripts`로 설치합니다.
+그 뒤 service-contracts, plugin-api, 드라이버, UI 순서로 `extensions/azure` 안에서 빌드합니다.
+저장소 루트의 호스트 빌드나 UI 전용 install은 필요하지 않습니다.
 
 공개 의존성을 받으려면 네트워크 또는 채워진 package cache가 필요합니다.
-bootstrap은 lockfile을 변경하지 않습니다.
+`pnpm bootstrap`은 lockfile을 변경하지 않습니다.
+
+## 호스트와 함께 실행
+
+문서 수정과 페이지 재개를 확인하려면 저장소 루트의 호스트를 빌드해 실행합니다.
+명령은 Spatial의 [공통 서비스 호스트 실행](../../spatial/docs/building.md#공통-서비스-호스트-실행)과 같습니다.
+Azure SQL을 함께 쓰려면 `extensions/sqlserver-plus`의 드라이버도 빌드합니다.
 
 ## 현재 OS용 ZIP 만들기
 
@@ -73,7 +79,7 @@ output 부모 디렉터리는 미리 만들고 기존 output 파일은 사용하
 ```sh
 node scripts/package/cli.mjs \
   --platform darwin --arch arm64 \
-  --source /absolute/tabularis-azure \
+  --source /absolute/tabularis-extended/extensions/azure \
   --launcher /absolute/target/release/tabularis-azure-launcher \
   --runtime-archive /absolute/node-v24.21.0-darwin-arm64.tar.gz \
   --output /absolute/output/cosmos-nosql.zip \
@@ -100,7 +106,7 @@ ZIP과 `.sha256` 파일이 발행되며 ZIP 내부 `release.json`에 파일별 �
 
 ## 선택 사항인 native CI
 
-`.github/workflows/bootstrap.yml`은 GitHub Actions에서 필요할 때 수동으로 실행합니다.
+저장소 루트의 `.github/workflows/ext-azure.yml`은 GitHub Actions에서 필요할 때 수동으로 실행합니다.
 Actions 성공은 필수 완료 조건이 아닙니다. 실제 OS에서 같은 검증을 직접 실행할 수 있습니다.
 Ubuntu 24.04, Windows 2022, macOS 15 Intel에서 각 native x64를 검사합니다.
 실행 결과와 확인하지 않은 범위는 [검증 현황](verification.md)에 기록합니다.

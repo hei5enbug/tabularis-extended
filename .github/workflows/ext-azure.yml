@@ -46,7 +46,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --yes libarchive-tools
-      - name: Build from the canonical snapshot
+      - name: Install and build the extension from its SDK snapshot
         run: |
           node scripts/bootstrap/cli.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

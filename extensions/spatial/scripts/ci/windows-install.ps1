@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 $messages = Join-Path $env:RUNNER_TEMP 'spatial-install-cargo.jsonl'
-& cargo test --locked --manifest-path ../tabularis-app-source/src-tauri/Cargo.toml --lib --no-run --message-format=json |
+& cargo test --locked --manifest-path ../../src-tauri/Cargo.toml --lib --no-run --message-format=json |
     Tee-Object -FilePath $messages | Out-Null
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

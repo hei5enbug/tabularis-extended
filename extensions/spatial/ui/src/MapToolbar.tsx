@@ -109,7 +109,7 @@ export function MapToolbar({ context, pluginId }: SlotComponentProps) {
 
   return <div className="spatial-toolbar">
     <button type="button" disabled={!available || busy} onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>{t("map.button", { defaultValue: "지도" })}</button>
-    {!capabilities || !available ? <span role="status">외부 PostgreSQL 플러그인을 설치하고 연결을 복제한 뒤 공간 capability를 확인하세요. 기존 연결 driver는 유지됩니다.</span> : null}
+    {!capabilities || !available ? <span role="status">PostgreSQL Plus(postgresql-plus) 플러그인을 설치하고 연결을 복제한 뒤 공간 capability를 확인하세요. 기존 연결 driver는 유지됩니다.</span> : null}
     {expanded ? <section aria-label="지도 source 선택" className="spatial-source-picker">
       <fieldset><legend>지도 데이터</legend>
         <label><input type="radio" name="spatial-source" checked={mode === "query_result"} disabled={!snapshotAvailable || busy} onChange={() => setMode("query_result")} />결과 snapshot 지도 — SQL을 다시 실행하지 않습니다</label>

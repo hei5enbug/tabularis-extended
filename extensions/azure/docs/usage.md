@@ -27,7 +27,7 @@ Cosmos 작업 공간이나 SQL 편집기에서 `SELECT * FROM c`처럼 Cosmos SQ
 호스트의 timeout `cancel` 알림은 실행 중인 해당 요청에 전달합니다.
 
 이 경로는 읽기 전용입니다. 문서 CRUD, continuation 재개, 앱 내 Entra 로그인과 서비스 주체 인증은
-공통 서비스를 제공하는 수정 호스트에서 사용합니다. 실제 Azure DB 접근 검증은 별도입니다.
+공통 서비스를 제공하는 `0.27.0+extended.1` 호스트에서 사용합니다. 실제 Azure DB 접근 검증은 별도입니다.
 
 ## 인증하기
 
@@ -63,7 +63,7 @@ Microsoft Entra 사용자 인증에서 로그인 소스를 `Azure CLI (az login)
 
 Cosmos 데이터 접근 역할이 있어야 문서를 조회할 수 있습니다.
 리소스 관리 권한과 데이터 접근 권한은 별개입니다. 앱 로그아웃은 CLI 세션을 종료하지 않습니다.
-전체 동작과 보안 경계는 [공통 인증 안내](https://github.com/hei5enbug/tabularis-spatial/blob/main/docs/usage.md#azure-cli-로그인-사용하기)를 참고하세요.
+전체 동작과 보안 경계는 [공통 인증 안내](../../spatial/docs/usage.md#azure-cli-로그인-사용하기)를 참고하세요.
 
 ## 작업 공간 열기
 

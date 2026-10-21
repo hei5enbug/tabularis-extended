@@ -58,18 +58,17 @@ jobs:
           & $perl -MLocale::Maketext::Simple -e 'exit 0'
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - name: Build the local SDK and Spatial plugin
+      - name: Build the extension SDK and UI
         run: pnpm bootstrap
-      - name: Prepare exact patched app source
+      - name: Install root host dependencies
+        working-directory: .
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build the root host frontend
+        working-directory: .
         run: |
-          node --test tests/bootstrap.test.mjs
-          node scripts/bootstrap.mjs --only host
-      - name: Build the patched app frontend
-        run: |
-          pnpm --dir ../tabularis-app-source install --frozen-lockfile --ignore-scripts
-          pnpm --dir ../tabularis-app-source --filter @tabularis/service-contracts build
-          pnpm --dir ../tabularis-app-source --filter @tabularis/plugin-api build
-          pnpm --dir ../tabularis-app-source build
+          pnpm --filter @tabularis/service-contracts build
+          pnpm --filter @tabularis/plugin-api build
+          pnpm build
       - name: Test the SDK and Spatial plugin
         run: |
           pnpm test:sdk
@@ -81,7 +80,7 @@ jobs:
         run: node --test tests/install/*.test.mjs
       - name: Install production ZIP with the native host
         if: runner.os != 'Windows'
-        run: cargo test --locked --manifest-path ../tabularis-app-source/src-tauri/Cargo.toml --lib plugins::native_package_tests::현재_os의_실제_설치기는_지도_zip과_로컬_자산을_그대로_설치한다 -- --ignored --exact --test-threads=1
+        run: cargo test --locked --manifest-path ../../src-tauri/Cargo.toml --lib plugins::native_package_tests::현재_os의_실제_설치기는_지도_zip과_로컬_자산을_그대로_설치한다 -- --ignored --exact --test-threads=1
       - name: Install production ZIP with the Windows native host
         if: runner.os == 'Windows'
         shell: pwsh
@@ -114,13 +113,9 @@ jobs:
         with:
           toolchain: 1.96.0
           components: clippy
-      - name: Prepare pinned driver sources
+      - name: Check postgresql-plus and sqlserver-plus drivers
         run: |
-          node scripts/bootstrap.mjs --only postgresql
-          node scripts/bootstrap.mjs --only sqlserver
-      - name: Check existing drivers with their service extensions
-        run: |
-          cargo test --locked --manifest-path ../tabularis-postgresql-plugin/Cargo.toml --bin postgresql-plugin
-          cargo clippy --locked --manifest-path ../tabularis-postgresql-plugin/Cargo.toml --bin postgresql-plugin -- -D warnings
-          cargo test --locked --manifest-path ../tabularis-sqlserver-plugin/Cargo.toml --bin sqlserver-plugin
-          cargo clippy --locked --manifest-path ../tabularis-sqlserver-plugin/Cargo.toml --bin sqlserver-plugin -- -D warnings
+          cargo test --locked --manifest-path ../postgresql/Cargo.toml --bin postgresql-plugin
+          cargo clippy --locked --manifest-path ../postgresql/Cargo.toml --bin postgresql-plugin -- -D warnings
+          cargo test --locked --manifest-path ../sqlserver-plus/Cargo.toml --bin sqlserver-plugin
+          cargo clippy --locked --manifest-path ../sqlserver-plus/Cargo.toml --bin sqlserver-plugin -- -D warnings

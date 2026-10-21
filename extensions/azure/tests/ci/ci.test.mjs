@@ -16,7 +16,7 @@ async function observe(action) { try { return { value: await action() }; } catch
 
 test('CI는 수동 실행으로만 고정된 세 native x64 runner를 사용한다', () => {
   // given
-  const yaml = fs.readFileSync(path.join(source, '.github/workflows/bootstrap.yml'), 'utf8');
+  const yaml = fs.readFileSync(path.join(source, '../../.github/workflows/ext-azure.yml'), 'utf8');
   // when
   const actual = yamlParser.load(yaml);
   // then
@@ -24,7 +24,7 @@ test('CI는 수동 실행으로만 고정된 세 native x64 runner를 사용한�
   assert.deepEqual(actual.permissions, { contents: 'read' });
   assert.deepEqual(actual.jobs.native.strategy.matrix.os, ['ubuntu-24.04', 'windows-2022', 'macos-15-intel']);
   assert.equal(actual.jobs.native.steps.filter(step => step.uses?.startsWith('actions/checkout@')).length, 1);
-  assert.equal(actual.jobs.native.steps[0].with.path, 'tabularis-azure');
+  assert.equal(actual.defaults.run['working-directory'], 'extensions/azure');
   assert.ok(actual.jobs.native.steps.filter(step => step.uses).every(step => /@[a-f0-9]{40}$/.test(step.uses)));
   assert.equal(yaml.includes('host_repository'), false);
   assert.equal(yaml.includes('test:live'), false);

@@ -10,7 +10,7 @@ vi.mock("@tabularis/plugin-api", async () => {
 });
 beforeEach(resetHarness);
 afterEach(cleanup);
-const context = { connectionId: "toolbar-connection", tableName: "roads", schema: "public", driver: "postgres", resultId: "query-snapshot", resultSetIndex: 2, resultGeneration: 7 };
+const context = { connectionId: "toolbar-connection", tableName: "roads", schema: "public", driver: "postgresql-plus", resultId: "query-snapshot", resultSetIndex: 2, resultGeneration: 7 };
 async function expandedToolbar() {
   const view = render(<MapToolbar pluginId="fixture" context={context} />);
   await waitFor(() => expect((screen.getByRole("button", { name: "지도" }) as HTMLButtonElement).disabled).toBe(false));
@@ -52,7 +52,7 @@ describe("MapToolbar common service", () => {
     render(<MapToolbar pluginId="fixture" context={context} />);
     // then
     await waitFor(() => expect((screen.getByRole("button", { name: "지도" }) as HTMLButtonElement).disabled).toBe(true));
-    expect(screen.getByRole("status").textContent).toContain("외부 PostgreSQL 플러그인");
+    expect(screen.getByRole("status").textContent).toContain("PostgreSQL Plus(postgresql-plus) 플러그인");
     expect(harness.requests).toHaveLength(0);
   });
 

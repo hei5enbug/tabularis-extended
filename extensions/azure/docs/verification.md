@@ -5,7 +5,29 @@ mock 통과는 실제 Azure 권한·TLS·Entra 동작의 증거가 아닙니다.
 기존 CLI 로그인의 최소 읽기는 확인했습니다. 쓰기·페이지 재개·인증 갱신을 포함한 전체 검증은 미완료입니다.
 GitHub Actions는 수동 실행하는 선택 사항입니다. 실제 OS에서 직접 실행한 검증도 환경과 결과를 기록합니다.
 
-## 관찰한 검사
+## monorepo 전환에서 확인한 것
+
+2026-10-21 macOS ARM64에서 Node `24.21.0`, pnpm `10.30.3`으로 `extensions/azure`에서 실행했습니다.
+
+| 명령 | 결과 |
+| --- | --- |
+| `pnpm test:bootstrap` | 26개 통과 (`tests/ci`의 workflow 검사는 `.github/workflows/ext-azure.yml`을 읽도록 수정) |
+| `pnpm test:sdk` | 5개 통과 |
+| `pnpm test:unit` | 640개 통과 |
+| `pnpm test:protocol` | 14개 통과 |
+| `pnpm test:ui` | 5개 파일, 125개 통과 |
+| `pnpm typecheck`, `pnpm --dir ui typecheck` | 오류 없음 |
+| `ext-azure.yml` YAML 파싱 | 성공, `workflow_dispatch`만 사용 |
+
+실행하지 않은 검사는 다음과 같습니다.
+
+- `pnpm test:install` 중 공식 Node archive 캐시와 release launcher가 필요한 검사. 이 환경에서는 둘을 준비하지 않았습니다.
+  그대로 실행하면 211개 중 202개가 통과하고 archive 추출 5개와 생산 ZIP·번들 런처 4개가 실패했습니다.
+  CI는 `scripts/ci/prepare.mjs`로 `TABULARIS_C3B_TEST_*` 입력을 준비합니다. 입력을 준비한 재실행은 하지 않았습니다.
+- `.github/workflows/ext-azure.yml`의 GitHub Actions 실행. YAML만 파싱했습니다.
+- 저장소 루트 호스트의 빌드와 실제 Azure 요청.
+
+## 이전에 관찰한 검사
 
 | 범위 | 관찰 결과 | 증거의 범위 |
 | --- | --- | --- |
@@ -55,15 +77,14 @@ T0e의 실제 installer 검사와 새 CI smoke의 범위가 다릅니다.
 ## 독립 checkout 검증
 
 X1-C는 Node 24.21.0과 pnpm 10.30.3으로 한글·공백이 있는 새 임시 checkout을 검증했습니다.
-기존 sibling 없이 snapshot에서 계약·SDK를 준비하고 frozen install과 계약·SDK·core·UI 빌드를 통과했습니다.
+다른 저장소 없이 snapshot에서 계약·SDK를 준비하고 frozen install과 계약·SDK·core·UI 빌드를 통과했습니다.
 root와 UI typecheck도 통과했습니다.
 
-bootstrap·CI 전용 검사 25개는 source SHA·lock·no-overwrite·pin·cache hash·YAML entrypoint를 확인했습니다.
+`pnpm bootstrap`·CI 전용 검사 25개는 source SHA·lock·no-overwrite·pin·cache hash·YAML entrypoint를 확인했습니다.
 최초 검사에서는 macOS realpath 별칭에 대한 test 기대값 한 건이 실패했습니다.
 실제 canonical Python 경로를 기대하도록 교정한 뒤 25개가 모두 통과했으며 원본 실패 로그를 보존했습니다.
 
-bootstrap과 독립 환경의 실행 로그는 검증 실행의 별도 보관 자료입니다.
-이 로그는 실행 근거이며 저장소에 포함된 CI artifact가 아닙니다.
+이 로그는 별도 저장소 시절 독립 환경의 실행 근거이며 저장소에 포함된 CI artifact가 아닙니다.
 
 ## 운영체제별 후속 실행
 
@@ -85,7 +106,7 @@ UI metadata 검사는 필드가 실제로 표시될 때까지 기다린다.
 제품의 시간 제한과 별도 deadline 검사는 변경하지 않았다.
 실패한 최초 CI와 수정 후 실행을 구분하며, Linux/macOS 통과로 Windows 통과를 대신하지 않는다.
 
-호스트의 실제 GUI·CLI·MCP 공통 연결은 Spatial의 [최종 통합 기록](https://github.com/hei5enbug/tabularis-spatial/blob/main/docs/verification.md#최종-통합-실행-기록)에 있다.
+호스트의 실제 GUI·CLI·MCP 공통 연결은 Spatial의 [최종 통합 기록](../../spatial/docs/verification.md#2026-10-04-최종-통합-실행)에 있다.
 그 검사는 PostGIS를 사용하며 실제 Cosmos 서비스 결과로 표시하지 않는다.
 
 | 계획 요구 사항 | 구현·검증 상태 |
@@ -131,7 +152,7 @@ metadata 응답과 패키징 검사에도 같은 필드를 적용하고 ZIP을 �
 [Building Plugins](https://tabularis.dev/wiki/building-plugins),
 [Plugin Guide](https://github.com/TabularisDB/tabularis/blob/main/plugins/PLUGIN_GUIDE.md),
 [연결 metadata](https://github.com/TabularisDB/tabularis/blob/main/plugins/CONNECTION_METADATA.md),
-[SQL Server 플러그인](https://github.com/TabularisDB/tabularis-sqlserver-plugin)의 문서와 실제 0.26.0 소스를 대조했다.
+공식 SQL Server 플러그인의 문서와 실제 0.26.0 소스를 대조했다.
 기본 RPC 입력, 취소 notification, 읽기 전용 metadata, `extra`의 공개 설정과 비밀번호 저장 경로, UI 공개 API를 반영했다.
 플러그인 `extra`에는 endpoint·database·container·공개 인증 선택만 저장하며 키와 토큰을 넣지 않는다.
 SDK 문서 CRUD와 continuation은 공통 서비스가 있는 호스트에서만 활성화한다.
@@ -194,7 +215,7 @@ GitHub Actions 산출물 9개와 다운로드 가능한 실행 로그의 텍스�
 | 기본 RPC | JSON-RPC 2.0을 줄 단위로 읽고 응답한다. initialize·EOF·표준 취소 알림을 처리하고 취소 알림에는 응답하지 않는다. 실행 중에도 stdin을 계속 읽는다. |
 | 연결·비밀 | 공식 `params.params` 입력과 connection metadata 계약을 사용한다. `extra`의 비밀 필드는 거부한다. 기본 계정 키는 호스트 비밀번호 경로를, 전체 기능의 비밀은 transient 인증 전달을 사용한다. 원본 SDK 오류와 로그는 노출하지 않는다. |
 | UI 번들·슬롯 | IIFE 전역·default export·React/JSX/plugin API 외부화를 사용한다. 선언한 다섯 슬롯은 공식 목록에 있으며 같은 module을 재사용할 수 있다. Tauri를 직접 import하거나 호출하지 않는다. |
-| 기본 기능과 확장 기능 | 공식 호스트는 읽기 전용 기본 경로를 제공한다. `service_protocol`과 문서·페이지 capability는 수정 호스트 전용이며 실제 서비스 API 제공 여부로 전체 기능을 선택한다. |
+| 기본 기능과 확장 기능 | 공식 호스트는 읽기 전용 기본 경로를 제공한다. `service_protocol`과 문서·페이지 capability는 서비스 API 호스트 전용이며 실제 서비스 API 제공 여부로 전체 기능을 선택한다. |
 
 로케일 파일과 `defineSlot`은 선택 사항이다. 현재의 legacy slot props 형식은 가이드에서 계속 지원한다.
 live 레지스트리 스키마 조회는 HTTP 403으로 실패했으므로 확장 매니페스트 필드의 레지스트리 수용 여부는
@@ -222,7 +243,7 @@ YAML을 파싱해 수동 실행 조건을 확인했다. 제품 코드와 기존 
 | 프로세스 경계 | `initialize`·`shutdown`·응답 후 EOF | exit 0, stderr 0 bytes |
 
 드라이버 검사는 Node 24.21.0·pnpm 10.30.3·공식 Cosmos SDK 4.10.1을 사용했다.
-고정 source의 bootstrap과 core·UI 빌드를 수행한 뒤 공식 호스트의 기본 RPC 입력 경로를 호출했다.
+고정 source의 `pnpm bootstrap`과 core·UI 빌드를 수행한 뒤 공식 호스트의 기본 RPC 입력 경로를 호출했다.
 토큰은 드라이버가 `src/runtime/compat.ts`의 기존 CLI 경로에서 획득했다.
 그룹 배정 일치와 실제 요청 성공은 관찰했지만 모든 컨테이너의 유효 권한을 조사한 것은 아니다.
 이전 403의 원인이 바뀐 시점이나 관리자 변경 이력은 확인하지 않았다.
@@ -233,14 +254,14 @@ YAML을 파싱해 수동 실행 조건을 확인했다. 제품 코드와 기존 
 앱 내 Entra 로그인·갱신과 서비스 주체·계정 키 인증은 여전히 미완료다.
 
 Azure SQL의 ODBC 성공과 SQL 플러그인 제한은
-[Spatial 후속 기록](https://github.com/hei5enbug/tabularis-spatial/blob/main/docs/verification.md#azure-sql의-읽기-전용-후속-검증)에 있다.
+[Spatial 후속 기록](../../spatial/docs/verification.md#2026-10-06-azure-sql의-읽기-전용-후속-검증)에 있다.
 
 ## 후속 보안 검사와 가이드 확인
 
 공식 Tabularis main은 위의 `c0fe758325e955d5f364bf3150ea0822c6591469`와 같았다.
 최신 Plugin Guide·Building Plugins·연결 metadata 문서를 다시 확인했다.
 기본 RPC·UI 전역과 외부화·공식 슬롯·보호된 비밀 전달 계약은 유지한다.
-확장 capability와 수정 호스트 전용 기능을 공식 호스트의 지원 보장으로 표시하지 않는다.
+확장 capability와 서비스 API 호스트 전용 기능을 공식 호스트의 지원 보장으로 표시하지 않는다.
 live 레지스트리 스키마 GET은 다시 HTTP 403으로 실패했다. 레지스트리 검증은 통과로 기록하지 않는다.
 
 root/UI 워크스페이스의 최초 `pnpm audit --json`은 공개 취약점 항목 8개를 보고했다.
@@ -278,7 +299,7 @@ Rosetta와 다른 OS의 production 검사는 이번 설치에서 실행하지 �
 
 화면 자동 조작은 macOS 접근성 권한 거부 `-25211`로 실행하지 못했다.
 이번 설치 검사에서 실제 Azure 데이터 요청과 문서 쓰기는 실행하지 않았다.
-공식 호스트의 기본 읽기 경로와 수정 호스트 전용 문서 CRUD·continuation의 지원 구분은 그대로다.
+공식 호스트의 기본 읽기 경로와 서비스 API 호스트 전용 문서 CRUD·continuation의 지원 구분은 그대로다.
 이미 실행 중인 이전 MCP 프로세스에는 클라이언트의 재연결이 필요하다.
 
 ## 2026-10-07 SDK workspace migration
@@ -290,7 +311,7 @@ SDK 출처 검사는 revision `a10ba47979320766f0cb706afd48e6cecd7331e8`의 22�
 호환 CLI인 `pnpm bootstrap`, `pnpm build`, SDK·driver·UI 개별 빌드, root typecheck와 UI typecheck가 통과했습니다.
 `pnpm test:bootstrap`은 26개, `pnpm test:sdk`는 5개 검사가 모두 통과했습니다.
 이 검사는 로컬 빌드와 합성 입력을 대상으로 했으며 실제 Azure 요청은 실행하지 않았습니다.
-# 저장소 내부 SDK 전환 최종 검증 — 2026-10-07
+## 저장소 내부 SDK 전환 최종 검증 — 2026-10-07
 
 macOS ARM64에서 Node `24.21.0`과 pnpm `10.30.3`으로 검사했습니다.
 형제 호스트, 기존 `node_modules`, SDK `dist`가 없는 한글·공백 경로의 새 checkout에서
@@ -306,7 +327,7 @@ ZIP의 symlink와 외부 workspace 경로는 각각 0개였습니다.
 
 이 검사는 DB 접속이나 쿼리를 실행하지 않았습니다.
 새 경로에 대한 다른 OS 실행과 레지스트리 수용 검증은 수행하지 않았습니다.
-# 개인 경로 제거와 공식 가이드 확인 — 2026-10-07
+## 개인 경로 제거와 공식 가이드 확인 — 2026-10-07
 
 [공식 Plugin Guide](https://github.com/TabularisDB/tabularis/blob/main/plugins/PLUGIN_GUIDE.md)와
 [Plugin System 문서](https://tabularis.dev/wiki/plugins)를 다시 확인했습니다.

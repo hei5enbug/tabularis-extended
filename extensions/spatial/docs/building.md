@@ -1,9 +1,9 @@
 # 빌드와 설치
 
-## 독립 플러그인 빌드
+## 플러그인 빌드
 
-Spatial 플러그인은 저장소에 고정한 SDK snapshot을 사용합니다. 앱이나 드라이버 checkout은 필요하지 않습니다.
-Node `24.21.0`과 pnpm `10.30.3`으로 다음 명령을 실행합니다.
+Spatial 플러그인은 저장소에 고정한 SDK snapshot을 사용합니다. 호스트나 드라이버를 먼저 빌드할 필요는 없습니다.
+Node `24.21.0`과 pnpm `10.30.3`으로 `extensions/spatial`에서 다음 명령을 실행합니다.
 
 ```sh
 pnpm bootstrap
@@ -24,26 +24,6 @@ React·JSX runtime·plugin API는 호스트의 전역 구현을 사용하고 Tau
 Spatial은 DB 실행 파일이 없는 UI 전용 패키지입니다.
 `kind: driver`와 UI 확장만 가진 패키지의 로딩은 공식 0.26.0 호스트에서 확인했습니다.
 이는 가이드의 표준 DB 드라이버 실행 파일 모델과 별도이며, 레지스트리 수용 여부는 미확인입니다.
-
-## 앱과 기존 드라이버 source 준비
-
-수정된 앱이나 기존 드라이버 source가 필요한 통합 작업에만 실행합니다.
-`node scripts/bootstrap.mjs`는 아래 세 디렉터리를 Spatial 저장소 옆에 생성합니다.
-
-| 디렉터리 | upstream |
-|---|---|
-| `tabularis-app-source` | `TabularisDB/tabularis` |
-| `tabularis-postgresql-plugin` | `TabularisDB/tabularis-postgresql-plugin` |
-| `tabularis-sqlserver-plugin` | `TabularisDB/tabularis-sqlserver-plugin` |
-
-정확한 base commit, source commit, 패치 SHA256과 최종 Git tree는
-[`integration/upstreams.json`](../integration/upstreams.json)에 고정돼 있습니다.
-`base_commit`은 공식 upstream의 기준 revision이고, `source_commit`은 원래 수정 소스의 revision입니다.
-SQL Server의 `patch_adaptations`는 UI SDK 링크를
-이 저장소의 고정 SDK로 바꾼 내용을 기록하며, 이 조정은 패치 SHA256과 최종 Git tree에 반영됩니다.
-부모 경로에 기존 checkout이 있으면 새 부모 디렉터리를 사용하세요.
-bootstrap은 원래 저장소에 commit하거나 upstream에 push하지 않습니다.
-앱 source만 준비하려면 `node scripts/bootstrap.mjs --only host`를 실행합니다.
 
 ## 지도 ZIP
 
@@ -76,32 +56,33 @@ ZIP은 운영체제 공통이며 실제 설치 동작은 각 운영체제의 호
 
 ## 공통 서비스 호스트 실행
 
-호스트는 공간 core를 sibling 경로에서 참조합니다. 디렉터리 이름과 배치를 유지하세요.
-호스트 저장소의 운영체제별 Tauri 필수 도구를 먼저 설치합니다.
+호스트는 저장소 루트이고 공간 core를 `extensions/spatial/crates/tabularis-spatial-core` 경로로 참조합니다.
+저장소 구조를 바꾸지 마세요. 호스트 저장소의 운영체제별 Tauri 필수 도구를 먼저 설치합니다.
+저장소 루트에서 실행합니다.
 
 ```sh
-pnpm --dir ../tabularis-app-source build
-pnpm --dir ../tabularis-app-source tauri dev
+pnpm install --frozen-lockfile --ignore-scripts
+pnpm --filter @tabularis/service-contracts build
+pnpm --filter @tabularis/plugin-api build
+pnpm build
+pnpm tauri dev
 ```
 
-배포용 앱은 `pnpm --dir ../tabularis-app-source tauri build`로 만듭니다.
+배포용 앱은 `pnpm tauri build`로 만듭니다.
 코드 서명·공증 자격 증명은 이 작업에서 사용하지 않았습니다.
 개발 검증에는 `TABULARIS_DATA_DIR`와 `TABULARIS_PLUGIN_DIR`에 서로 분리한 절대 경로를 지정할 수 있습니다.
 두 경로는 실제 사용자 프로필과 분리해야 합니다.
 
-수정 호스트에서도 같은 수동 설치 경로를 사용할 수 있습니다. 공통 서비스가 제공되면 전체 지도 기능을 활성화합니다.
-기존 PostgreSQL 드라이버도 패치된 소스로 빌드해야 새 공간 RPC를 사용할 수 있습니다.
+호스트는 서비스 API를 제공하므로 같은 수동 설치 경로에서 전체 지도 기능이 활성화됩니다.
+서비스 기능은 `postgresql-plus` 드라이버로 연결한 PostgreSQL이 대상입니다. 드라이버는 같은 저장소에 있습니다.
 
 ```sh
-cargo build --locked --release --manifest-path ../tabularis-postgresql-plugin/Cargo.toml
-cargo build --locked --release --manifest-path ../tabularis-sqlserver-plugin/Cargo.toml
+cargo build --locked --release --manifest-path extensions/postgresql/Cargo.toml
+cargo build --locked --release --manifest-path extensions/sqlserver-plus/Cargo.toml
 ```
 
-PostgreSQL 드라이버 패키지는 기존 upstream과 같이 `.tabularium`과 `postgresql-plugin` 실행 파일을
-ZIP 루트에 둡니다. Windows 실행 파일 이름에는 `.exe`가 붙습니다.
-SQL Server는 기존 패키징 절차에 따라 `.tabularium`, 실행 파일, UI·EXPLAIN 번들을 함께 넣습니다.
-SQL Server UI는 Spatial에서 `pnpm build:sdk`를 실행한 뒤 해당 저장소의 `ui/`에서
-frozen install과 build를 실행합니다.
+드라이버 패키징은 각 디렉터리의 `justfile`과 `.tabularium`이 정의합니다.
+이 문서는 패키징 결과를 검증하지 않았습니다.
 
 ## 되돌리기
 

@@ -1,20 +1,24 @@
-# Tabularis Azure
+# Azure
 
-Tabularis의 Azure 연동을 위한 저장소입니다.
+`tabularis-extended` 저장소의 `extensions/azure`입니다. Tabularis의 Azure 연동을 제공합니다.
 현재 Cosmos DB for NoSQL 드라이버, 문서 작업 공간과 Entra·Azure CLI 인증 UI를 제공합니다.
-Azure SQL은 기존 SQL Server 플러그인을 재사용합니다. 공통 Rust 인증 서비스와 SQL Server 연동 패치는
-[tabularis-spatial](https://github.com/hei5enbug/tabularis-spatial)의 `integration/`에서 제공합니다.
+Azure SQL은 `extensions/sqlserver-plus`의 SQL Server Plus 드라이버(대상 id `sqlserver-plus`)를 사용합니다.
+공통 Rust 인증 서비스는 저장소 루트의 호스트에 있습니다.
 저장된 연결과 설치 호환성을 위해 Cosmos 드라이버의 식별자는 `cosmos-nosql`로 유지합니다.
 MongoDB API와 SQL 트랜잭션 세션은 지원하지 않습니다.
 플러그인 버전은 `0.1.0`이며 Tabularis `0.26.0` 이상에서 기본 조회를 지원합니다.
-문서 수정과 페이지 재개는 공통 서비스 protocol `1`을 제공하는 수정 호스트 `0.26.1-spatial.1`이 필요합니다.
+문서 수정과 페이지 재개는 공통 서비스 protocol `1`을 제공하는 호스트 `0.27.0+extended.1`이 필요합니다.
 공개 플러그인 SDK API 버전은 `0.2.0`입니다.
+
+`manifest.json`의 `min_runtime_version`은 하나만 선언할 수 있고 호스트는 이보다 낮은 버전의 로드를 거부합니다.
+그래서 값은 기본 경로의 `0.26.0`으로 두고, 서비스 기능은 호스트가 제공하는 API로 선택합니다.
+`ui/src/index.tsx`는 `usePluginService`와 `usePluginAssets`가 모두 있을 때만 서비스 UI를 사용합니다.
 
 ## 빌드와 설치
 
-이 저장소만 checkout하면 됩니다. 다른 private 저장소나 PAT는 필요하지 않습니다.
+저장소를 한 번 clone하면 됩니다. 다른 private 저장소나 PAT는 필요하지 않습니다.
 공개 npm 의존성을 받으려면 네트워크 또는 채워진 패키지 cache가 필요합니다.
-Node `24.21.0`, pnpm `10.30.3`, Rust `1.96.0`을 준비한 뒤 실행하세요.
+Node `24.21.0`, pnpm `10.30.3`, Rust `1.96.0`을 준비한 뒤 `extensions/azure`에서 실행하세요.
 
 ```sh
 pnpm bootstrap
@@ -26,8 +30,8 @@ pnpm test:sdk
 ```
 
 공개 SDK 입력은 `build-support/sdk`에 22개 파일로 고정되어 있습니다.
-bootstrap은 이 원장을 확인한 뒤 root workspace만 frozen install하고 계약, SDK, 드라이버, UI를 빌드합니다.
-다른 저장소를 만들거나 수정하지 않습니다.
+`pnpm bootstrap`은 이 원장을 확인한 뒤 이 디렉터리의 workspace만 frozen install하고 계약, SDK, 드라이버, UI를 빌드합니다.
+저장소 루트의 호스트는 빌드하지 않으며 다른 디렉터리를 수정하지 않습니다.
 고정 source와 생산 ZIP을 만드는 방법은 [빌드 안내](docs/building.md#고정-sdk-입력)를 참고하세요.
 
 | 패키지 대상 | 현재 실행 근거 |
