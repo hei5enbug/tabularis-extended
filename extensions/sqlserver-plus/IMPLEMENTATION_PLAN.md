@@ -7,26 +7,28 @@ Tabularis Extended's saved-result paging, query cancellation, and query history.
 ## Intent and scope
 
 Maintain the local SQL Server improvements as a reproducible fork with a distinct package identity.
-Use the host plan as the canonical owner of MCP tools, managed-query states, paging, history, and cancellation
-semantics: [Tabularis Extended plan](https://github.com/hei5enbug/tabularis-extended/blob/main/IMPLEMENTATION_PLAN.md#managed-query-contract).
+Use the host plan as the canonical owner of MCP tools, job states, paging, history, and cancellation
+semantics: [Tabularis Extended plan](../../IMPLEMENTATION_PLAN.md#cancellation).
 The driver remains a JSON-RPC subprocess; it does not become a second MCP server.
 
 | Item | Baseline or target |
 |---|---|
-| Repository | [hei5enbug/tabularis-sqlserver-plus](https://github.com/hei5enbug/tabularis-sqlserver-plus) |
+| Repository | `extensions/sqlserver-plus` in [hei5enbug/tabularis-extended](https://github.com/hei5enbug/tabularis-extended), imported from [hei5enbug/tabularis-sqlserver-plus](https://github.com/hei5enbug/tabularis-sqlserver-plus) |
 | Current fork code baseline | `885ea261edd424078a59aaa584c2cfc25f2969ae` |
 | Local source base | Official `v1.0.0-beta.3` |
 | Installed original package | `sqlserver`, version `1.0.0-beta.3` |
 | Installed custom package | `sqlserver-entra`, version `1.0.0-beta.3+local.entra.1` |
 | Target package ID | `sqlserver-plus` |
 | Target display name | `SQL Server Plus` |
-| Target host | The fork and profile defined by the companion plan |
+| Target host | `0.27.0+extended.1` and the profile defined by the host plan |
 | Verification boundary | Existing database tests submit SELECT statements only |
 
 In scope:
 
 - Port the working Azure CLI/Entra authentication implementation and its tests onto current fork main.
 - Preserve SQL-password and Windows/Kerberos authentication, verified TLS, connection strings, and pool behavior.
+- Apply the service driver protocol from `extensions/spatial/integration/patches/sqlserver.patch` (base `58c47b3`)
+  and authenticate its service path with the driver-owned Azure CLI flow below, not with host-supplied tokens.
 - Add request-scoped SQL Server cancellation using the existing TDS library's cancellation handle.
 - Make row limits and truncation usable by the host's saved-result store without replaying SQL for its pages.
 - Provide an auth UI, plugin manifest, UI assets, EXPLAIN parser, build/release flow, and compatibility evidence.
@@ -42,7 +44,8 @@ The locally installed custom binary was built from a separate source copy. Its s
 receipt are recovery inputs, not publishable configuration bundles. The published repository must contain the
 source changes and safe fixtures, not passwords, tokens, live connections, identity values, or private endpoints.
 Use `sqlserver-entra-source.tar.gz` and `deployment.json` from the platform application-support sibling
-`tabularis-local-deployments/connection-repair-*/` directory, following the host plan's provenance checks.
+`tabularis-local-deployments/connection-repair-*/` directory. Before extracting the deltas, verify the archive's
+source baseline and the receipt's installed-binary checksum.
 
 | Existing local surface | Behavior to port | Preservation check |
 |---|---|---|
@@ -133,18 +136,19 @@ The backend's existing RPCs remain usable by compatible hosts; publish the suppo
 
 ### Cancellation protocol
 
-Implement the host plan's existing JSON-RPC cancel notification without creating a driver-owned MCP API:
+Implement the service `cancel_request` method that the host plan uses, without creating a driver-owned MCP API:
 
 ```json
-{"jsonrpc":"2.0","method":"cancel","params":{"id":42}}
+{"jsonrpc":"2.0","id":7,"method":"cancel_request","params":{"connection_id":"<id>","request_id":"<service request id>"}}
 ```
 
-The numeric ID identifies an in-flight `execute_query` or supported query-batch request in this plugin process.
-Do not accept arbitrary server session IDs. Notifications have no top-level ID and receive no response.
-Late, duplicate, unknown, or completed IDs are no-ops. A malformed notification must not crash the process
-or produce an unsolicited stdout response.
+The pair identifies an in-flight service execution in this plugin process. Do not accept arbitrary server
+session IDs. Reply promptly with an acknowledgement; the acknowledgement never confirms termination.
+Late, duplicate, unknown, or completed IDs are acknowledged no-ops. Advertise `cancel_v1: true` in
+`service_capabilities` only after this works. The legacy id-less `cancel` notification that the host sends after
+a call timeout must stay harmless: no crash and no unsolicited stdout response.
 
-Keep the stdin reader responsive and route cancel notifications directly to an in-flight registry before the
+Keep the stdin reader responsive and route `cancel_request` calls directly to an in-flight registry before the
 ordinary bounded worker queue. Do not enqueue cancellation behind four long-running queries.
 Register a request-scoped cancellation handle before pool acquisition so a queued checkout can also be cancelled.
 Use a generation/guard to remove only the matching execution entry on every return path.
@@ -153,7 +157,7 @@ Create a parent `mssql_tds::core::CancelHandle` for each execution and pass its 
 TDS execution path. The registry owns the one-shot parent. Sending cancellation must reach the TDS ATTENTION
 path and completion handling; dropping a host future alone is not a successful database cancellation.
 Propagate the confirmed cancellation outcome through the original query response using the exact error code
-and data shape defined in the host plan's cancellation contract. Distinguish SQL failure, deadline expiry,
+and data shape defined in the host plan's Cancellation section. Distinguish SQL failure, deadline expiry,
 and confirmed cancellation. Preserve existing non-cancellation error text/code behavior.
 
 After cancellation, either complete the driver's documented drain/reset sequence or discard that connection.
@@ -173,7 +177,7 @@ expiry, release, and history. Preserve the existing `QueryResult`, positional ro
 additional-result metadata, and explicit `truncated` flag.
 
 Retain `MAX_RESULT_ROWS = 10_000` across result sets for the first release and make truncation unambiguous.
-The host's managed-query path executes once and pages the returned snapshot. It must not use the driver's
+The host's service result path executes once and pages the returned snapshot. It must not use the driver's
 existing `page`/OFFSET path to claim that it is reading the same saved result.
 Keep legacy SQL pagination available for existing GUI and MCP consumers. Preserve explicit TOP/LIMIT-like
 clauses, CTE classification, and the existing restriction on statements that can be paginated.
@@ -210,13 +214,14 @@ The coordinator owns all cross-repository contracts and final integration decisi
 
 | Slice / owner | Result and allowed paths | Protected paths and prerequisites | Shared resources / parallel condition | Completion evidence |
 |---|---|---|---|---|
-| D1 / implementation worker | Port Entra module, pool wiring/identity, and auth tests; `src/driver/{azure_cli_auth.rs,mod.rs,pool.rs,pool/tests.rs}`, `src/pool_manager.rs` | Preserve newer introspection/trigger fixes, actual credentials, and unrelated handlers; use the frozen host contract | Parallel with host H1; own driver Rust build directory | Auth and pool fixtures, upstream-delta review, locked backend build |
-| D2 / implementation worker | Request registry, responsive cancel dispatch, TDS cancellation, safe connection discard; `src/main.rs`, `src/rpc.rs`, query handlers/driver and focused tests | D1 accepted; preserve JSON-RPC response shape and non-query handlers | Serial with D1 because runtime files/build output overlap; may run alongside host H3 | Deterministic saturation, late/duplicate/race, error-redaction, and handle-lifetime checks |
-| D3 / designer route | Auth UI and component tests under `ui/` | D1 accepted and host H3 UI contract available; backend, root manifest, and packaging files protected | Can proceed while D2 edits backend, using separate frontend outputs | UI type/component tests and reviewed identity/credential-field behavior |
-| D4 / coordinator | Package identity, versions, UI/parser bundles, fork install/release recipes, and integrated acceptance; root manifests/locks, build/release metadata and docs | D2/D3 and host H2/H3 accepted; UI/backend implementations accepted before integration edits | Serial shared installation/host integration; owns package metadata and final outputs | Complete package/host compatibility, approved SELECT-only integration, reproducibility, artifact hash, migration/rollback evidence |
+| D0 / implementation worker | Apply `sqlserver.patch`; service module, handlers, manifest `service_capabilities`; `src/`, `.tabularium`, `Cargo.toml`, `Cargo.lock`, `tests/` | Preserve current upstream fixes; do not run the patch's live Azure SQL harness | Parallel with host slices; own driver Rust build directory | `cargo test --locked --bins --test conformance`, service fixtures, `initialize` reports `service_capabilities` |
+| D1 / implementation worker | Port Entra module, pool wiring/identity, and auth tests, used by both the legacy and service paths; `src/driver/{azure_cli_auth.rs,mod.rs,pool.rs,pool/tests.rs}`, `src/driver/service/`, `src/pool_manager.rs` | D0 accepted; preserve newer introspection/trigger fixes, actual credentials, and unrelated handlers | Serial after D0; own driver Rust build directory | Auth and pool fixtures, service login fixtures, upstream-delta review, locked backend build |
+| D2 / implementation worker | Request registry, responsive cancel dispatch, TDS cancellation, safe connection discard; `src/main.rs`, `src/rpc.rs`, query handlers/driver and focused tests | D1 accepted; preserve JSON-RPC response shape and non-query handlers | Serial with D1 because runtime files/build output overlap; may run alongside host slices | Deterministic saturation, late/duplicate/race, error-redaction, and handle-lifetime checks |
+| D3 / designer route | Auth UI and component tests under `ui/` | D1 accepted and the host U1 `setPasswordFieldHidden` contract available; backend, root manifest, and packaging files protected | Can proceed while D2 edits backend, using separate frontend outputs | UI type/component tests and reviewed identity/credential-field behavior |
+| D4 / coordinator | Package identity, versions, UI/parser bundles, fork install/release recipes, and integrated acceptance; root manifests/locks, build/release metadata and docs | D2/D3 and host S2/U1 accepted; UI/backend implementations accepted before integration edits | Serial shared installation/host integration; owns package metadata and final outputs | Complete package/host compatibility, approved SELECT-only integration, reproducibility, artifact hash, migration/rollback evidence |
 
-The host can use a fake driver for H2 before D2 is finished; real cancellation acceptance waits for both sides.
-D4 and host H4 share one coordinator and one integration run. Reuse its results in both repositories.
+The host can use a fake driver for S2 before D2 is finished; real cancellation acceptance waits for both sides.
+D4 runs inside the host's I1 integration slice with one coordinator and one integration run.
 Do not build or package while a worker is still editing the relevant inputs.
 
 ## Verification and completion
@@ -225,7 +230,7 @@ Do not build or package while a worker is still editing the relevant inputs.
 |---|---|
 | P1: existing authentication survives | Ported pure tests cover accepted tokens, bad shape, wrong identity/audience, expiry, empty config, incompatible password/integrated mode, TLS downgrade, and CLI failure without secret output |
 | P2: renewal is connected to the pool | Fake CLI/process and connector tests prove acquisition on each new physical connection, bounded timeouts, child cleanup, account-change rejection, and unchanged SQL/integrated paths |
-| P3: native cancellation is real | A blocked driver fixture proves the cancel notification bypasses the queue; approved nonproduction SELECT execution confirms server termination and safe reuse/discard |
+| P3: native cancellation is real | A blocked driver fixture proves `cancel_request` bypasses the queue; approved nonproduction SELECT execution confirms server termination and safe reuse/discard |
 | P4: cancellation is scoped | Concurrent requests, cancellation before checkout, completion races, duplicate/late IDs, and generation cleanup cannot affect another request |
 | P5: results remain compatible | Empty/typed/multi-result and 10,000/10,001-row fixture cases preserve shapes and explicit truncation; snapshot pages trigger no second query |
 | P6: upstream fixes remain | Existing introspection, trigger, parser, type-mapping, TLS, connection-string, and conformance fixtures pass |

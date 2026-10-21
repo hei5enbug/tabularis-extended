@@ -1,314 +1,384 @@
 # Tabularis Extended implementation plan
 
-This document defines future implementation work. This commit changes documentation only.
-The approved scope is the existing working setup plus saved-result paging, query cancellation, and query history.
-The coordinator owns this plan and the cross-repository contracts.
+This document defines future implementation work. It changes no code.
+The coordinator owns this plan and every cross-component contract in this repository.
 
 ## Intent and scope
 
-Build and maintain Tabularis Extended as a reproducible fork that can use the existing database connections
-and expose the three additional MCP capabilities without waiting for an upstream pull request.
+Make Tabularis Extended's MCP server cover the database work that the DataGrip MCP server offers, while keeping
+the existing connections, authentication, and plugins working. All components live in this repository.
 
 | Item | Decision |
 |---|---|
-| Host repository | [hei5enbug/tabularis-extended](https://github.com/hei5enbug/tabularis-extended) |
-| Driver repository | [hei5enbug/tabularis-sqlserver-plus](https://github.com/hei5enbug/tabularis-sqlserver-plus) |
+| Repository | [hei5enbug/tabularis-extended](https://github.com/hei5enbug/tabularis-extended), branch `feature/monorepo-extensions` |
 | Host code baseline | `313ef093408a15c38f1df9342c1f779aa3e7d27c`, upstream `0.27.0` |
-| Driver code baseline | `885ea261edd424078a59aaa584c2cfc25f2969ae` |
+| Extensions | `extensions/sqlserver-plus`, `extensions/spatial`, `extensions/azure`, imported with history by `git subtree` |
+| PostgreSQL plugin | `extensions/postgresql`, to be imported from the official `tabularis-postgresql-plugin` |
+| Service layer source | `extensions/spatial/integration/patches/{host,postgresql,sqlserver}.patch` and `upstreams.json` |
 | Current installed host | `0.26.0+local.1`, based on `5d7e27408907c0faafc8cc6b940725f4a1258f42` |
-| Companion implementation | [SQL Server Plus plan](https://github.com/hei5enbug/tabularis-sqlserver-plus/blob/main/IMPLEMENTATION_PLAN.md) |
-| Document language | English, following `.rules/general.md` |
+| Driver companion plan | [SQL Server Plus plan](extensions/sqlserver-plus/IMPLEMENTATION_PLAN.md) |
 
-In scope:
+### DataGrip coverage target
 
-- Recover the behavior of the installed host patch and the locally extended SQL Server driver as maintained source.
-- Preserve connection IDs, names, selected databases, authentication, TLS, keychain storage, and plugin settings.
-- Add MCP tools for asynchronous execution, saved-result pages, cancellation, execution status, and history.
-- Preserve the five existing MCP tools and their JSON/TOON output contracts.
-- Give the fork a distinct application identity and a repeatable build, installation, update, and rollback path.
-- Preserve installed PostgreSQL, SQL Server, Spatial, and Cosmos plugin compatibility at their verified level.
-- Prevent an old connection editor from overwriting a newer TLS or authentication setting.
+The DataGrip MCP server was connected on 2026-10-21 and listed these database tools.
+IDE tools such as file search, refactoring, run configurations, and builds are outside this plan.
+The new tools target PostgreSQL and SQL Server Plus connections. Cosmos uses its document tools.
 
-Non-goals:
+| DataGrip tool | Tabularis Extended tool after this plan |
+|---|---|
+| `list_database_connections` | `list_connections` (existing) |
+| `test_database_connection` | `connection_test` |
+| `create_database_connection` / `edit_database_connection` | `connection_create` / `connection_update` |
+| `list_database_schemas` | `catalog_databases`, `catalog_schemas` |
+| `list_schema_object_kinds` / `list_schema_objects` | `catalog_objects` with a `kind` filter and the driver's supported kinds |
+| `get_database_object_description` | `catalog_describe` for tables, views, materialized views, routines, and triggers |
+| `introspect_schema` | Not needed: Tabularis reads catalog metadata live on every call |
+| `preview_table_data` | `table_preview` |
+| `execute_sql_query` | `run_query` (existing) and `query_execute` with optional `database` and `schema` |
+| `fetch_query_result` | `result_get` over a stored result |
+| `cancel_sql_query` | `job_cancel` |
+| `list_recent_sql_queries` | `job_list`, including running jobs |
 
-- Reproduce DataGrip's IDE, file editing, refactoring, build, connection-management, or all catalog tools.
-- Add new database write operations, service-principal authentication, or automatic privileged access.
-- Port the entire archived spatial service host, add MCP map control, or complete Cosmos CRUD/authentication parity.
-- Add unbounded result export, server cursors, or retrieval of rows discarded by a driver limit in the first release.
-- Publish connection files, passwords, tokens, tenant/user/object identifiers, private endpoints, or live query logs.
+### In scope
 
-The three new capabilities initially target PostgreSQL and SQL Server Plus. Other drivers retain the existing
-MCP path. Their managed-query support requires a separate verified capability adapter.
-All numerical limits and fork identities below are proposed implementation decisions, not current capabilities.
+- Port the archived common service layer onto the `0.27.0` host as maintained source.
+- Add the service driver protocol to the PostgreSQL plugin fork and to SQL Server Plus.
+- Expose service operations as MCP tools with valid names, flat arguments, and useful descriptions.
+- Add confirmed database cancellation, query history, and per-call database and schema selection.
+- Let MCP create, update, and test connections without ever receiving a secret.
+- Allow writes through asynchronous execution under one write policy shared with `run_query`.
+- Recover the installed host patch, give the fork its own identity and profile, and make connection saves safe.
+- Port the SQL Server Entra authentication described in the companion plan.
+- Enable the Spatial and Azure features that depend on the service layer: saved maps, result maps, MCP map
+  control, Cosmos continuation, document CRUD, and in-app Entra authentication for Cosmos.
+- Run every extension's CI from the repository root and retire the patch-based integration directory.
 
-## Evidence and behavior to preserve
+### Non-goals
 
-The installation inventory and prior read-only checks establish this baseline. They are not new tests of the fork.
+- DataGrip IDE features: file editing, code search, refactoring, builds, and run configurations.
+- Deleting connections or importing credentials through MCP, or delivering any secret through MCP arguments.
+- Service tools for MySQL and SQLite connections; they keep the five existing tools.
+- Service-principal or host-managed authentication for SQL Server, automatic privileged access, or new database
+  permissions.
+- Result storage beyond the service layer's bounded private cache, server cursors, or fetching rows that a
+  driver limit discarded.
+- Publishing connection files, passwords, tokens, tenant or object identifiers, private endpoints, or live logs.
 
-| Surface | Observed state | Implementation consequence |
+### Constraints and protected surfaces
+
+- Keep the five existing tools (`list_connections`, `list_databases`, `list_tables`, `describe_table`,
+  `run_query`) and their JSON and TOON output. New optional arguments are allowed; changed defaults are not.
+- Keep connection IDs, names, database selections, authentication, TLS, and keychain storage.
+- Never weaken TLS, substitute identities, replay SQL, or report an unconfirmed cancellation as confirmed.
+- Keep the official app, its profile, and the official plugin packages untouched for rollback.
+- Every MCP tool name must match `^[a-zA-Z0-9_-]{1,64}$`. The patch's dotted names do not.
+- Follow `.rules/*.md` for code and English documentation.
+
+### Acceptance criteria
+
+The verification table at the end maps each criterion to evidence. The work is complete when A1 to A15 pass.
+Optional follow-ups are listed in the last section and are not completion gates.
+
+### Stop conditions
+
+Stop the affected work and report on a source or archive mismatch, missing credentials, an exposed secret,
+an incompatible plugin contract, a stale profile conflict, unconfirmed cancellation presented as confirmed,
+or a failed required check. Preserve completed work. Never retry SQL or weaken a check to pass it.
+
+## Evidence
+
+### Installed baseline
+
+These read-only observations predate the fork. They are baseline facts, not tests of the fork.
+
+| Surface | Observed state | Consequence |
 |---|---|---|
-| Saved connections | 14 connections: six PostgreSQL, six Entra SQL, two SQL-password connections | Preserve all IDs and routing; repeat `SELECT 1` after migration |
-| Live verification | Every connection eventually returned `1`; metadata checks covered representative PostgreSQL and SQL connections | This proves basic connectivity, not all workloads or new cancellation/paging behavior |
-| PostgreSQL | Official plugin `1.0.0-rc.6`; verified TLS and existing password credentials | Keep the official plugin and reuse its request-cancellation protocol |
-| SQL Server | Official `1.0.0-beta.3` plus a local `sqlserver-entra` package at `1.0.0-beta.3+local.entra.1` | Port the authentication delta through the companion plan; do not copy an old source tree over current main |
-| Entra authentication | Azure CLI token acquisition for each new physical connection, with identity/resource/expiry checks | Preserve the same account and tenant; never persist access or refresh tokens in the fork |
-| TLS | PostgreSQL `verify-full`; SQL Server `verify-full` or normalized `verify_identity` | Preserve certificate and hostname validation; do not substitute trust-all certificates |
-| Credential storage | Keychain-backed connections work; manual edits also demonstrated inline-password storage | Import credentials into the fork keychain without publishing or logging them |
-| Spatial | Installed UI plugin `0.1.0`, runtime floor `0.26.0` | Preserve the basic PostGIS table-map path, UI slots, relative assets, and host plugin API |
-| Cosmos | Installed `cosmos-nosql` `0.1.0`, runtime floor `0.26.0` | Preserve its currently supported connection, metadata, and read-only query paths |
-| EXPLAIN | PostgreSQL plans and SQL Server `sqlserver-showplan-xml` parser/bundle | Preserve parser registration, module paths, and raw result shape; no live EXPLAIN ANALYZE tests |
+| Saved connections | 14 connections: six PostgreSQL, six Entra SQL, two SQL-password | Preserve all IDs; repeat `SELECT 1` after migration |
+| PostgreSQL | Official plugin `1.0.0-rc.6`, `verify-full` TLS | The fork plugin must keep its connection and TLS behavior |
+| SQL Server | Official `1.0.0-beta.3` plus local `sqlserver-entra` `1.0.0-beta.3+local.entra.1` | Port the auth delta through the companion plan |
+| Spatial / Cosmos | Installed `0.1.0` packages, runtime floor `0.26.0` | Keep their basic paths; enable service features after the port |
+| EXPLAIN | PostgreSQL plans and the SQL Server `sqlserver-showplan-xml` parser | Keep parser registration and raw result shape |
 
-The Spatial baseline has table-map limits of 1,000 rows, 100,000 coordinates, and 8 MiB of GeoJSON.
-Saved maps, result-snapshot maps, and MCP map control require a different service host and are not established
-capabilities of the installed `0.26.0+local.1` build. Cosmos continuation, document CRUD, full authentication
-refresh, and GUI/CLI/MCP parity likewise remain unverified in the archived validation records.
+### Current host behavior
 
-### Source provenance
+Read from the `313ef093` source on 2026-10-21.
 
-- The installed host patch is recorded in
-  [local-host pins](https://github.com/hei5enbug/tabularis-spatial/blob/6ab07f389990ee241ae67fba1cdc1d2b110a9738/integration/local-host/pins.json)
-  and [its patch](https://github.com/hei5enbug/tabularis-spatial/blob/6ab07f389990ee241ae67fba1cdc1d2b110a9738/integration/local-host/plugin-drivers-only.patch).
-  Its SHA-256 is `607a39712d162aeaa3983673594bc0ab2362696d60069e435ce13cf1dc3762ee`.
-- The larger archived host patch targets `0.26.1-spatial.1`, not either current baseline.
-  [Integration pins](https://github.com/hei5enbug/tabularis-spatial/blob/6ab07f389990ee241ae67fba1cdc1d2b110a9738/integration/upstreams.json)
-  identify its source as `04f85fce003383a8f489ad7d7ac05626583e2361` and its patch SHA-256 as
-  `06a4847ff21a79a31a73d9121d8fe745969ca7046de34b22410ed73269e63b02`.
-  `services/results.rs`, `services/jobs.rs`, and `services/runtime.rs` in that patch are reuse candidates.
-  They contain real result storage and job code, but SQL output is still bounded and native continuation is
-  document-driver-specific. Extract only the pieces required by this plan.
-- Existing plugin behavior is described in the
-  [Spatial usage guide](https://github.com/hei5enbug/tabularis-spatial/blob/6ab07f389990ee241ae67fba1cdc1d2b110a9738/docs/usage.md)
-  and [Cosmos verification record](https://github.com/hei5enbug/tabularis-azure/blob/1f7e3f5367b065df077383c313a48fadeaf1f5bf/docs/verification.md).
-- The installed custom SQL source archive and deployment receipt are local recovery inputs.
-  Locate `sqlserver-entra-source.tar.gz` and `deployment.json` under the platform application-support sibling
-  `tabularis-local-deployments/connection-repair-*/` directory. Verify the archive's baseline and the receipt's
-  installed-binary checksum before extracting the five source deltas listed in the driver plan.
-  Port their source changes through the driver repository. Do not commit their private configuration backups
-  or machine-specific repair scripts. Preserve the existing 239-test result only as historical evidence.
+- The MCP server is the same binary started with `--mcp`. It shares state with the GUI only through files.
+  Its stdin loop handles one request at a time (`src-tauri/src/mcp/mod.rs`, `run_mcp_server`).
+- `run_query` classifies SQL as `select`, `write`, `ddl`, or `unknown` (`ai_activity::classify_query_kind`).
+  `SELECT … INTO` is classified as `select`. A read-only connection rejects anything but `select`.
+  `mcp_approval_mode` is `off`, `writes_only` (default), or `all`. Approval travels as files in
+  `pending_approvals/` and is shown by `AiApprovalModal`, which can edit the query.
+- `run_query` always executes on the saved connection's first database with `schema = None`.
+  Only `insert_record`, `update_record`, and `delete_record` accept a per-call `database` override.
+- The GUI `cancel_query` aborts the host task only. The plugin `cancel` notification is sent only after a call
+  timeout (`src-tauri/src/plugins/driver.rs`, `send_request`).
+- Twenty-odd code paths write `connections.json` through `persistence::save_connections_file` without a lock.
+  `extra` is stored verbatim and is not treated as a secret.
+- The GUI `test_connection` accepts arbitrary `params` plus a `connection_id` and fills the password from the
+  keychain of that saved connection without comparing targets (`commands.rs`, `resolve_test_connection_password`).
+
+### Archived service layer
+
+`host.patch` adds 202 files (+35,743 / -353 lines): service contracts, a runtime with jobs, results, sessions,
+policy and approvals, local IPC, a native CLI, an MCP transport, the Spatial domain, and frontend hooks.
+It defines 50 operations: `connection.*`, `catalog.*`, `query.execute`, `query.next`, `result.get`,
+`result.release`, `row.*`, `document.*`, `session.*`, `spatial.*`, `map.*`, `job.*`, `auth.*`,
+and `credential.import`. Its MCP transport rejects `credential.import`.
+
+On 2026-10-21, `git apply --check` against `313ef093` failed for six files only: five version files
+(`package.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, `src-tauri/tauri.conf.json`,
+`src/version.ts`) and `src/pages/Editor.tsx`. The other 196 files apply.
+`sqlserver.patch` applies to `extensions/sqlserver-plus` without failures; its base `58c47b3` is three commits
+behind the imported head. `postgresql.patch` targets the official PostgreSQL plugin at base `963f358`.
+
+Facts the plan must handle:
+
+- The service runtime calls a driver only when its `initialize` result has `service_capabilities` with
+  `service_protocol: 1` (`parse_service_capabilities` in `host.patch`). `postgresql.patch` advertises
+  `exact_query`, `spatial_v1`, `sessions`, `cancel_v1`, `catalog`, `rows`, and
+  `readonly_guarantee: read_only_transaction`. `sqlserver.patch` adds a service module whose read-only probe
+  succeeds only for a principal without write permissions.
+- The runtime rejects every read when the driver's read-only guarantee is unavailable (`WriteNotAllowed`).
+- Connection validation accepts `auth_source: azure_cli` only for drivers `sqlserver` and `cosmos-nosql`,
+  requires the Azure CLI `client_id`, and rejects `extra.username`. The companion's driver-owned Entra contract
+  uses `username`, `tenant_id`, and `entra_object_id` on driver `sqlserver-plus`.
+- Cancellation reaches drivers through the service `cancel_request` method. The PostgreSQL patch implements it.
+- Results are cached as private files under the profile's `results-v1` directory: at most 10,000 rows and
+  32 MiB per result, kept 15 minutes. MCP output is cut to a 12 KiB data budget inside a 64 KiB response.
+- The MCP path `run_one` waits for a job to reach a terminal status before replying.
+- Tool names contain dots, arguments are a full request envelope, and every description is
+  `Common service {name}`.
+- The job store keeps at most 256 records for 15 minutes, so it is not a query history.
+- The patch's own validation records leave Cosmos CRUD, continuation, and in-app login unverified against Azure.
 
 ## Implementation strategy
 
-### Recover the host behavior on current main
+### Repository layout
 
-Port the local patch semantically rather than applying its old version hunks wholesale:
+Keep upstream's root layout so `git merge upstream/main` keeps working. Keep each extension as its own pnpm
+and Cargo workspace under `extensions/`; do not add them to the root workspace files.
+Move each extension's `.github/workflows/*` into root workflows with `paths:` filters and a matching
+`working-directory`. Use `git subtree pull` with the extension prefix to take upstream plugin changes.
+After the host and driver ports, delete `extensions/spatial/integration/` and
+`extensions/spatial/scripts/bootstrap.mjs`, and replace version references to `0.26.1-spatial.1`.
 
-1. Keep only MySQL and SQLite registered as built-in drivers in GUI and standalone MCP startup.
-   PostgreSQL uses the official `postgresql` plugin. Retain PostgreSQL dialect and geometry helpers.
-2. Make foreign imports resolve PostgreSQL to `postgresql` and SQL Server to `sqlserver`.
-   Keep `mssql` as a SQL dialect name, not a plugin ID. A plain import must not infer Entra authentication.
-3. Retain upstream's existing plugin discovery, lazy MCP registry reload, and driver-migration UI.
-   Update built-in fallback lists and importer/parser fixtures consistently.
-4. Restore `--list-drivers` as a manifest-only diagnostic. It must not open database connections, resolve
-   credentials, migrate connection files, or write application configuration.
+### Port the service layer
 
-Primary surfaces are `src-tauri/src/{lib.rs,cli.rs,mcp/mod.rs}`, `src-tauri/src/drivers/registry.rs`,
-`src-tauri/src/connection_import/driver_map.rs`, `src/hooks/useDrivers.ts`, and `src/utils/connections.ts`.
-Preserve newer upstream fixes, including read-only/EXPLAIN handling, routine review, plugin loading,
-data-grid behavior, and connection migration. Do not downgrade the source version to `0.26.0`.
+Apply `host.patch` with `git apply --3way` on top of `313ef093`. Resolve the six failing files by keeping the
+`0.27.0` content and re-adding only the patch's functional hunks; version strings follow the fork version.
+Resolve the `service_native`, `service_commands`, and `service_platform` module references to real modules.
+Run `cargo fmt` on the ported Rust and the repository formatter on ported TypeScript so the code matches the
+surrounding style. Keep the patch's tests and make them pass before any behavior change.
+The legacy MCP loop stays until the MCP surface slice switches it; the legacy tools must not change.
 
-### Application identity and profile migration
+### Driver service protocol
 
-Use display name `Tabularis Extended`, executable name `tabularis-extended`, and bundle identifier
-`io.github.hei5enbug.tabularis.extended`. Use `tabularis-extended` for the fork's platform profile directory
-and keychain service. Keep the original profile and application available for rollback.
+Import the official PostgreSQL plugin with `git subtree add --prefix=extensions/postgresql` at `963f358`,
+apply `postgresql.patch`, then merge the upstream release that matches the installed `1.0.0-rc.6` or newer.
+Give the package its own ID, `postgresql-plus`, and display name `PostgreSQL Plus`, as SQL Server Plus does.
+Keep its existing connection, TLS, and cancel behavior; its `cancel_request` handler is the service cancel path.
 
-The first-run import is explicit and local. Read the existing profile through its configured storage-location
-resolver, take a private backup, then atomically create the fork profile. Preserve connection IDs, names,
-database selections, groups, tags, saved queries, notebooks, themes, and settings. Copy platform-specific plugin
-packages to the fork's plugin directory rather than copying binaries through a synced configuration folder.
-Transfer saved and inline passwords directly into the fork keychain; remove those values from destination JSON
-only after keychain verification succeeds. Preserve source credentials and report unavailable credentials for
-manual entry. Never extract secrets into command-line arguments, reports, fixtures, or repository files.
+Apply `sqlserver.patch` to `extensions/sqlserver-plus` as part of the companion plan. Its service path must
+authenticate with the companion's driver-owned Azure CLI flow, not with host-supplied tokens.
 
-Keep PostgreSQL connections on `postgresql`. In the imported fork profile, migrate existing SQL Server and
-`sqlserver-entra` connections to `sqlserver-plus` after the companion package is installed and verified.
-Preserve the six Entra configurations and the two SQL-password configurations as distinct authentication modes.
-Keep original profile IDs and original plugin packages intact. Update the MCP client command to the verified
-fork executable only after the new profile passes its acceptance checks; do not edit unrelated MCP servers.
+### Host recovery and identity
 
-Implement this in `src-tauri/src/{paths.rs,storage_location.rs,persistence.rs,keychain_utils.rs,commands.rs}`,
-the plugin installer, application metadata, and the first-run/import UI. Handle custom storage locations and
-existing destination profiles explicitly; never overwrite a nonempty destination profile silently.
+Port the installed local patch semantically:
 
-### Connection edits must preserve current settings
+1. Keep only MySQL and SQLite as built-in drivers in GUI and standalone MCP startup.
+2. Map foreign imports to `postgresql` and `sqlserver`. Keep `mssql` as a dialect name. Never infer Entra.
+3. Keep upstream plugin discovery, lazy MCP registry reload, and driver-migration UI.
+4. Restore `--list-drivers` as a manifest-only diagnostic that opens no connection and writes nothing.
 
-Use the existing `fs2` dependency for one profile-level connection-file lock, atomic replacement, and a
-per-connection revision. A loaded editor receives a revision and supplies it when saving. Under the lock,
-reload the current file and reject a stale revision before credential or file mutation. Return a conflict
-that lets the user reload the connection; do not silently merge contradictory known-field values.
-Preserve unknown fields and all other connections. Apply this protocol to every connection-file writer,
-including database-selection reconciliation and imports, not only the modal's save button.
-Test file/keychain failures together: a failed secret update leaves the file untouched, and a failed file commit
-restores the prior secret or reports an explicit recovery requirement. Never report a partially saved edit as success.
+Use display name `Tabularis Extended`, executable `tabularis-extended`, bundle identifier
+`io.github.hei5enbug.tabularis.extended`, and `tabularis-extended` for the profile directory and keychain
+service. Use version `0.27.0+extended.1` in every host version file. Disable the official update feed.
 
-A password-only edit must preserve `ssl_mode`, `driver`, database selection, and `extra` unless those fields
-were explicitly edited in the same current revision. Invalidate GUI caches after a successful save and refresh
-on an external file change. This addresses the observed case where an older editor restored an empty TLS mode.
+First-run import is explicit. Back up the source profile, then atomically create the fork profile with the same
+connection IDs, names, database selections, groups, tags, saved queries, notebooks, themes, and settings.
+Copy platform plugin packages into the fork's plugin directory. Move saved and inline passwords into the fork
+keychain and remove them from destination JSON only after the keychain write is verified. Never overwrite a
+nonempty destination profile. In the fork profile, after each package is installed and verified, map
+`postgresql` connections to `postgresql-plus` and `sqlserver` and `sqlserver-entra` connections to
+`sqlserver-plus`, keeping their authentication mode.
 
-Extend the `connection-modal.extra_fields` context in `packages/plugin-api/src/slots.ts` with
-`setPasswordFieldHidden(boolean)`. It hides and clears only the password field; the username remains visible.
-Keep `setCredentialFieldsHidden(boolean)` backward compatible for existing plugins. Reset both flags when the
-driver changes and preserve plugin `extra` fields through load, test, and save. SQL Server Plus owns its auth UI.
+### Safe connection saves
 
-### Managed-query contract
+Add one profile-level lock with `fs2`, atomic replacement, and a per-connection `revision` to every writer of
+`connections.json`, including migrations, imports, group and tag commands, and the service layer.
+An editor or MCP call sends the revision it read. Under the lock, reload the file and reject a stale revision
+with `CONNECTION_CONFLICT` before any keychain or file change. Preserve unknown fields and other connections.
+A failed keychain write leaves the file untouched; a failed file write restores the previous secret or reports
+an explicit recovery requirement.
 
-This section is the canonical cross-repository contract. The driver plan references it rather than redefining it.
-Keep `list_connections`, `list_databases`, `list_tables`, `describe_table`, and `run_query` compatible.
-Support the existing `output_format` option on the new tools as well.
+A password-only edit keeps `ssl_mode`, `driver`, the database selection, and `extra`.
+Add `setPasswordFieldHidden(boolean)` to the `connection-modal.extra_fields` context in
+`packages/plugin-api/src/slots.ts`; keep `setCredentialFieldsHidden(boolean)` compatible.
 
-| New MCP tool | Inputs and behavior |
+Change the service connection validation so `sqlserver-plus` accepts the companion's Entra fields
+(`auth_mode: entra_user`, `auth_source: azure_cli`, `username`, `tenant_id`, `entra_object_id`, optional
+`azure_cli_path`) without `client_id`, and so the host never acquires tokens for it. Keep the patch's
+validation for Cosmos.
+
+### One write policy
+
+Both `run_query` and the service query tools use the existing settings as the single source:
+`mcp_readonly_default`, `mcp_readonly_connections`, and `mcp_approval_mode`. Map the service layer's
+`connection.allow_writes` and `permission.allow_writes` checks onto `config::is_connection_readonly`.
+
+Fix the shared classifier first: `SELECT … INTO`, `EXEC`, `EXECUTE`, `CALL`, and multiple statements are not
+`select`. Any statement the classifier cannot prove is a read counts as a write.
+
+| Rule | `run_query` | `query_execute` and other service writes |
+|---|---|---|
+| Write detection | Classification; `unknown` counts as a write | Explicit `write: true`, and classification must also pass |
+| Missing intent | Not applicable | A non-`select` statement without `write: true` fails with `WRITE_INTENT_REQUIRED` |
+| Read guarantee | Classification only | Driver guarantee when available; otherwise classification, reported as `classification_only` |
+| Read-only connection | Rejects non-`select` | Rejects every write before queueing |
+| Approval | `mcp_approval_mode`; GUI may edit the query | `mcp_approval_mode`; single-use, bound to the request hash, no edits |
+| After cancel or timeout | Never retried | Never retried; outcome is `unknown` unless the driver confirms |
+
+Replace the runtime's blanket read rejection with this rule: when the driver reports no read-only guarantee,
+a read runs only if the classifier returns `select`, and every result reports `readonly_guarantee`.
+Row, document, and session-commit operations are writes. Keep `run_query`'s approval channel unchanged.
+The service approvals use the ported backend and must appear in the same GUI approval gate.
+
+### MCP surface
+
+Switch `--mcp` to the ported service transport, which must read requests concurrently and serialize stdout.
+Control calls such as `job_get` and `job_cancel` must not wait behind a running query or an approval.
+
+Expose every service operation except `credential.import` and `connection.delete` as one tool, and reject
+direct calls to those two. Replace dots with underscores (`connection.test` becomes `connection_test`).
+Accept the operation's input fields as top-level arguments plus `connection_id`, `session_id`, `map_id`,
+`expected_version`, and `deadline_ms` where the operation uses them. The transport generates
+`protocol_version` and `request_id`. Write a one- or two-sentence description for every tool that states what
+it returns and whether it can write. Keep the five legacy tools.
+
+`query_execute` returns as soon as the job is registered. Its optional `wait_ms` (default 5,000, 0–60,000)
+lets a fast job return its first page in the same reply. Otherwise the reply holds `job_id`,
+`owner_instance_id`, and `status` (`queued`, `awaiting_approval`, or `running`). Approval never blocks the reply.
+
+Add these tools, which the service layer lacks:
+
+| Tool | Behavior |
 |---|---|
-| `start_query` | `connection_id`, `query`, optional `max_rows` (default 10,000; 1–10,000), optional `timeout_ms` (default 60,000; 1,000–300,000). Accept one read-classified SELECT statement, including a SELECT CTE. Return `query_id` and `queued` after registration. |
-| `get_query_status` | `query_id`; return state, connection ID, timestamps, elapsed milliseconds, and terminal result metadata or a sanitized error. |
-| `fetch_query_result` | `query_id`, optional `result_set_index=0`, `offset=0`, `limit=100` (1–1,000). Read the stored result without executing SQL again. |
-| `cancel_query` | `query_id`; request cancellation of that owned execution and report whether it was accepted or already terminal. Acceptance is not proof of database termination. |
-| `list_query_history` | Optional connection/status/time filters, `limit=50` (1–200), and an opaque continuation cursor. Return MCP execution metadata, not row data. |
-| `release_query_result` | `query_id`; idempotently free a completed snapshot. Keep its history entry and reject release of an active execution. |
+| `table_preview` | `connection_id`, `table`, optional `database`, `schema`, `limit` (default 10, 1–1,000). Read-only. |
+| `job_list` | Running and recent jobs from this process plus persisted history; filters by connection, status, time; `limit` 1–200 with an opaque cursor. No row data. |
 
-Reject writes, DDL, SELECT INTO, data-modifying CTEs, and multiple statements in `start_query`.
-Use the host's existing classification and approval policy, with fail-closed regression fixtures.
-Classification is not a substitute for database permissions; untrusted query execution requires an appropriate
-read-only database principal. Tests on existing real connections submit only explicit SELECT statements.
+Add optional `database` and `schema` to `run_query`, `query_execute`, `list_tables`, `describe_table`, and the
+catalog tools. A `database` value must be one the driver lists for the connection. The host applies it by
+setting `params.database` to that single database for the call, as `insert_record` already does. Report the
+effective database and schema in every result.
 
-Change the MCP stdin loop to keep reading while jobs execute. Serialize stdout writes through one writer.
-Control requests must remain responsive while a query is running. Use a bounded queue of 16 managed jobs and
-at most two running managed jobs per plugin process. Bound all ordinary RPC calls to the pinned PostgreSQL
-plugin to three concurrent requests so its four-worker pool retains capacity for a cancellation notification.
-Cancellation and status handling do not wait for a query execution slot. Reject excess work with `QUEUE_FULL`.
+`catalog_objects` and `catalog_describe` return `UNSUPPORTED_OPERATION` with the object kind for a kind the
+driver lacks, never an empty success. Read the supported kinds from driver capabilities and connection metadata.
 
-New modules under `src-tauri/src/mcp/` own the query manager, snapshots, and history adapter. The manager keeps
-an unguessable query ID, owner instance, connection/configuration fingerprint, driver request handle, and state.
-Use `queued`, `running`, `cancel_requested`, `succeeded`, `failed`, and `cancelled` as execution states.
-Completion that wins a cancel race remains successful. Mark `cancelled` only after the executing driver call
-returns a cancellation outcome; a dropped future or sent notification is insufficient.
+`result_get` returns `columns`, `rows`, `offset`, `next_offset`, `has_more`, `stored_row_count`, `truncated`,
+`truncation_reason`, and `readonly_guarantee`. `limit` is 1–1,000 rows. When rows exceed the 64 KiB response
+limit, return fewer rows and a correct `next_offset` instead of cutting values. Never page by re-running SQL.
 
-Connection fingerprints cover the target database, driver, and non-secret identity settings. Recheck ownership
-and current connection access for fetch/cancel/status calls. A changed authentication or target configuration
-invalidates the old snapshot for retrieval. Never accept a client-supplied backend PID as a cancellation target.
+Keep the private `results-v1` cache. Create its files with owner-only permissions, delete a result on release
+or expiry, and remove leftover files at startup. Query history never stores rows.
 
-### Saved-result paging
+### Connection tools
 
-The first implementation uses bounded in-memory snapshots owned by the MCP server process. Execute the query
-once, retain the driver's original columns and positional rows, and serve subsequent pages from that snapshot.
-Keep result-set boundaries, duplicate column names, value types, and truncation information.
-Do not implement this tool by adding OFFSET and rerunning the SQL.
+`connection_create` and `connection_update` accept only non-secret fields. Reject `password`,
+`ssh_password`, `ssh_key_passphrase`, `connection_uri`, and any `extra` key whose name contains `password`,
+`secret`, `token`, or `key` with `SECRET_NOT_ACCEPTED`. The user enters secrets in the GUI.
 
-Limit each snapshot to 10,000 retained rows across result sets and 16 MiB of serialized UTF-8 result data.
-Limit retained snapshots to 64 and 128 MiB in total. These limits do not describe peak driver or decoder memory.
-Reserve capacity before dispatch and reject additional work with `RESULT_CAPACITY_EXCEEDED` when the reservation
-cannot be made. Expire a snapshot 15 minutes after
-completion, or release it explicitly. Process exit invalidates snapshots; persistent history records that the
-result is unavailable. Concurrent fetch and release must produce a complete page or `RESULT_EXPIRED`.
+Create and update always require GUI approval, regardless of `mcp_approval_mode`. The approval shows the full
+non-secret change. When an update changes the target or identity (`driver`, `host`, `port`, `username`,
+`ssl_mode`, SSH, Kubernetes, SSM, proxy, or `extra`) of a connection that has stored secrets, the approval
+states that stored credentials will be sent to the new target. Updates use the revision protocol above.
 
-Return `RESULT_PENDING` before execution completes; do not expose an incomplete snapshot as complete.
-After completion, an offset at or beyond the stored row count returns an empty final page.
-Negative offsets, invalid result-set indexes, and invalid limits return `INVALID_ARGUMENT`.
+`connection_test` takes only `connection_id` and tests the saved connection through the GUI expansion path for
+SSH, Kubernetes, IAM, keychain, and URI restore. It accepts no parameter overrides.
 
-Return `columns`, `rows`, `offset`, `next_offset`, `has_more`, `stored_row_count`, `truncated`, and
-`truncation_reason`. `has_more` describes retained rows only. A driver row limit must be visible as truncation;
-it must not imply that discarded rows can be fetched later. Reject an oversized byte result explicitly rather
-than claiming a complete result. Disk-backed snapshots and continuation beyond driver caps are optional follow-ups.
+### Cancellation
 
-### Cancellation and driver boundary
-
-Expose a cancellable RPC handle from `PluginProcess`/`RpcDriver` without changing the existing query payload:
-`execute_query` still carries params, SQL, row limit, page, and schema. Bind the host query ID to the exact
-numeric JSON-RPC request ID and a per-execution generation. Send the existing id-less notification
-`{"jsonrpc":"2.0","method":"cancel","params":{"id":<request-id>}}` for the active request only.
-
-The pinned PostgreSQL plugin already registers a cancel action per request and uses its native cancel token.
-SQL Server Plus must implement the same notification and bind it to its TDS `CancelHandle`; that work belongs
-to the companion plan. Unsupported drivers must report `CANCELLATION_UNSUPPORTED`, not success.
-Late, duplicate, unknown, and already-completed cancellation requests must be harmless.
-For SQL Server Plus, the original query response uses error code `-32800`, message `Query cancelled`, and
-`data: {kind: "query_cancelled", request_id: <numeric-id>, server_termination_confirmed: true}` only after
-termination is confirmed. Preserve optional error data through the host RPC adapter. The PostgreSQL adapter
-recognizes the pinned plugin's server cancellation response and waits for the original call to finish;
-an acknowledgement of its id-less notification alone never confirms termination.
-
-Apply `timeout_ms` as an end-to-end managed-query deadline. At expiry, request native cancellation and wait up
-to five seconds for the execution to finish. Record `CANCEL_NOT_CONFIRMED` if termination cannot be established;
-keep tracking the in-flight call and its slot until it actually finishes. Do not recycle its connection, kill
-unrelated sessions, or replay SQL. A server shutdown requests cancellation for owned jobs and records any
-unconfirmed termination instead of fabricating a successful cancellation.
+`job_cancel` sends the service `cancel_request` for the job's driver request. The PostgreSQL patch implements
+it; the companion plan implements it in SQL Server Plus with the TDS cancel handle. A job becomes `cancelled`
+only when the driver returns a cancellation outcome. Otherwise record `CANCEL_NOT_CONFIRMED`, keep the slot until
+the call ends, and never recycle its connection or replay SQL. A completion that wins the race stays
+successful. A cancelled write has an `unknown` outcome. `deadline_ms` is end-to-end: at expiry, request
+cancellation and wait up to five seconds. `run_query` keeps its current cancellation behavior.
 
 ### Query history
 
-Reuse the existing MCP audit data model and its privacy setting. Record start and terminal events using the
-same query ID so active executions can be listed. Retain SQL text, connection ID, status, timestamps, elapsed
-milliseconds, row count, and sanitized error details; never persist credentials or result rows.
-Honor `aiAuditEnabled=false` for persistent recording and the existing retention settings.
-Keep enough in-memory state for the running process to manage its own jobs even when persistence is disabled.
+Record a start event and a terminal event for every job with the same job ID, reusing the MCP audit model, its
+privacy setting `ai_audit_enabled`, and its retention settings. Store SQL text, connection ID, status,
+timestamps, elapsed milliseconds, row count, and a sanitized error; never store credentials or rows.
+Write with the `fs2` lock and atomic rotation. Read older `ai_activity.jsonl` records as completed legacy history.
+A start without a terminal event has an unknown outcome. Only the current process reports a job as cancellable.
 
-Use the existing `fs2` lock and atomic rotation pattern for multi-process history writes. Treat older
-`ai_activity.jsonl` records as completed legacy MCP history, deduplicated by their event IDs. Never invent
-missing start times or running states. GUI query-history files remain intact; merging GUI and MCP execution
-control is outside this release. An expired or restarted result can remain visible in history with
-`result_available=false` and `cancellable=false`.
-Only the current server instance can report a job as actively controllable. A historical start event without
-a terminal event has an unknown outcome; do not label it cancelled or assume that the database stopped.
+### Spatial and Azure
 
-### Build, release, and compatibility
-
-Track source changes, tests, locks, packaging, and build instructions in the two forks. Record an exact driver
-release/checksum in each host release. Keep the separate Spatial and Cosmos repositories as their source of truth.
-Their manifests, IIFE modules, relative assets, React/plugin API globals, and EXPLAIN parsers must remain usable.
-Do not claim that an advertised service-protocol capability is verified merely because the plugin loads.
-
-Use fork versions such as `0.27.0+extended.1`, matching all host version files, with a fork-owned release tag.
-Disable the official update feed in the fork until a separately signed fork feed is configured. The first release
-uses explicit artifact installation; it must not silently replace the app with an official build.
-Publish no release in this documentation-only task. Future releases require passing gates below, artifact hashes,
-and a rollback test using the original app/profile. Keep signing keys and production configuration out of Git.
+Point both extensions at the fork host. Set their manifests' runtime floor to `0.27.0+extended.1` for service
+features and keep the `0.26.0` basic path. Verify that the frozen SDK snapshots in
+`extensions/*/build-support/sdk` match the root `packages/plugin-api` and `packages/service-contracts`.
 
 ## Execution slices
 
-Main ownership retains the coordinator's selected model and effort. Delegated implementation uses the coding
-host's pinned implementation-worker role, model, and effort. UI work uses its pinned designer route.
-The coordinator makes contract and scope decisions; workers do not widen their assignments.
+Main-owned slices keep the coordinator's model and effort. Delegated implementation slices use the
+`hei5enbug-agent-setup:sonnet-worker` route pinned by the host agent rules. UI slices use the designer route.
+Host Rust slices run one at a time because they share `src-tauri` files and its build directory.
+Plugin slices use their own extension directory and build directory, so they may run beside host slices.
 
-| Slice / owner | Result and allowed paths | Protected paths and prerequisites | Shared resources / parallel condition | Completion evidence |
+| Slice / owner | Result and allowed paths | Depends on | Parallel condition | Completion evidence |
 |---|---|---|---|---|
-| H1 / implementation worker | Port plugin registration/import/diagnostic behavior; host identity, profile migration, revisioned persistence; relevant Rust modules and tests, app metadata | Preserve unrelated upstream code, real profiles, credentials, Spatial/Cosmos source; use the frozen baseline and this contract | Can run alongside driver D1; owns host Rust/config paths and its build directory | Importer/registry/CLI tests, profile and stale-save fixtures, source provenance report |
-| H2 / implementation worker | Add MCP dispatch concurrency, query manager, snapshot paging, cancellation handles, and history; `src-tauri/src/mcp/`, driver trait/RPC adapter, audit tests | H1 accepted; preserve legacy tool payloads and existing write policy | One owner for the cohesive backend; do not overlap H1 or another host Rust build | Deterministic transport, race, snapshot, history, and compatibility tests |
-| H3 / designer route | Distinct app labels, explicit profile import, stale-editor conflict, password-only visibility; modal/context and plugin API UI files/tests | H1 and the shared UI contract accepted; driver auth semantics fixed | Can run with D2 backend work; separate frontend output, no edits to H2 files | Component/type checks and reviewed UI behavior without real credentials |
-| H4 / coordinator | Integrate the pinned SQL Server Plus build, package fork releases, update build/release docs and CI | H2, H3, and driver D2/D3 accepted; maintain all plugin contracts | Serial integration owner; no build while workers mutate its inputs | Integrated acceptance matrix, reproducible artifact hashes, upgrade and rollback evidence |
+| M1 / main | Root CI workflows for extensions; `.github/`, `extensions/*/.github/` | None | Parallel with any slice | Workflow syntax check; extension tests unchanged |
+| S1 / worker | Service layer ported and formatted; `src-tauri/`, `src/`, `packages/`, root `package.json`, `pnpm-lock.yaml` | None | Exclusive host build | Patch tests, `cargo test --lib`, `pnpm typecheck`, legacy MCP tool tests |
+| P1 / worker | PostgreSQL plugin imported, patched, renamed; `extensions/postgresql/` | None | Own build directory | Plugin tests, `service_capabilities` fixture, TLS and cancel fixtures |
+| H1 / worker | Host recovery, identity, profile import, locked revisioned saves, Entra validation for `sqlserver-plus`; host Rust, config, metadata | S1 | Exclusive host build | Importer, registry, CLI, profile, stale-save, and validation fixtures |
+| S2 / worker | Classifier fix, write policy, MCP surface, connection tools, database/schema selection, catalog, preview, history, results cache rules; `src-tauri/src/{mcp,services}/`, `ai_activity.rs`, approvals | H1 | Exclusive host build | A3–A10 fixture tests |
+| D0–D2 / worker | Companion plan: `sqlserver.patch`, Entra port, service cancellation; `extensions/sqlserver-plus/src` | None | Own build directory | Companion P1–P4 |
+| U1 / designer | App labels, profile import, stale-edit conflict, password-only field, connection-change and write approvals; `src/` UI files | H1, S2 | No edits to Rust | Component and type checks |
+| D3 / designer | Companion plan auth UI; `extensions/sqlserver-plus/ui` | D1, U1 slot contract | Separate frontend output | Companion D3 evidence |
+| X1 / main | Spatial and Azure re-pointed; SDK equality check; `integration/` removed | S1, P1, D0 | Not during a host build | Extension test suites, SDK equality |
+| I1 / main | Integration, packaging (including companion D4), migration, release notes, live checks | All slices | Serial | A1–A15 |
 
-H2 may implement against a deterministic driver fixture while SQL Server cancellation is being developed.
-Real end-to-end cancellation acceptance waits for driver D2. This breaks the dependency without weakening the gate.
-Host H4 and driver D4 are one coordinated integration run. They share one installation owner and reuse its
-evidence instead of repeating the same checks in each repository.
+S1 runs before H1 because the patch applies cleanly only to files that H1 has not yet changed.
+S2 tests against deterministic driver fixtures; real cancellation acceptance waits for P1 and D2.
+Each worker assignment states that other workers may edit the repository and that their changes must be kept.
 
 ## Integrated verification
 
-| Acceptance criterion | Required evidence |
+| Criterion | Required evidence |
 |---|---|
-| A1: current setup is preserved | Isolated migration fixtures retain IDs/settings/keychain references; opt-in fresh-connection `SELECT 1` succeeds for all 14 existing connections after migration |
-| A2: TLS cannot regress on save | A stale password editor receives a conflict; a current password-only save preserves `verify-full`, auth `extra`, and other connections |
-| A3: one execution, repeatable pages | A recording driver counts exactly one SQL execution; page boundaries have no duplicates/omissions and remain identical after the backing fixture changes |
-| A4: bounded result lifecycle | Tests cover empty results, duplicate column names, exact limits, truncated output, byte budgets, expiry, release/fetch races, and process restart |
-| A5: real cancellation | Control requests remain responsive under saturation; queued/running/late/duplicate cases pass; approved nonproduction SELECT tests prove the target execution ends and a neighboring execution survives |
-| A6: authentication is preserved | Companion auth tests plus new physical-connection checks cover SQL passwords, Entra token refresh, identity mismatch, TLS rejection, and keychain-backed secrets |
-| A7: useful and private history | Running/terminal/legacy history, filters, paging, restart, retention, concurrent writers, audit-disabled behavior, and secret redaction pass |
-| A8: existing surfaces remain usable | Five legacy MCP tools, JSON/TOON, GUI connections, Spatial basic maps, Cosmos baseline read paths, and EXPLAIN parser fixtures pass; unsupported advanced features stay explicitly unsupported |
-| A9: maintained release | Source-only clean checkout builds with locked dependencies; packaged plugins include UI/parser assets; install, update isolation, and rollback are checked |
+| A1: setup is preserved | Migration fixtures keep IDs, settings, and keychain references; `SELECT 1` passes on all 14 connections |
+| A2: saves cannot regress | A stale editor or MCP update gets `CONNECTION_CONFLICT`; a password-only save keeps `verify-full` and `extra` |
+| A3: tool surface is valid | Names match the pattern; every tool has a description; `credential_import` and `connection_delete` are absent and direct calls fail; legacy output is byte-compatible |
+| A4: write policy holds | Fixture matrix: read-only, approval modes, missing intent, `unknown`, `SELECT INTO`, `EXEC`, multi-statement, row/document/session writes, guarantee label |
+| A5: secrets never enter MCP | Secret fields and secret-like `extra` keys are rejected; no secret in tool output, audit, or history |
+| A6: connection writes are approved | Create and update always wait for GUI approval; target changes show the credential warning; `connection_test` rejects overrides |
+| A7: one execution, stable pages | A recording driver counts one execution; pages have no gaps or duplicates under 64 KiB; cache files are owner-only and deleted on release, expiry, and startup |
+| A8: catalog is complete or explicit | Per-driver fixtures return objects or `UNSUPPORTED_OPERATION` for each kind |
+| A9: database selection works | PostgreSQL Plus and SQL Server Plus fixtures run on the requested database and report it |
+| A10: history and async replies | `query_execute` replies before execution and approval finish; running, terminal, legacy, filtered, restarted, and audit-disabled history cases pass |
+| A11: cancellation is real | Control calls stay responsive under load; approved nonproduction SELECTs prove termination and that a neighbor survives |
+| A12: authentication is preserved | Companion P1–P2; SQL password, Entra refresh, identity mismatch, TLS rejection; service create/update/query fixtures with the companion Entra fields |
+| A13: drivers speak the service protocol | PostgreSQL Plus and SQL Server Plus `initialize` fixtures report `service_capabilities`; existing plugin tests pass |
+| A14: extensions work | Spatial and Azure test suites; basic maps and Cosmos reads; service features on the fork host |
+| A15: release is reproducible | Clean locked build; packaged plugins with UI and parser assets; install, update isolation, rollback |
 
-Run narrow Rust tests for changed modules, then the frontend component/type checks and plugin API sync check.
-Use the repository's `pnpm` version, `pnpm typecheck`, `pnpm lint`, `pnpm build`, and
-`cargo test --manifest-path src-tauri/Cargo.toml --locked --lib` as applicable to implemented changes.
-Use separate build directories for concurrent workers. Run broader suites only for cross-surface changes or failures.
+Run narrow tests for each slice, then `pnpm typecheck`, `pnpm lint`, `pnpm build`, and
+`cargo test --manifest-path src-tauri/Cargo.toml --locked --lib`. Run each extension's own suite after any
+change under `extensions/`. Use Node `24.21.0` for the Spatial and Azure scripts.
 
-All live validation remains SELECT-only. Do not run seed scripts, database-creating integration suites,
-DDL/DML, KILL, or administrative termination commands. Use recorded/fake driver fixtures for destructive and
-failure scenarios. Real cancellation uses protocol cancellation of an owned SELECT on an approved nonproduction
-connection; production connectivity checks use only `SELECT 1`. Adding a write-based test requires a new user decision.
+Live checks are SELECT-only. Do not run seed scripts, database-creating suites, DDL, DML, KILL, or
+administrative termination. Use recorded or fake drivers for writes and failures. Live verification of Cosmos
+document CRUD, row writes, or connection creation against a real server needs a separate user decision that
+names a nonproduction target. Until then, A14 covers those features with fixtures only and says so.
 
-The existing 14-connection smoke evidence and 239 custom-driver unit-test result are reusable only while their
-covered inputs remain unchanged. They do not prove this future fork's migration, paging, or cancellation.
-Invalidate affected evidence after changing source, manifests, authentication, profile routing, or packaging.
+Evidence stays valid only while its inputs are unchanged. The 14-connection smoke result and the 239-test driver
+result are historical and do not prove this fork's behavior.
 
-Stop release work on missing credentials, a source/archive mismatch, stale profile conflicts, incompatible
-plugin contracts, unconfirmed cancellation, exposed secrets, or failed required checks. Preserve completed work
-and resolve the cause without silently weakening TLS, changing identity, or retrying SQL.
-Optional follow-ups are upstream PRs, larger streaming/disk result stores, more drivers, and the broader DataGrip
-DB-tool parity that the user explicitly left outside this implementation scope.
+## Optional follow-ups
+
+- Upstream pull requests for generic fixes.
+- Result storage and continuation beyond driver row limits.
+- A single approval channel for `run_query` and service operations.
+- Consuming root `packages/` directly from the extensions instead of frozen SDK snapshots.
+- Service protocol and cancellation for built-in MySQL and SQLite.
