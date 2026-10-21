@@ -491,6 +491,33 @@ fn 새로_만든_빈_폴더와_로그만_있는_폴더는_비어_있는_것으�
 }
 
 #[test]
+fn 앱을_처음_실행한_뒤_생긴_서비스_런타임_파일만_있으면_비어_있는_것으로_본다() {
+    // given
+    let root = TempDir::new().unwrap();
+    let launched = root.path().join("launched");
+    write(&launched.join("local-ipc/0123456789abcdef0123.sock"), b"");
+    write(
+        &launched.join("local-ipc/00000000-0000-4000-8000-000000000000.json"),
+        b"{}",
+    );
+    write(&launched.join("jobs-v1/store.lock"), b"");
+    write(&launched.join("jobs-v1/job-1.json"), b"{}");
+    write(&launched.join("results-v1/alive.lock"), b"");
+    write(
+        &launched.join("service-approval-bindings-v1/binding.json"),
+        b"{}",
+    );
+    write(&launched.join("artifacts-v1/store.lock"), b"");
+    write(&launched.join("maps-v1/maps.lock"), b"");
+
+    // when
+    let actual = holds_user_data(&launched).unwrap();
+
+    // then
+    assert!(!actual);
+}
+
+#[test]
 fn 사용자_데이터_파일이_하나라도_있으면_비어_있지_않다() {
     // given
     let root = TempDir::new().unwrap();

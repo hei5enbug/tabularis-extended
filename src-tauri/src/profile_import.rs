@@ -389,6 +389,10 @@ fn is_ignorable(name: &str) -> bool {
             | "storage-location.json"
             | ".mcp_session_state.json"
             | "pending_approvals"
+            | "local-ipc"
+            | "jobs-v1"
+            | "results-v1"
+            | "service-approval-bindings-v1"
     ) || name.ends_with(".log")
         || name.ends_with(".lock")
 }
