@@ -94,11 +94,12 @@ export function AiApprovalModal({
   }, [explainPlan, selectedNodeId]);
 
   const destructive = isDestructiveApproval(approval);
+  const serviceApproval = approval.queryKind.startsWith("service:");
 
   const handleApprove = async () => {
     setSubmitting(true);
     try {
-      const final = editing && editedQuery.trim() !== approval.query.trim()
+      const final = !serviceApproval && editing && editedQuery.trim() !== approval.query.trim()
         ? editedQuery
         : undefined;
       await onApprove(final);
@@ -174,6 +175,7 @@ export function AiApprovalModal({
                 {t("aiApproval.query")}
               </label>
               <button
+                disabled={serviceApproval}
                 onClick={() => setEditing((v) => !v)}
                 className="flex items-center gap-1 px-2 py-1 text-xs text-muted hover:text-primary hover:bg-surface-tertiary rounded transition-colors"
               >
@@ -192,7 +194,7 @@ export function AiApprovalModal({
                 onChange={(v) => setEditedQuery(v ?? "")}
                 beforeMount={(monaco) => loadMonacoTheme(editorTheme, monaco)}
                 options={{
-                  readOnly: !editing,
+                  readOnly: serviceApproval || !editing,
                   minimap: { enabled: false },
                   scrollBeyondLastLine: false,
                   fontSize: 12,

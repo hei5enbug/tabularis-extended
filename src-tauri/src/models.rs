@@ -364,6 +364,8 @@ pub struct ConnectionGroup {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct ConnectionsFile {
+    #[serde(skip)]
+    pub source_revision: Option<String>,
     #[serde(default)]
     pub groups: Vec<ConnectionGroup>,
     #[serde(default)]

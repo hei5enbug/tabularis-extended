@@ -53,8 +53,28 @@ async fn driver_for_saved<R: Runtime>(
 #[tauri::command]
 pub async fn get_connection_metadata<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
 ) -> Result<Option<crate::plugins::connection_metadata::ConnectionMetadata>, String> {
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, false).map_err(service::command_error)?;
+        let connection = core
+            .platform
+            .runtime
+            .connections
+            .get(&connection_id)
+            .await
+            .map_err(service::command_error)?;
+        let driver = driver_for(&connection.driver).await?;
+        return Ok(Some(
+            crate::plugins::connection_metadata::ConnectionMetadata {
+                capabilities: driver.manifest().capabilities.clone(),
+                data_types: driver.get_data_types(),
+                type_mappings: driver.manifest().type_mappings.clone(),
+            },
+        ));
+    }
     let saved = find_connection_by_id(&app, &connection_id)?;
     if !driver_for(&saved.params.driver)
         .await?
@@ -938,8 +958,23 @@ pub async fn get_connection_by_id<R: Runtime>(
 #[tauri::command]
 pub async fn get_schemas<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
 ) -> Result<Vec<String>, String> {
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, false).map_err(service::command_error)?;
+        let database =
+            service::database(&core, &connection_id, None).map_err(service::command_error)?;
+        let data = service::gui_call(
+            &core,
+            crate::services::contracts::Operation::CatalogSchemas,
+            &connection_id,
+            serde_json::json!({"database":database}),
+        )
+        .await?;
+        return service::names(&data, "schemas").map_err(service::command_error);
+    }
     log::info!("Fetching schemas for connection: {}", connection_id);
 
     let saved_conn = find_connection_by_id(&app, &connection_id)?;
@@ -954,8 +989,21 @@ pub async fn get_schemas<R: Runtime>(
 #[tauri::command]
 pub async fn get_available_databases<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
 ) -> Result<Vec<String>, String> {
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, false).map_err(service::command_error)?;
+        let data = service::gui_call(
+            &core,
+            crate::services::contracts::Operation::CatalogDatabases,
+            &connection_id,
+            serde_json::json!({}),
+        )
+        .await?;
+        return service::names(&data, "databases").map_err(service::command_error);
+    }
     log::info!(
         "Fetching available databases for connection: {}",
         connection_id
@@ -2575,8 +2623,41 @@ async fn get_k8s_connection_by_id<R: Runtime>(
 #[tauri::command]
 pub async fn test_connection<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     request: TestConnectionRequest,
 ) -> Result<String, String> {
+    use crate::service_native::catalog as service;
+    let requested_native = service::driver_capabilities(&request.params.driver)
+        .await
+        .map_err(service::command_error)?
+        .is_some();
+    let saved_native = match request.connection_id.as_deref() {
+        Some(id) => service::for_connection(&app, id).await?,
+        None => None,
+    };
+    if requested_native || saved_native.is_some() {
+        crate::service_commands::authorize_gui(&window, true).map_err(service::command_error)?;
+        let core = app
+            .try_state::<std::sync::Arc<crate::service_native::NativeCore>>()
+            .ok_or("CapabilityUnavailable: Native service is unavailable")?
+            .inner()
+            .clone();
+        let id = service::unchanged_test(&core, &request).map_err(|_| {
+            "InvalidArgument: Save this connection before testing changed settings.".to_string()
+        })?;
+        let _response = service::call(
+            &core,
+            core.caller(crate::services::dispatch::CallerTransport::Gui)
+                .map_err(service::command_error)?,
+            crate::services::contracts::Operation::ConnectionTest,
+            Some(id),
+            serde_json::json!({}),
+            false,
+        )
+        .await
+        .map_err(service::command_error)?;
+        return Ok("Connection successful".into());
+    }
     log::info!(
         "Testing connection to database: {}",
         request.params.database
@@ -2998,6 +3079,7 @@ mod tests {
             environment: None,
         };
         ConnectionsFile {
+            source_revision: None,
             groups: vec![],
             connections: vec![conn],
             tags: vec![],
@@ -4000,8 +4082,41 @@ mod tests {
 #[tauri::command]
 pub async fn list_databases<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     request: TestConnectionRequest,
 ) -> Result<Vec<String>, String> {
+    use crate::service_native::catalog as service;
+    let requested_native = service::driver_capabilities(&request.params.driver)
+        .await
+        .map_err(service::command_error)?
+        .is_some();
+    let saved_native = match request.connection_id.as_deref() {
+        Some(id) => service::for_connection(&app, id).await?,
+        None => None,
+    };
+    if requested_native || saved_native.is_some() {
+        crate::service_commands::authorize_gui(&window, true).map_err(service::command_error)?;
+        let core = app
+            .try_state::<std::sync::Arc<crate::service_native::NativeCore>>()
+            .ok_or("CapabilityUnavailable: Native service is unavailable")?
+            .inner()
+            .clone();
+        let id = service::unchanged_test(&core, &request).map_err(|_| {
+            "InvalidArgument: Save this connection before testing changed settings.".to_string()
+        })?;
+        let response = service::call(
+            &core,
+            core.caller(crate::services::dispatch::CallerTransport::Gui)
+                .map_err(service::command_error)?,
+            crate::services::contracts::Operation::CatalogDatabases,
+            Some(id),
+            serde_json::json!({}),
+            false,
+        )
+        .await
+        .map_err(service::command_error)?;
+        return service::names(&response.data, "databases").map_err(service::command_error);
+    }
     let mut expanded_params = expand_ssh_connection_params(&app, &request.params).await?;
     expanded_params = expand_k8s_connection_params(&app, &expanded_params).await?;
 
@@ -4058,9 +4173,48 @@ pub async fn list_databases<R: Runtime>(
 #[tauri::command]
 pub async fn get_tables<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
     schema: Option<String>,
 ) -> Result<Vec<TableInfo>, String> {
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, false).map_err(service::command_error)?;
+        let database =
+            service::database(&core, &connection_id, None).map_err(service::command_error)?;
+        let data = service::gui_call(
+            &core,
+            crate::services::contracts::Operation::CatalogObjects,
+            &connection_id,
+            serde_json::json!({"database":database,"schema":schema}),
+        )
+        .await?;
+        let entries = data
+            .as_array()
+            .or_else(|| data["objects"].as_array())
+            .ok_or_else(|| {
+                service::command_error(crate::services::error::failure(
+                    crate::services::contracts::ErrorCode::InvalidArgument,
+                ))
+            })?;
+        return entries
+            .iter()
+            .map(|value| {
+                let name = value
+                    .as_str()
+                    .or_else(|| value["name"].as_str())
+                    .ok_or_else(|| {
+                        service::command_error(crate::services::error::failure(
+                            crate::services::contracts::ErrorCode::InvalidArgument,
+                        ))
+                    })?;
+                Ok(TableInfo {
+                    name: name.into(),
+                    comment: value["comment"].as_str().map(str::to_owned),
+                })
+            })
+            .collect();
+    }
     log::info!("Fetching tables for connection: {}", connection_id);
 
     let saved_conn = find_connection_by_id(&app, &connection_id)?;
@@ -4088,10 +4242,25 @@ pub async fn get_tables<R: Runtime>(
 #[tauri::command]
 pub async fn get_columns<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
     table_name: String,
     schema: Option<String>,
-) -> Result<Vec<TableColumn>, String> {
+) -> Result<Vec<crate::service_native::catalog::ServiceTableColumn>, String> {
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, false).map_err(service::command_error)?;
+        let database =
+            service::database(&core, &connection_id, None).map_err(service::command_error)?;
+        let data = service::gui_call(
+            &core,
+            crate::services::contracts::Operation::CatalogDescribe,
+            &connection_id,
+            serde_json::json!({"table":{"database":database,"schema":schema,"table":table_name}}),
+        )
+        .await?;
+        return service::columns(&data).map_err(service::command_error);
+    }
     let saved_conn = find_connection_by_id(&app, &connection_id)?;
     let expanded_params = expand_ssh_connection_params(&app, &saved_conn.params).await?;
     let expanded_params = expand_k8s_connection_params(&app, &expanded_params).await?;
@@ -4099,15 +4268,28 @@ pub async fn get_columns<R: Runtime>(
     let drv = driver_for_params(&params).await?;
     drv.get_columns(&params, &table_name, schema.as_deref())
         .await
+        .map(|columns| columns.into_iter().map(Into::into).collect())
 }
 
 #[tauri::command]
 pub async fn get_foreign_keys<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
     table_name: String,
     schema: Option<String>,
 ) -> Result<Vec<ForeignKey>, String> {
+    if crate::service_native::catalog::for_connection(&app, &connection_id)
+        .await?
+        .is_some()
+    {
+        crate::service_commands::authorize_gui(&window, false)
+            .map_err(crate::service_native::catalog::command_error)?;
+        return Err(
+            "UnsupportedOperation: Foreign keys are not available through this service contract."
+                .into(),
+        );
+    }
     let saved_conn = find_connection_by_id(&app, &connection_id)?;
     let expanded_params = expand_ssh_connection_params(&app, &saved_conn.params).await?;
     let expanded_params = expand_k8s_connection_params(&app, &expanded_params).await?;
@@ -4120,10 +4302,21 @@ pub async fn get_foreign_keys<R: Runtime>(
 #[tauri::command]
 pub async fn get_indexes<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
     table_name: String,
     schema: Option<String>,
 ) -> Result<Vec<Index>, String> {
+    if crate::service_native::catalog::for_connection(&app, &connection_id)
+        .await?
+        .is_some()
+    {
+        crate::service_commands::authorize_gui(&window, false)
+            .map_err(crate::service_native::catalog::command_error)?;
+        return Err(
+            "UnsupportedOperation: Indexes are not available through this service contract.".into(),
+        );
+    }
     let saved_conn = find_connection_by_id(&app, &connection_id)?;
     let expanded_params = expand_ssh_connection_params(&app, &saved_conn.params).await?;
     let expanded_params = expand_k8s_connection_params(&app, &expanded_params).await?;
@@ -4136,12 +4329,31 @@ pub async fn get_indexes<R: Runtime>(
 #[tauri::command]
 pub async fn delete_record<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
     table: String,
     pk_map: std::collections::HashMap<String, serde_json::Value>,
     schema: Option<String>,
     database: Option<String>,
 ) -> Result<u64, String> {
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, true).map_err(service::command_error)?;
+        return service::row(
+            &core,
+            &connection_id,
+            crate::services::contracts::Operation::RowDelete,
+            service::NativeRowInput {
+                table,
+                schema,
+                database,
+                keys: pk_map,
+                changes: std::collections::HashMap::new(),
+            },
+        )
+        .await
+        .map_err(service::command_error);
+    }
     log::info!(
         "Executing query on connection: {} | Query: DELETE FROM {} WHERE pk_map={:?}",
         connection_id,
@@ -4162,7 +4374,7 @@ pub async fn delete_record<R: Runtime>(
 
 #[tauri::command]
 pub async fn update_record<R: Runtime>(
-    app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
     table: String,
     pk_map: std::collections::HashMap<String, serde_json::Value>,
@@ -4171,6 +4383,25 @@ pub async fn update_record<R: Runtime>(
     schema: Option<String>,
     database: Option<String>,
 ) -> Result<u64, String> {
+    let app = window.app_handle().clone();
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, true).map_err(service::command_error)?;
+        return service::row(
+            &core,
+            &connection_id,
+            crate::services::contracts::Operation::RowUpdate,
+            service::NativeRowInput {
+                table,
+                schema,
+                database,
+                keys: pk_map,
+                changes: std::collections::HashMap::from([(col_name, new_val)]),
+            },
+        )
+        .await
+        .map_err(service::command_error);
+    }
     log::info!(
         "Executing query on connection: {} | Query: UPDATE {} SET {} = {:?} WHERE pk_map={:?}",
         connection_id,
@@ -4419,12 +4650,31 @@ pub async fn read_file_as_data_url(file_path: String) -> Result<String, String> 
 #[tauri::command]
 pub async fn insert_record<R: Runtime>(
     app: AppHandle<R>,
+    window: tauri::WebviewWindow<R>,
     connection_id: String,
     table: String,
     data: std::collections::HashMap<String, serde_json::Value>,
     schema: Option<String>,
     database: Option<String>,
 ) -> Result<u64, String> {
+    use crate::service_native::catalog as service;
+    if let Some(core) = service::for_connection(&app, &connection_id).await? {
+        crate::service_commands::authorize_gui(&window, true).map_err(service::command_error)?;
+        return service::row(
+            &core,
+            &connection_id,
+            crate::services::contracts::Operation::RowInsert,
+            service::NativeRowInput {
+                table,
+                schema,
+                database,
+                keys: std::collections::HashMap::new(),
+                changes: data,
+            },
+        )
+        .await
+        .map_err(service::command_error);
+    }
     let columns: Vec<&str> = data.keys().map(|k| k.as_str()).collect();
     log::info!(
         "Executing query on connection: {} | Query: INSERT INTO {} ({}) VALUES (...)",

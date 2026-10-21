@@ -16,6 +16,8 @@ pub struct InstalledPluginInfo {
     pub name: String,
     pub version: String,
     pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -34,7 +36,7 @@ struct InstalledPluginManifest {
 }
 
 pub fn get_plugins_dir() -> Result<PathBuf, String> {
-    let plugins_dir = crate::paths::get_plugins_dir();
+    let plugins_dir = crate::paths::get_plugins_dir_checked()?;
     if !plugins_dir.exists() {
         fs::create_dir_all(&plugins_dir)
             .map_err(|e| format!("Failed to create plugins directory: {}", e))?;
@@ -101,6 +103,9 @@ pub(crate) fn migrate_plugins_between(legacy: &Path, target: &Path) -> usize {
 /// project dir into the unified `tabularis` data dir. Safe to call on every
 /// startup — it only does work the first time after upgrading.
 pub fn migrate_legacy_plugins_dir() {
+    if std::env::var_os("TABULARIS_PLUGIN_DIR").is_some() {
+        return;
+    }
     let Some(legacy) = legacy_plugins_dir() else {
         return;
     };
@@ -167,6 +172,7 @@ pub(crate) fn read_plugin_info_from_dir(path: &Path) -> Result<InstalledPluginIn
         name: manifest.name,
         version: manifest.version,
         description: manifest.description,
+        kind: None,
     })
 }
 
@@ -179,16 +185,7 @@ pub async fn download_and_install(
 ) -> Result<(), String> {
     cancellation.check()?;
     let plugins_dir = get_plugins_dir()?;
-    let final_dir = super::layout::driver_destination(&plugins_dir, plugin_id)?;
-    let kind_dir = final_dir.parent().ok_or("Missing driver directory")?;
-    fs::create_dir_all(kind_dir).map_err(|e| e.to_string())?;
-    let tmp_dir = kind_dir.join(format!(".tmp-{}", plugin_id));
-
-    // Clean up any leftover temp dir
-    if tmp_dir.exists() {
-        fs::remove_dir_all(&tmp_dir)
-            .map_err(|e| format!("Failed to clean temp directory: {}", e))?;
-    }
+    super::layout::driver_destination(&plugins_dir, plugin_id)?;
 
     // Download ZIP to memory
     log::info!("Downloading plugin '{}' from: {}", plugin_id, download_url);
@@ -273,6 +270,30 @@ pub async fn download_and_install(
 
     cancellation.check()?;
 
+    install_archive(
+        plugins_dir,
+        plugin_id,
+        bytes.to_vec(),
+        expected_version,
+        cancellation,
+    )
+    .await
+}
+
+pub(crate) async fn install_archive(
+    plugins_dir: PathBuf,
+    plugin_id: &str,
+    bytes: Vec<u8>,
+    expected_version: Option<&str>,
+    cancellation: &InstallCancellation,
+) -> Result<(), String> {
+    cancellation.check()?;
+    super::layout::driver_destination(&plugins_dir, plugin_id)?;
+    fs::create_dir_all(&plugins_dir).map_err(|e| e.to_string())?;
+    let tmp_dir = plugins_dir.join(format!(".tmp-{}-{}", plugin_id, uuid::Uuid::new_v4()));
+    let _temporary = TemporaryPackage(tmp_dir.clone());
+    let content_type = "ZIP";
+    let download_url = "downloaded archive";
     // Extract to temp dir
     fs::create_dir_all(&tmp_dir).map_err(|e| format!("Failed to create temp directory: {}", e))?;
 
@@ -293,12 +314,25 @@ pub async fn download_and_install(
         )
     })?;
 
-    // Never apply permissions or extract a theme through the executable path.
-    if let Err(error) = super::package_kind::validate_archive_kind(&mut archive) {
-        drop(archive);
-        fs::remove_dir_all(&tmp_dir).ok();
-        return Err(error);
-    }
+    let package_kind = match super::package_kind::install_archive_kind(&mut archive) {
+        Ok(kind) => kind,
+        Err(error) => {
+            drop(archive);
+            fs::remove_dir_all(&tmp_dir).ok();
+            return Err(error);
+        }
+    };
+    let final_dir = match package_kind {
+        super::extensions::PackageKind::Driver => {
+            super::layout::driver_destination(&plugins_dir, plugin_id)?
+        }
+        super::extensions::PackageKind::Extension => {
+            super::extensions::destination(&plugins_dir, plugin_id)?
+        }
+    };
+    fs::create_dir_all(final_dir.parent().ok_or("Missing package directory")?)
+        .map_err(|e| e.to_string())?;
+    let mut total_bytes = 0u64;
 
     for i in 0..archive.len() {
         if cancellation.is_cancelled() {
@@ -311,9 +345,19 @@ pub async fn download_and_install(
             .by_index(i)
             .map_err(|e| format!("Failed to read ZIP entry: {}", e))?;
 
+        if file
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            return Err("Package symlinks are not allowed".into());
+        }
+        total_bytes = total_bytes.saturating_add(file.size());
+        if total_bytes > 512 * 1024 * 1024 {
+            return Err("Package exceeds extraction limit".into());
+        }
         let out_path = match file.enclosed_name() {
             Some(path) => tmp_dir.join(path),
-            None => continue,
+            None => return Err("Package contains an invalid archive path".into()),
         };
 
         if file.name().ends_with('/') {
@@ -349,7 +393,10 @@ pub async fn download_and_install(
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Some(mode) = file.unix_mode() {
+                if let Some(mode) = file
+                    .unix_mode()
+                    .filter(|_| package_kind == super::extensions::PackageKind::Driver)
+                {
                     fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))
                         .map_err(|e| format!("Failed to set permissions: {}", e))?;
                 }
@@ -366,7 +413,13 @@ pub async fn download_and_install(
         fs::remove_dir_all(&tmp_dir).ok();
         return Err("Plugin archive does not contain a .tabularium manifest".to_string());
     }
-    let manifest = match read_manifest::<InstalledPluginManifest>(&tmp_dir) {
+    super::extensions::validate_bundle(&tmp_dir)?;
+    if super::extensions::read_package(&tmp_dir)?.0 != package_kind {
+        return Err("Package kind changed during extraction".into());
+    }
+    let manifest = match super::extensions::read_package(&tmp_dir).and_then(|(_, value)| {
+        serde_json::from_value::<InstalledPluginManifest>(value).map_err(|error| error.to_string())
+    }) {
         Ok(m) => m,
         Err(e) => {
             fs::remove_dir_all(&tmp_dir).ok();
@@ -395,10 +448,14 @@ pub async fn download_and_install(
     // The marketplace hides incompatible releases, but archives can also be
     // installed by URL or from a local file, so gate the host version here
     // while the bundle is still in the temp dir.
-    if let Err(e) = super::runtime_version::enforce_min_runtime_version(
-        &manifest_id,
-        manifest.min_runtime_version.as_deref(),
-    ) {
+    if let Err(e) = if package_kind == super::extensions::PackageKind::Driver {
+        super::runtime_version::enforce_min_runtime_version(
+            &manifest_id,
+            manifest.min_runtime_version.as_deref(),
+        )
+    } else {
+        Ok(())
+    } {
         fs::remove_dir_all(&tmp_dir).ok();
         return Err(e);
     }
@@ -414,23 +471,29 @@ pub async fn download_and_install(
     // replacing files, otherwise the OS may keep them locked. Once this short
     // commit phase starts, installation is completed atomically rather than
     // leaving the existing plugin disabled.
-    let previous = super::layout::driver_candidates(&plugins_dir)?
-        .into_iter()
-        .filter(|path| super::layout::driver_identity(path).as_deref() == Some(plugin_id))
-        .collect::<Vec<_>>();
-    if !previous.is_empty() || final_dir.exists() {
-        crate::drivers::registry::unregister_driver(plugin_id).await;
-        crate::drivers::registry::unregister_manifest(plugin_id).await;
-        sleep(Duration::from_millis(500)).await;
-        if final_dir.exists() {
-            fs::remove_dir_all(&final_dir)
-                .map_err(|e| format!("Failed to remove existing plugin: {}", e))?;
+    let _lock_file = lock_installation(plugins_dir.clone()).await?;
+    cancellation.check()?;
+    let previous = if package_kind == super::extensions::PackageKind::Driver {
+        let previous = super::layout::driver_candidates(&plugins_dir)?
+            .into_iter()
+            .filter(|path| super::layout::driver_identity(path).as_deref() == Some(plugin_id))
+            .collect::<Vec<_>>();
+        if super::extensions::resolve(&plugins_dir, plugin_id).is_ok() {
+            return Err("Package kind cannot change during replacement".into());
         }
-    }
-
-    // Rename temp to final
-    fs::rename(&tmp_dir, &final_dir)
-        .map_err(|e| format!("Failed to finalize plugin installation: {}", e))?;
+        if !previous.is_empty() || final_dir.exists() {
+            crate::drivers::registry::unregister_driver(plugin_id).await;
+            crate::drivers::registry::unregister_manifest(plugin_id).await;
+            sleep(Duration::from_millis(500)).await;
+        }
+        previous
+    } else {
+        if super::layout::resolve_driver(&plugins_dir, plugin_id).is_ok() {
+            return Err("Package kind cannot change during replacement".into());
+        }
+        Vec::new()
+    };
+    super::extensions::replace_directory(&tmp_dir, &final_dir)?;
 
     // Retire flat/renamed copies only after the kind-scoped install succeeds.
     for path in previous.into_iter().filter(|path| path != &final_dir) {
@@ -444,6 +507,11 @@ pub async fn download_and_install(
 
 pub fn uninstall(plugin_id: &str) -> Result<(), String> {
     let plugins_dir = get_plugins_dir()?;
+    if let Ok(path) = super::extensions::resolve(&plugins_dir, plugin_id) {
+        fs::remove_dir_all(path).map_err(|e| e.to_string())?;
+        super::extensions::disable(plugin_id);
+        return Ok(());
+    }
     super::layout::resolve_driver(&plugins_dir, plugin_id)?;
     // Remove fallback copies first so uninstall cannot resurrect an older bundle.
     for path in super::layout::driver_candidates(&plugins_dir)?.into_iter().rev() {
@@ -459,7 +527,11 @@ pub fn uninstall(plugin_id: &str) -> Result<(), String> {
 
 /// Resolve kind-scoped bundles first, then flat bundles (including renamed ones).
 pub fn resolve_plugin_dir(plugin_id: &str) -> Result<PathBuf, String> {
-    super::layout::resolve_driver(&get_plugins_dir()?, plugin_id)
+    let root = get_plugins_dir()?;
+    if let Ok(path) = super::extensions::resolve(&root, plugin_id) {
+        return Ok(path);
+    }
+    super::layout::resolve_driver(&root, plugin_id)
 }
 
 pub fn list_installed() -> Result<Vec<InstalledPluginInfo>, String> {
@@ -472,5 +544,32 @@ pub fn list_installed() -> Result<Vec<InstalledPluginInfo>, String> {
         }
     }
 
+    for path in super::extensions::directories(&plugins_dir)? {
+        plugins.push(super::extensions::info(&path)?);
+    }
     Ok(plugins)
+}
+
+struct TemporaryPackage(PathBuf);
+impl Drop for TemporaryPackage {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+}
+async fn lock_installation(root: PathBuf) -> Result<fs::File, String> {
+    tokio::task::spawn_blocking(move || {
+        use fs2::FileExt;
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(".install-lock"))
+            .map_err(|e| e.to_string())?;
+        file.lock_exclusive().map_err(|e| e.to_string())?;
+        Ok(file)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

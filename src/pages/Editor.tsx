@@ -1,3 +1,8 @@
+import { useServiceQuery } from "../hooks/useServiceQuery";
+import { ServiceQueryControls } from "../components/service/ServiceQueryControls";
+import { SlotAnchor } from "../components/ui/SlotAnchor";
+import { supportsServiceQuery, snapshotSlotContext, orderedServicePrimaryKey, isCurrentSnapshot, queryUsesSnapshot, captureQueryCapabilities } from "../utils/serviceQuery";
+import type { DriverCapabilities } from "../types/plugins";
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
@@ -506,6 +511,14 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
   const exportMenuRef = useRef<HTMLDivElement>(null);
   const dbDropdownRef = useRef<HTMLDivElement>(null);
   const dataGridCommandTargetRef = useRef<DataGridCommandTarget>(null);
+  const serviceQuery = useServiceQuery();
+  const { execute: executeServiceQuery, page: pageServiceQuery, copyAll: copyServiceRows, cancel: cancelServiceQuery } = serviceQuery;
+  const serviceScopeIds = useRef(new Set<string>());
+  useEffect(() => {
+    const ids = new Set(tabs.map((tab) => tab.id));
+    for (const id of serviceScopeIds.current) if (!ids.has(id)) { cancelServiceQuery(id); serviceScopeIds.current.delete(id); }
+    for (const id of ids) serviceScopeIds.current.add(id);
+  }, [tabs, cancelServiceQuery]);
   const getResultCommands = useCallback(
     () => dataGridCommandTargetRef.current?.getResultCommands() ?? null,
     [],
@@ -1055,8 +1068,10 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       generation: number,
       tabId?: string,
       tabSchema?: string,
+      capturedConnectionId?: string,
     ) => {
-      if (!activeConnectionId) return;
+      const connectionId = capturedConnectionId ?? activeConnectionId;
+      if (!connectionId) return;
       const effectiveSchema = tabSchema ?? activeSchema;
       const targetId = tabId || activeTabId;
       // A newer runQuery on this tab may have started (and kicked off its own
@@ -1064,16 +1079,17 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       // different statements/tables back to back via cursor-driven Run. If so,
       // this response is stale and must not clobber the newer one's metadata.
       const isStale = () =>
-        !targetId || queryGenerationRef.current[targetId] !== generation;
+        !targetId || queryGenerationRef.current[targetId] !== generation || (capturedConnectionId !== undefined && tabsRef.current.find((tab) => tab.id === targetId)?.connectionId !== connectionId);
+      if (isStale()) return;
       try {
         const [cols, fks] = await Promise.all([
           invoke<TableColumn[]>("get_columns", {
-            connectionId: activeConnectionId,
+            connectionId,
             tableName: table,
             ...(effectiveSchema ? { schema: effectiveSchema } : {}),
           }),
           invoke<ForeignKey[]>("get_foreign_keys", {
-            connectionId: activeConnectionId,
+            connectionId,
             tableName: table,
             ...(effectiveSchema ? { schema: effectiveSchema } : {}),
           }).catch((e) => {
@@ -1082,7 +1098,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
           }),
         ]);
         if (isStale()) return;
-        const pks = cols.filter((c) => c.is_pk).map((c) => c.name);
+        const pks = capturedConnectionId === undefined ? cols.filter((c) => c.is_pk).map((c) => c.name) : orderedServicePrimaryKey(cols) ?? [];
         const autoInc = cols
           .filter((c) => c.is_auto_increment)
           .map((c) => c.name);
@@ -1120,6 +1136,8 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
   );
 
   const stopQuery = useCallback(async () => {
+    const id = activeTabIdRef.current;
+    if (id && cancelServiceQuery(id)) { updateTab(id, { isLoading: false }); return; }
     if (!activeConnectionId) return;
     try {
       await invoke("cancel_query", { connectionId: activeConnectionId });
@@ -1127,7 +1145,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     } catch (e) {
       console.error("Failed to stop:", e);
     }
-  }, [activeConnectionId, updateActiveTab]);
+  }, [activeConnectionId, updateActiveTab, cancelServiceQuery, updateTab]);
 
   const runQuery = useCallback(
     async (
@@ -1149,12 +1167,32 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       // Skips tab state (which may not have re-rendered yet) when the page
       // size is changed and re-run in the same handler; 0 = no pagination.
       pageSizeOverride?: number,
+      intent: "run" | "page" = "run",
     ) => {
       const targetTabId = tabId || activeTabIdRef.current;
-      if (!activeConnectionId || !targetTabId) return;
+      if (!targetTabId) return;
 
       const targetTab = tabsRef.current.find((t) => t.id === targetTabId);
       if (!targetTab) return;
+      const connectionId = targetTab.connectionId;
+      const savedConnection = connections.find((connection) => connection.id === connectionId);
+      if (!savedConnection) return;
+      if (savedConnection.params.driver === "cosmos-nosql") { updateTab(targetTabId, { error: t("serviceQuery.cosmosWorkspace"), isLoading: false }); return; }
+      if (queryUsesSnapshot(intent, targetTab.result) && targetTab.result?.service) {
+        const expected = targetTab.result.service;
+        const current = () => { const tab = tabsRef.current.find((tab) => tab.id === targetTabId); return !!tab && isCurrentSnapshot(expected, tab.result?.service, tab.connectionId); };
+        updateTab(targetTabId, { isLoading: true });
+        try {
+          const result = await pageServiceQuery(targetTabId, targetTab.result, pageNum, pageSizeOverride);
+          if (current()) updateTab(targetTabId, { result, page: pageNum, isLoading: false });
+        } catch (error) { if (current() && !(error instanceof DOMException && error.name === "AbortError")) updateTab(targetTabId, { error: error instanceof Error ? error.message : t("serviceQuery.failed"), isLoading: false }); }
+        return;
+      }
+
+      let capturedCapabilities: DriverCapabilities;
+      try { capturedCapabilities = captureQueryCapabilities(allDrivers, savedConnection.params.driver, connectionId, activeConnectionId, activeCapabilities); }
+      catch (error) { updateTab(targetTabId, { error: error instanceof Error ? error.message : t("serviceQuery.failed"), isLoading: false }); return; }
+      const capturedDialect = capturedCapabilities.sql_dialect;
 
       // When the target tab's results live in a detached window, this run was
       // triggered from that window: don't touch main-window-only UI state
@@ -1167,15 +1205,15 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       // callers like pagination/refresh that omit `sql` mean "re-run what's
       // currently shown", not "run everything in the editor".
       let textToRun =
-        sql?.trim() || lastRunQueryRef.current[targetTabId] || targetTab?.query;
+        sql || lastRunQueryRef.current[targetTabId] || targetTab?.query;
       // For Table Tabs, reconstruct query if filter/sort are present
       if (targetTab?.type === "table" && targetTab.activeTable) {
         const effectiveSchema =
-          activeCapabilities?.schemas === true ? targetTab.schema : undefined;
+          capturedCapabilities.schemas === true ? targetTab.schema : undefined;
         const tabForQuery = { ...targetTab, schema: effectiveSchema };
         textToRun = reconstructTableQuery(
           tabForQuery,
-          activeCapabilities ?? activeDriver ?? undefined,
+          capturedCapabilities,
           {
             filterOverride:
               filterOverride !== undefined ? filterOverride : undefined,
@@ -1190,11 +1228,11 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       if (!textToRun || !textToRun.trim()) return;
 
       // Guard per statement: a T-SQL batch can hide a DELETE behind a SELECT.
-      const mayRun = await guardQueryExecution(splitQueries(textToRun, activeDialect));
+      const mayRun = await guardQueryExecution(splitQueries(textToRun, capturedDialect));
       if (!mayRun) return;
 
       // Check for parameters
-      const params = extractQueryParams(textToRun, activeDialect);
+      const params = extractQueryParams(textToRun, capturedDialect);
       if (params.length > 0) {
         const storedParams = paramsOverride || targetTab.queryParams || {};
         const missingParams = params.filter(
@@ -1219,7 +1257,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         }
 
         // Interpolate parameters before execution
-        textToRun = interpolateQueryParams(textToRun, storedParams, activeDialect);
+        textToRun = interpolateQueryParams(textToRun, storedParams, capturedDialect);
       }
 
       // Automatically open the results panel when running a query — but only
@@ -1274,8 +1312,11 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
           pageSizeOverride ?? targetTab.pageSize,
           settings.resultPageSize,
         );
-        const res = await invoke<QueryResult>("execute_query", {
-          connectionId: activeConnectionId,
+        const database = typeof savedConnection.params.database === "string" ? savedConnection.params.database : savedConnection.params.database.length === 1 ? savedConnection.params.database[0] : "";
+        const serviceResult = await executeServiceQuery({ scopeId: targetTabId, connectionId, driverId: savedConnection.params.driver, database, text: textToRun, pageSize,
+          write: targetTab.serviceAllowExecutionWrites, session: targetTab.serviceSession });
+        const res = serviceResult ?? await invoke<QueryResult>("execute_query", {
+          connectionId,
           query: textToRun,
           limit: pageSize,
           page: pageNum,
@@ -1286,6 +1327,8 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
           ...(schema ? { schema } : {}),
         });
         const end = performance.now();
+        if (queryGenerationRef.current[targetTabId] !== generation || tabsRef.current.find((tab) => tab.id === targetTabId)?.connectionId !== connectionId) return;
+        if (serviceResult) lastRunQueryRef.current[targetTabId] = textToRun;
 
         // A single statement can return several result sets (e.g. a MySQL
         // CALL to a procedure with multiple SELECTs): show them as separate
@@ -1370,7 +1413,13 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         // newer one's displayed result/table.
         const isStaleRun = queryGenerationRef.current[targetTabId] !== generation;
 
-        if (!isStaleRun) {
+        if (!isStaleRun && serviceResult) {
+          updateTab(targetTabId, { result: serviceResult, page: 1, executionTime: end - start, isLoading: false, activeTable: targetTab.type === "table" ? targetTab.activeTable : null,
+            pkColumns: null });
+          if (targetTab.type === "table" && targetTab.activeTable && serviceResult.service?.kind === "tabular") {
+            void fetchPkColumn(targetTab.activeTable, generation, targetTabId, targetTab.schema, connectionId);
+          }
+        } else if (!isStaleRun) {
           updateTab(targetTabId, {
             result: resultWithCount,
             executionTime: end - start,
@@ -1397,9 +1446,9 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
           );
         }
       } catch (err) {
-        if (queryGenerationRef.current[targetTabId] === generation) {
+        if (queryGenerationRef.current[targetTabId] === generation && tabsRef.current.find((tab) => tab.id === targetTabId)?.connectionId === connectionId) {
           updateTab(targetTabId, {
-            error: typeof err === "string" ? err : t("editor.queryFailed"),
+            error: err instanceof Error ? err.message : typeof err === "string" ? err : t("editor.queryFailed"),
             isLoading: false,
           });
         }
@@ -1419,11 +1468,14 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     [
       clearEntryScrollTops,
       activeConnectionId,
+      allDrivers,
+      connections,
+      executeServiceQuery,
+      pageServiceQuery,
       updateTab,
       settings.resultPageSize,
       fetchPkColumn,
       t,
-      activeDriver,
       activeSchema,
       activeCapabilities,
       views,
@@ -1432,26 +1484,39 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       activeDatabaseName,
       addHistoryEntry,
       guardQueryExecution,
-      activeDialect,
     ],
   );
+
+  const runQueryPage = useCallback((page: number, tabId?: string, sql?: string) => runQuery(sql, page, tabId, undefined, undefined, undefined, undefined, undefined, undefined, "page"), [runQuery]);
 
   const runMultipleQueries = useCallback(
     async (queries: string[], paramsOverride?: Record<string, string>) => {
       const targetTabId = activeTabIdRef.current;
-      if (!activeConnectionId || !targetTabId) return;
+      if (!targetTabId) return;
 
       const targetTab = tabsRef.current.find((t) => t.id === targetTabId);
       if (!targetTab) return;
+      const connectionId = targetTab.connectionId;
+      const savedConnection = connections.find((connection) => connection.id === connectionId);
+      if (!savedConnection) return;
+      let capturedCapabilities: DriverCapabilities;
+      try { capturedCapabilities = captureQueryCapabilities(allDrivers, savedConnection.params.driver, connectionId, activeConnectionId, activeCapabilities); }
+      catch (error) { updateTab(targetTabId, { error: error instanceof Error ? error.message : t("serviceQuery.failed"), isLoading: false }); return; }
+      const capturedDialect = capturedCapabilities.sql_dialect;
+      let serviceEnabled: boolean;
+      try { serviceEnabled = await supportsServiceQuery(serviceQuery.service, connectionId); }
+      catch (error) { updateTab(targetTabId, { error: error instanceof Error ? error.message : t("serviceQuery.failed"), isLoading: false }); return; }
+      if (savedConnection.params.driver === "cosmos-nosql") { updateTab(targetTabId, { error: t("serviceQuery.cosmosWorkspace"), isLoading: false }); return; }
+      if (serviceEnabled && !targetTab.serviceSession) { updateTab(targetTabId, { error: t("serviceQuery.sessionRequired"), isLoading: false }); return; }
 
       const mayRun = await guardQueryExecution(
-        queries.flatMap((q) => splitQueries(q, activeDialect)),
+        queries.flatMap((q) => splitQueries(q, capturedDialect)),
       );
       if (!mayRun) return;
 
       // Collect all unique parameters across all queries
       const allParams = [
-        ...new Set(queries.flatMap((q) => extractQueryParams(q, activeDialect))),
+        ...new Set(queries.flatMap((q) => extractQueryParams(q, capturedDialect))),
       ];
       if (allParams.length > 0) {
         const storedParams =
@@ -1474,7 +1539,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         }
         // Interpolate all queries with the stored params
         queries = queries.map((q) =>
-          interpolateQueryParams(q, storedParams, activeDialect),
+          interpolateQueryParams(q, storedParams, capturedDialect),
         );
       }
 
@@ -1503,6 +1568,26 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
 
       const shouldRecordHistory =
         targetTab?.type === "console" || targetTab?.type === "query_builder";
+      if (serviceEnabled) {
+        const generation = (queryGenerationRef.current[targetTabId] ?? 0) + 1;
+        queryGenerationRef.current[targetTabId] = generation;
+        const current = () => queryGenerationRef.current[targetTabId] === generation && tabsRef.current.find((tab) => tab.id === targetTabId)?.connectionId === connectionId;
+        const database = typeof savedConnection.params.database === "string" ? savedConnection.params.database : savedConnection.params.database.length === 1 ? savedConnection.params.database[0] : "";
+        let failed = false;
+        for (const entry of entries) {
+          if (!current()) return;
+          if (failed) { patchResultEntry(targetTabId, entry.id, { isLoading: false, error: t("serviceQuery.notRun") }); continue; }
+          try {
+            const result = await executeServiceQuery({ scopeId: targetTabId, connectionId, driverId: savedConnection.params.driver, database, text: entry.query, pageSize, session: targetTab.serviceSession, write: targetTab.serviceAllowExecutionWrites });
+            if (!current()) return;
+            if (!result) throw new Error(t("serviceQuery.failed"));
+            patchResultEntry(targetTabId, entry.id, { result, isLoading: false, activeTable: null, pkColumns: null });
+          } catch (error) { if (!current()) return; failed = true; patchResultEntry(targetTabId, entry.id, { error: error instanceof Error ? error.message : t("serviceQuery.failed"), isLoading: false }); }
+        }
+        if (current()) updateTab(targetTabId, { isLoading: false });
+        return;
+      }
+
 
       // Resolves a single result tab the moment its statement finishes:
       // records history and patches that entry in place (no whole-array
@@ -1576,7 +1661,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         batchResults = await invoke<BatchStatementResult[]>(
           "execute_query_batch",
           {
-            connectionId: activeConnectionId,
+            connectionId,
             queries: entries.map((e) => e.query),
             limit: pageSize,
             page: 1,
@@ -1638,6 +1723,11 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     [
       clearEntryScrollTops,
       activeConnectionId,
+      allDrivers,
+      activeCapabilities,
+      connections,
+      serviceQuery.service,
+      executeServiceQuery,
       updateTab,
       patchResultEntry,
       settings.resultPageSize,
@@ -1647,7 +1737,6 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       activeDatabaseName,
       addHistoryEntry,
       guardQueryExecution,
-      activeDialect,
     ],
   );
 
@@ -1714,6 +1803,8 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       const currentTab = tabsRef.current.find((t) => t.id === targetTabId);
       const entry = currentTab?.results?.find((r) => r.id === entryId);
       if (!entry) return;
+      const expected = entry.result?.service;
+      const current = () => { const tab = tabsRef.current.find((tab) => tab.id === targetTabId); const result = tab?.results?.find((item) => item.id === entryId)?.result; return !expected || (!!tab && isCurrentSnapshot(expected, result?.service, tab.connectionId)); };
 
       const pageSize = resolveTabPageSize(
         currentTab?.pageSize,
@@ -1734,8 +1825,10 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
 
       try {
         const start = performance.now();
-        const res = await invoke<QueryResult>("execute_query", {
-          connectionId: activeConnectionId,
+        const res = entry.result?.service
+          ? await pageServiceQuery(targetTabId, entry.result, pageNum, pageSize)
+          : await invoke<QueryResult>("execute_query", {
+          connectionId: currentTab!.connectionId,
           query: entry.query,
           limit: pageSize,
           page: pageNum,
@@ -1747,7 +1840,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         const end = performance.now();
 
         const latestTab = tabsRef.current.find((t) => t.id === targetTabId);
-        if (latestTab?.results) {
+        if (latestTab?.results && current()) {
           const previousTotalRows =
             entry.result?.pagination?.total_rows ?? null;
           const resultWithCount =
@@ -1774,18 +1867,18 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         }
       } catch (err) {
         const latestTab = tabsRef.current.find((t) => t.id === targetTabId);
-        if (latestTab?.results) {
+        if (latestTab?.results && current() && !(err instanceof DOMException && err.name === "AbortError")) {
           updateTab(targetTabId, {
             results: updateResultEntry(latestTab.results, entryId, {
               error:
-                typeof err === "string" ? err : t("editor.queryFailed"),
+                err instanceof Error ? err.message : typeof err === "string" ? err : t("editor.queryFailed"),
               isLoading: false,
             }),
           });
         }
       }
     },
-    [activeConnectionId, updateTab, settings.resultPageSize, activeSchema, t],
+    [activeConnectionId, updateTab, settings.resultPageSize, activeSchema, t, pageServiceQuery],
   );
 
   const handlePageSizeChange = useCallback(
@@ -1794,6 +1887,13 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       const tab = tabsRef.current.find((t) => t.id === targetTabId);
       if (!targetTabId || !tab) return;
       updateTab(targetTabId, { pageSize: newSize });
+      if (tab.result?.service) {
+        const expected = tab.result.service;
+        const current = () => { const tab = tabsRef.current.find((tab) => tab.id === targetTabId); return !!tab && isCurrentSnapshot(expected, tab.result?.service, tab.connectionId); };
+        updateTab(targetTabId, { isLoading: true });
+        void pageServiceQuery(targetTabId, tab.result, 1, newSize).then((result) => { if (current()) updateTab(targetTabId, { result, page: 1, isLoading: false }); }).catch((error: unknown) => { if (current() && !(error instanceof DOMException && error.name === "AbortError")) updateTab(targetTabId, { error: error instanceof Error ? error.message : "The snapshot page could not be read.", isLoading: false }); });
+        return;
+      }
       // Keep the first visible row in view when the page size changes
       const pagination = tab.result?.pagination;
       const newPage =
@@ -1816,7 +1916,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         newSize,
       );
     },
-    [runQuery, updateTab],
+    [runQuery, updateTab, pageServiceQuery],
   );
 
   const loadCount = useCallback(
@@ -1825,6 +1925,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         ? tabsRef.current.find((t) => t.id === tabIdArg)
         : activeTab;
       if (!tab?.result?.pagination || !activeConnectionId) return;
+      if (tab.result.service) return;
       // Count the reconstructed filtered query, not tab.query (which omits the
       // filter box's WHERE); LIMIT is dropped so it can't cap the count.
       const countTarget =
@@ -1970,7 +2071,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         return tab && tab.results ? tab : null;
       };
       return {
-        onRunQueryPage: (query, page) => runQuery(query, page, tabId),
+        onRunQueryPage: (query, page) => runQueryPage(page, tabId, query),
         onPageChange: (entryId, page) => runResultEntryPage(entryId, page, tabId),
         onRerunEntry: (entryId) => runResultEntryPage(entryId, 1, tabId),
         onLoadCount: () => loadCount(tabId),
@@ -2081,6 +2182,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     csvIncludeHeaders,
     runQuery,
     runResultEntryPage,
+    runQueryPage,
     loadCount,
     updateTab,
   ]);
@@ -2416,7 +2518,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         );
         if (tab?.result?.pagination?.has_more) {
           e.preventDefault();
-          runQuery(undefined, (tab.result.pagination.page ?? 1) + 1);
+          runQueryPage((tab.result.pagination.page ?? 1) + 1);
         }
         return;
       }
@@ -2427,7 +2529,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
         );
         if (tab?.result?.pagination && tab.result.pagination.page > 1) {
           e.preventDefault();
-          runQuery(undefined, tab.result.pagination.page - 1);
+          runQueryPage(tab.result.pagination.page - 1);
         }
         return;
       }
@@ -2452,6 +2554,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     addTab,
     handleCloseTab,
     runQuery,
+    runQueryPage,
   ]);
 
   const handleRefresh = useCallback(() => {
@@ -2459,7 +2562,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       (t) => t.id === activeTabIdRef.current,
     );
     if (currentTab?.activeTable && activeConnectionId)
-      runQuery(undefined, currentTab.page);
+      runQuery(undefined, currentTab.result?.service ? 1 : currentTab.page);
   }, [activeConnectionId, runQuery]);
 
   const handleToolbarUpdate = useCallback(
@@ -3328,7 +3431,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
       // them together and fail as a single prepared statement.
       runQuery(
         undefined,
-        activeTab.page,
+        activeTab.result?.service ? 1 : activeTab.page,
         undefined,
         undefined,
         undefined,
@@ -3858,6 +3961,14 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
   // when the result continues beyond the loaded page.
   const handleCopyAllRows = useCallback(async () => {
     if (!activeTab || !activeConnectionId) return;
+    if (activeTab.result?.service) {
+      try {
+        const result = await copyServiceRows(activeTab.id, activeTab.result);
+        await copyTextToClipboard(formatRowsForCopy(result.rows, result.columns, copyFormat, { withHeaders: true, csvIncludeHeaders, csvDelimiter, tableName: activeTab.activeTable }));
+        showToast(t(result.truncated ? "serviceQuery.copyLimited" : "dataGrid.copiedRows", { count: result.rows.length }), { kind: result.truncated ? "warning" : "success" });
+      } catch (error) { showAlert(error instanceof Error ? error.message : t("serviceQuery.failed"), { kind: "error" }); }
+      return;
+    }
     const totalRows = activeTab.result?.pagination?.total_rows;
     const columns = activeTab.result?.columns ?? [];
     if (columns.length === 0) return;
@@ -3910,6 +4021,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
     }
   }, [
     activeTab,
+    copyServiceRows,
     activeConnectionId,
     activeCapabilities,
     activeDriver,
@@ -3985,6 +4097,8 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
   }
 
   const activeConnection = connections.find((c) => c.id === activeConnectionId);
+  const queryConnection = connections.find((connection) => connection.id === activeTab?.connectionId);
+  const queryDatabase = typeof queryConnection?.params.database === "string" ? queryConnection.params.database : queryConnection?.params.database.length === 1 ? queryConnection.params.database[0] : "";
   const tabBarAccent = activeConnectionId
     ? getConnectionAccent(
         activeConnection,
@@ -4242,6 +4356,12 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
           <BookOpen size={16} />
         </button>
       </div>
+
+      {activeTab && !isNotebookTab && !isUsersTab && queryConnection?.params.driver !== "cosmos-nosql" && <ServiceQueryControls
+        key={activeTab.id} connectionId={activeTab.connectionId} database={queryDatabase} query={serviceQuery}
+        session={activeTab.serviceSession} allowExecutionWrites={activeTab.serviceAllowExecutionWrites}
+        onChange={(state) => updateTab(activeTab.id, state)} />}
+      {queryConnection?.params.driver === "cosmos-nosql" && <SlotAnchor name="data-grid.toolbar.actions" context={{ connectionId: activeTab.connectionId, driver: "cosmos-nosql", targetPluginId: "cosmos-nosql", ...snapshotSlotContext(activeTab.result?.service) }} />}
 
       {/* Toolbar — hidden for notebook and users tabs. A size container so buttons can
           collapse to icon-only in narrow split panes; the explicit z-index
@@ -4619,7 +4739,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
               <NotebookView
                 tab={tab}
                 updateTab={updateTab}
-                connectionId={activeConnectionId || ""}
+                connectionId={tab.connectionId}
                 isActive={isActive}
               />
             </div>
@@ -4914,7 +5034,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                   {t("editor.queryExecuted")}
                 </p>
                 <p className="text-xs text-secondary flex items-center gap-2">
-                  {activeTab.result.affected_rows > 0 && (
+                  {(activeTab.result.affected_rows ?? 0) > 0 && (
                     <span>
                       {t("editor.rowsAffected", {
                         count: activeTab.result.affected_rows,
@@ -4975,7 +5095,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                             activeTab.result.pagination.page === 1 ||
                             activeTab.isLoading
                           }
-                          onClick={() => runQuery(undefined, 1)}
+                          onClick={() => runQueryPage(1)}
                           className="hidden @[420px]:block p-1 hover:bg-surface-tertiary text-secondary hover:text-primary disabled:opacity-30 disabled:cursor-not-allowed border-l border-strong"
                           title="First Page"
                         >
@@ -4987,10 +5107,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                             activeTab.isLoading
                           }
                           onClick={() =>
-                            runQuery(
-                              undefined,
-                              activeTab.result!.pagination!.page - 1,
-                            )
+                            runQueryPage(activeTab.result!.pagination!.page - 1)
                           }
                           className="p-1 hover:bg-surface-tertiary text-secondary hover:text-primary disabled:opacity-30 disabled:cursor-not-allowed border-l border-strong"
                           title="Previous Page"
@@ -5024,7 +5141,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                                               .page_size,
                                         )
                                     ) {
-                                      runQuery(undefined, newPage);
+                                      runQueryPage(newPage);
                                     }
                                   }
                                   setIsEditingPage(false);
@@ -5040,6 +5157,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                           <button
                             type="button"
                             className="px-2 @[480px]:px-3 text-secondary text-xs font-medium cursor-pointer hover:bg-surface-tertiary transition-colors min-w-[48px] @[480px]:min-w-[80px] text-center py-1 whitespace-nowrap focus-visible:outline focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-focus"
+                            disabled={!!activeTab.result.service}
                             onClick={() => {
                               setIsEditingPage(true);
                               setTempPage(
@@ -5090,10 +5208,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                             activeTab.isLoading
                           }
                           onClick={() =>
-                            runQuery(
-                              undefined,
-                              activeTab.result!.pagination!.page + 1,
-                            )
+                            runQueryPage(activeTab.result!.pagination!.page + 1)
                           }
                           className="p-1 hover:bg-surface-tertiary text-secondary hover:text-primary disabled:opacity-30 disabled:cursor-not-allowed border-l border-strong"
                           title="Next Page"
@@ -5106,8 +5221,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                             activeTab.isLoading
                           }
                           onClick={() =>
-                            runQuery(
-                              undefined,
+                            runQueryPage(
                               Math.ceil(
                                 activeTab.result!.pagination!.total_rows! /
                                   activeTab.result!.pagination!.page_size,
@@ -5295,7 +5409,9 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                           ? handleFilterByValue
                           : undefined
                       }
-                      connectionId={activeConnectionId}
+                      connectionId={activeTab.connectionId}
+                      serviceReference={activeTab.result?.service}
+                      schema={activeTab.schema}
                       onRefresh={handleRefresh}
                       pendingChanges={activeTab.pendingChanges}
                       pendingDeletions={activeTab.pendingDeletions}
@@ -5319,7 +5435,7 @@ export const Editor = ({ commandScopeId }: EditorProps) => {
                           ? handleSort
                           : undefined
                       }
-                      readonly={driverReadonly || !!activeTab.materialized}
+                      readonly={driverReadonly || !!activeTab.materialized || (activeTab.result?.service?.kind !== undefined && (activeTab.result.service.kind !== "tabular" || !activeTab.pkColumns?.length))}
                       totalRows={activeTab.result?.pagination?.total_rows}
                       hasMore={activeTab.result?.pagination?.has_more}
                       onCopyAllRows={handleCopyAllRows}

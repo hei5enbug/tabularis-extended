@@ -91,6 +91,8 @@ export function SqlCellResult({
             <DataGrid
               columns={result.columns}
               data={result.rows}
+              serviceReference={result.service}
+              connectionId={result.service?.connectionId}
               tableName={null}
               pkColumns={null}
               readonly

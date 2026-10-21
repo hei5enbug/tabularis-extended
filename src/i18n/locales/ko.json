@@ -2406,5 +2406,23 @@
     "groups": { "builtin": "기본 제공 · 오프라인", "installed": "설치된 패키지", "personal": "개인 테마" }, "modes": { "light": "밝게", "dark": "어둡게", "high-contrast": "고대비" },
     "importErrors": { "unrecognized": "인식할 수 없는 VS Code 테마입니다.", "modeRequired": "모드를 선택한 뒤 다시 미리 보세요.", "includeOnly": "include만 있는 테마는 가져올 수 없습니다. 실제 색상을 제공하세요.", "noSupportedData": "지원되는 색상 또는 SQL 토큰 규칙이 없습니다.", "invalidColor": "지원되는 색상의 값이 잘못되었습니다.", "invalidRules": "토큰 규칙이 잘못되었거나 너무 많습니다." },
     "diagnostics": { "unsupportedKey": "지원되지 않는 필드", "unsupportedColor": "지원되지 않는 색상", "unsupportedScope": "지원되지 않는 범위", "scopeApproximation": "근사 SQL 범위 매핑", "unsupportedStyle": "지원되지 않는 스타일", "ignoredInclude": "include를 불러오지 않음", "ignoredSemanticTokens": "의미 토큰 무시됨", "unsupportedReference": "외부 참조를 불러오지 않음", "unsupportedSetting": "지원되지 않는 설정", "tokenAlphaFlattened": "토큰 불투명도를 기본 배경에 합성", "modeApproximation": "모드 재정의 또는 근사 변환", "diagnosticsTruncated": "추가 진단 생략됨" }
+  },
+  "serviceQuery": {
+      "failed": "서비스 요청을 완료하지 못했습니다.",
+      "connectionWrites": "이 연결의 쓰기 허용",
+      "executionWrites": "실행 시 쓰기 허용",
+      "beginReadOnly": "읽기 전용 트랜잭션 시작",
+      "beginWrite": "쓰기 트랜잭션 시작",
+      "writeSession": "쓰기 트랜잭션 열림",
+      "readOnlySession": "읽기 전용 트랜잭션 열림",
+      "commit": "커밋",
+      "rollback": "롤백",
+      "sessionRequired": "모든 구문을 실행하기 전에 트랜잭션을 시작하세요.",
+      "notRun": "앞선 구문이 실패하여 실행하지 않았습니다.",
+      "schemaHint": "연결의 기본 스키마와 다르면 SQL에 스키마 이름을 명시하세요.",
+      "pending": "요청 또는 승인을 기다리는 중…",
+      "saveBeforeAuth": "연결을 저장한 후 로그인하세요.",
+      "cosmosWorkspace": "Cosmos 작업 공간에서 문서를 조회하고 편집하세요.",
+      "copyLimited": "스냅샷 {{count}}행을 복사했습니다. 복사 상한에 도달했습니다."
   }
 }

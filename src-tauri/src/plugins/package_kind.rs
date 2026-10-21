@@ -13,6 +13,12 @@ pub fn require_driver_kind(source: &[u8]) -> Result<(), String> {
     if !value.is_object() {
         return Err(KIND_ERROR.into());
     }
+    if value
+        .get("required_service_protocol")
+        .is_some_and(|protocol| protocol.as_u64() != Some(super::extensions::SERVICE_PROTOCOL))
+    {
+        return Err("Unsupported required_service_protocol".into());
+    }
     match value.get("kind") {
         None => Ok(()),
         Some(serde_json::Value::String(kind)) if kind == "driver" => Ok(()),
@@ -40,4 +46,27 @@ pub fn validate_archive_kind<R: Read + Seek>(
         .read_to_end(&mut source)
         .map_err(|e| e.to_string())?;
     require_driver_kind(&source)
+}
+
+pub fn install_archive_kind<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> Result<super::extensions::PackageKind, String> {
+    let name = if archive.file_names().any(|name| name == ".tabularium") {
+        ".tabularium"
+    } else {
+        "manifest.json"
+    };
+    let manifest = archive
+        .by_name(name)
+        .map_err(|e| format!("Missing package manifest: {e}"))?;
+    let mut bytes = Vec::new();
+    manifest
+        .take(4 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let kind = super::extensions::parse_manifest(&bytes)?.0;
+    if kind == super::extensions::PackageKind::Driver {
+        validate_archive_kind(archive)?;
+    }
+    Ok(kind)
 }

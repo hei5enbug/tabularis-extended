@@ -7,7 +7,17 @@ import type {
   UsePluginThemeReturn,
   UsePluginToastReturn,
   PluginTranslator,
+  UsePluginServiceReturn,
+  UsePluginAssetsReturn,
 } from "./types";
+
+export function usePluginService(): UsePluginServiceReturn {
+  return getHost().usePluginService();
+}
+
+export function usePluginAssets(pluginId: string): UsePluginAssetsReturn {
+  return getHost().usePluginAssets(pluginId);
+}
 
 /**
  * Execute read-only SQL queries against the active connection.

@@ -160,6 +160,25 @@ pub async fn load_plugins_with_configs(
         }
     };
 
+    for path in super::extensions::directories(&plugins_dir).unwrap_or_default() {
+        let identity = super::extensions::read_package(&path)
+            .ok()
+            .and_then(|(_, value)| super::extensions::identity(&value).ok().map(str::to_owned));
+        if enabled_ids.is_some_and(|ids| !identity.as_ref().is_some_and(|id| ids.contains(id))) {
+            continue;
+        }
+        if let Err(error) = super::extensions::enable(&path) {
+            if let Ok(mut errors) = STARTUP_ERRORS.lock() {
+                push_startup_error(
+                    &mut errors,
+                    PluginLoadError {
+                        plugin_id: identity.unwrap_or_default(),
+                        error,
+                    },
+                );
+            }
+        }
+    }
     for path in entries {
 
         if let Some(enabled) = enabled_ids {
@@ -231,6 +250,10 @@ pub async fn load_plugin_from_dir(
     interpreter_override: Option<String>,
     settings: HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
+    let (kind, _) = super::extensions::read_package(path)?;
+    if kind == super::extensions::PackageKind::Extension {
+        return super::extensions::enable(path);
+    }
     let config: ConfigManifest = crate::plugins::installer::read_manifest(path)?;
 
     // Refuse plugins that claim a built-in driver id. Registration is a plain

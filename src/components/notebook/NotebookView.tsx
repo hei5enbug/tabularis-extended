@@ -1,3 +1,6 @@
+import { useServiceQuery } from "../../hooks/useServiceQuery";
+import { ServiceQueryControls } from "../service/ServiceQueryControls";
+import { supportsServiceQuery } from "../../utils/serviceQuery";
 import { useState, useCallback, useRef, useEffect, useMemo } from "react";
 import { flushSync } from "react-dom";
 import { useTranslation } from "react-i18next";
@@ -90,7 +93,7 @@ export function NotebookView({
   isActive,
 }: NotebookViewProps) {
   const { t } = useTranslation();
-  const { activeSchema, activeCapabilities, selectedDatabases, activeDriver } =
+  const { activeSchema, activeCapabilities, selectedDatabases, activeDriver, connections } =
     useDatabase();
   const variableOptions = useMemo(
     () => ({
@@ -105,6 +108,14 @@ export function NotebookView({
     schema: effectiveSchema,
     enabled: isActive,
   });
+  const serviceQuery = useServiceQuery();
+  const { execute: executeServiceQuery, cancel: cancelServiceQuery } = serviceQuery;
+  const notebookConnection = connections.find((connection) => connection.id === connectionId);
+  const database = typeof notebookConnection?.params.database === "string" ? notebookConnection.params.database : notebookConnection?.params.database.length === 1 ? notebookConnection.params.database[0] : "";
+  const cellGenerations = useRef(new Map<string, number>());
+  const serviceCells = useRef(new Set<string>());
+  const currentConnection = useRef(connectionId);
+  currentConnection.current = connectionId;
   const { settings } = useSettings();
   const { showAlert } = useAlert();
   const { matchesShortcut } = useKeybindings();
@@ -339,6 +350,15 @@ export function NotebookView({
       const cell = cellsRef.current.find((c) => c.id === cellId);
       if (!cell || cell.type !== "sql" || !cell.content.trim()) return;
 
+      const generation = (cellGenerations.current.get(cellId) ?? 0) + 1;
+      cellGenerations.current.set(cellId, generation);
+      const runConnectionId = connectionId;
+      const current = () => cellGenerations.current.get(cellId) === generation && currentConnection.current === runConnectionId;
+      let serviceEnabled: boolean;
+      try { serviceEnabled = await supportsServiceQuery(serviceQuery.service, runConnectionId); }
+      catch (error) { if (current()) updateCell(cellId, { error: error instanceof Error ? error.message : t("serviceQuery.failed"), isLoading: false }); return; }
+      if (!current()) return;
+      if (serviceEnabled) serviceCells.current.add(cellId); else serviceCells.current.delete(cellId);
       updateCell(cellId, { isLoading: true, error: undefined, result: null });
 
       const pageSize =
@@ -349,7 +369,7 @@ export function NotebookView({
       const cellSchema = cell.schema || effectiveSchema;
 
       // Resolve notebook parameters first
-      let sql = cell.content.trim();
+      let sql = serviceEnabled ? cell.content : cell.content.trim();
       if (params.length > 0) {
         const paramResult = resolveParams(sql, params);
         if (paramResult.unresolvedParams.length > 0) {
@@ -406,14 +426,15 @@ export function NotebookView({
 
       const start = performance.now();
       try {
-        const res = await invoke<QueryResult>("execute_query", {
-          connectionId,
+        const res = await executeServiceQuery({ scopeId: cellId, connectionId: runConnectionId, driverId: notebookConnection?.params.driver ?? "", database, text: resolvedSql, pageSize, session: tab.serviceSession, write: tab.serviceAllowExecutionWrites }) ?? await invoke<QueryResult>("execute_query", {
+          connectionId: runConnectionId,
           query: resolvedSql,
           limit: pageSize,
           page: 1,
           ...(cellSchema ? { schema: cellSchema } : {}),
         });
         const elapsed = performance.now() - start;
+        if (!current()) return;
 
         const historyEntry = createHistoryEntry(
           cell.content.trim(),
@@ -431,6 +452,7 @@ export function NotebookView({
           history: newHistory,
         });
       } catch (e: unknown) {
+        if (!current()) return;
         const elapsed = performance.now() - start;
         const errorMsg = e instanceof Error ? e.message : String(e);
 
@@ -453,6 +475,13 @@ export function NotebookView({
     },
     [
       connectionId,
+      executeServiceQuery,
+      serviceQuery.service,
+      t,
+      notebookConnection?.params.driver,
+      database,
+      tab.serviceSession,
+      tab.serviceAllowExecutionWrites,
       effectiveSchema,
       settings.resultPageSize,
       updateCell,
@@ -490,6 +519,10 @@ export function NotebookView({
   }, [runCell]);
 
   const runAll = useCallback(async () => {
+    let serviceEnabled: boolean;
+    try { serviceEnabled = await supportsServiceQuery(serviceQuery.service, connectionId); }
+    catch (error) { showAlert(error instanceof Error ? error.message : t("serviceQuery.failed"), { kind: "error" }); return; }
+    if (serviceEnabled && !tab.serviceSession) { showAlert(t("serviceQuery.sessionRequired"), { kind: "error" }); return; }
     setIsRunningAll(true);
     setRunAllResult(null);
 
@@ -498,8 +531,8 @@ export function NotebookView({
     result = { ...result, total: executable.length };
 
     // Split into parallel and sequential groups
-    const parallelCells = executable.filter(({ cell }) => cell.isParallel);
-    const sequentialCells = executable.filter(({ cell }) => !cell.isParallel);
+    const parallelCells = serviceEnabled ? [] : executable.filter(({ cell }) => cell.isParallel);
+    const sequentialCells = serviceEnabled ? executable : executable.filter(({ cell }) => !cell.isParallel);
 
     // Run parallel cells concurrently
     if (parallelCells.length > 0) {
@@ -530,10 +563,11 @@ export function NotebookView({
       const updatedCell = cellsRef.current.find((c) => c.id === cell.id);
       if (updatedCell?.error) {
         result = addFailure(result, cell.id, index, updatedCell.error);
-        if (stopOnError) {
+        if (serviceEnabled || stopOnError) {
           const remaining = sequentialCells.length - i - 1;
           if (remaining > 0) {
             result = addSkipped(result, remaining);
+            if (serviceEnabled) for (const { cell: skipped } of sequentialCells.slice(i + 1)) updateCell(skipped.id, { error: t("serviceQuery.notRun"), isLoading: false });
           }
           break;
         }
@@ -544,7 +578,7 @@ export function NotebookView({
 
     setRunAllResult(result);
     setIsRunningAll(false);
-  }, [runCell, stopOnError]);
+  }, [runCell, stopOnError, serviceQuery.service, connectionId, tab.serviceSession, showAlert, t, updateCell]);
 
   const handleExport = useCallback(async () => {
     try {
@@ -876,6 +910,7 @@ export function NotebookView({
         }
       />
       <NotebookToolbar {...toolbarProps} />
+      <ServiceQueryControls connectionId={connectionId} database={database} query={serviceQuery} session={tab.serviceSession} allowExecutionWrites={tab.serviceAllowExecutionWrites} onChange={(state) => updateTab(tab.id, state)} />
       {showHistory && (
         <NotebookHistoryPanel
           states={historyView.states}
@@ -920,6 +955,7 @@ export function NotebookView({
             className="relative scroll-mt-4"
           >
             {showLineAt(index) && renderDropLine("top")}
+            {cell.isLoading && serviceCells.current.has(cell.id) && <button type="button" onClick={() => { cancelServiceQuery(cell.id); cellGenerations.current.set(cell.id, (cellGenerations.current.get(cell.id) ?? 0) + 1); updateCell(cell.id, { isLoading: false }); }}>{t("editor.stop")}</button>}
             <NotebookCellWrapper
               cell={cell}
               index={index}

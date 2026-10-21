@@ -4,6 +4,7 @@ pub mod compat; // COMPAT(registry-ga): remove with the BC layer
 pub mod connection_metadata;
 pub mod deep_link;
 pub mod driver;
+pub mod extensions;
 pub mod force_install;
 #[cfg(test)]
 mod force_install_tests;
@@ -21,3 +22,6 @@ pub mod tabularium;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod native_package_tests;

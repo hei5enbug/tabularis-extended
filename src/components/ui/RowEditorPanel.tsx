@@ -1,3 +1,5 @@
+import type { ServiceResultReference } from "../../types/editor";
+import { snapshotSlotContext } from "../../utils/serviceQuery";
 import { Pin, PinOff, X } from "lucide-react";
 import { useEffect, useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
@@ -6,6 +8,8 @@ import { FieldEditor } from "./FieldEditor";
 import { SlotAnchor } from "./SlotAnchor";
 
 interface RowEditorPanelProps {
+	serviceReference?: ServiceResultReference;
+	readonly?: boolean;
 	onClose: () => void;
 	rowData: Record<string, unknown>;
 	originalRowData?: Record<string, unknown>;
@@ -35,6 +39,8 @@ interface RowEditorPanelProps {
 
 export const RowEditorPanel = ({
 	onClose,
+	serviceReference,
+	readonly = false,
 	rowData,
 	originalRowData,
 	rowIndex,
@@ -115,6 +121,7 @@ export const RowEditorPanel = ({
 							rowData,
 							rowIndex,
 							isInsertion,
+							...snapshotSlotContext(serviceReference, rowIndex, isInsertion),
 						}}
 						className="flex items-center gap-1"
 					/>
@@ -163,6 +170,7 @@ export const RowEditorPanel = ({
 								)}
 							</label>
 
+							<fieldset disabled={readonly}>
 							<FieldEditor
 								name={column.name}
 								type={column.type}
@@ -171,7 +179,7 @@ export const RowEditorPanel = ({
 								originalValue={originalRowData?.[column.name]}
 								detectJsonInTextColumns={detectJsonInTextColumns}
 								onChange={(newValue) => {
-									if (!isGenerated) updateField(column.name, newValue);
+									if (!isGenerated && !readonly) updateField(column.name, newValue);
 								}}
 								placeholder={t("rowEditor.enterValue")}
 								isInsertion={isInsertion}
@@ -183,6 +191,7 @@ export const RowEditorPanel = ({
 								pkMap={pkMap}
 								schema={schema}
 							/>
+							</fieldset>
 							<SlotAnchor
 								name="row-editor-sidebar.field.after"
 								context={{
@@ -193,14 +202,15 @@ export const RowEditorPanel = ({
 									rowData: editedData,
 									rowIndex,
 									isInsertion,
-									onFieldChange: (value: unknown) =>
-										updateField(column.name, value),
+									...snapshotSlotContext(serviceReference, rowIndex, isInsertion),
+									onFieldChange: readonly ? undefined : (value: unknown) => updateField(column.name, value),
 								}}
 							/>
 						</div>
 					);
 				})}
 			</div>
+      <SlotAnchor name="row-edit-modal.footer.before" context={{ connectionId, tableName, schema, isInsertion, ...snapshotSlotContext(serviceReference, rowIndex, isInsertion) }} />
 		</div>
 	);
 };

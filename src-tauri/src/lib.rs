@@ -1,3 +1,14 @@
+pub mod services;
+#[path = "services/native/mod.rs"]
+pub mod service_native;
+#[path = "commands/service.rs"]
+pub mod service_commands;
+#[path = "services/registry_driver.rs"]
+pub mod service_registry_driver;
+#[path = "services/platform/mod.rs"]
+pub mod service_platform;
+#[path = "services/spatial/mod.rs"]
+pub mod service_spatial;
 pub mod ai;
 pub mod ai_activity;
 #[cfg(test)]
@@ -154,6 +165,7 @@ fn close_devtools(window: tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if service_platform::read_isolation_paths().is_err() { eprintln!("Invalid isolation configuration"); std::process::exit(2); }
     // When ssh re-executes this binary as its SSH_ASKPASS helper (see the
     // `askpass` module), serve the prompt and exit without booting the app.
     askpass::maybe_run_askpass_client();
@@ -197,6 +209,14 @@ pub fn run() {
         let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
         rt.block_on(mcp::run_mcp_server());
         return;
+    }
+
+    if let Some(cli::Command::Service(service)) = &args.command {
+        init_logger(create_log_buffer(1000), log::LevelFilter::Off);
+        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+        let code = rt.block_on(service_native::cli::run(service));
+        rt.shutdown_timeout(std::time::Duration::from_secs(3));
+        std::process::exit(code);
     }
 
     // Configure log level based on debug flag
@@ -317,6 +337,10 @@ pub fn run() {
                 )
                 .await;
             });
+
+            let native = tauri::async_runtime::block_on(service_native::NativeCore::gui(app.handle().clone()))
+                .map_err(|_| std::io::Error::other("Service initialization failed"))?;
+            app.manage(native);
 
             // Ensure replacement plugins are installed for any built-in
             // driver a saved connection still depends on (e.g. install the
@@ -453,6 +477,16 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            plugins::commands::read_plugin_asset,
+            service_commands::service_call,
+            service_commands::service_capabilities,
+            service_commands::service_register_query_write_intent,
+            service_commands::service_gui_secret_register,
+            service_commands::service_gui_secret_discard,
+            service_commands::service_map_ack,
+            service_commands::service_map_renderer,
+            service_commands::service_save_artifact,
+            service_commands::service_approve,
             system_theme::get_linux_system_theme,
             is_debug_mode,
             open_devtools,
@@ -770,6 +804,9 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                if let Some(core) = app_handle.try_state::<std::sync::Arc<service_native::NativeCore>>() {
+                    tauri::async_runtime::block_on(core.shutdown()).ok();
+                }
                 // Back up the freshest state before the process ends (no-op
                 // unless backups are enabled and due).
                 backup::run_exit_backup(app_handle);

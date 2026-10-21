@@ -21,6 +21,118 @@ use crate::models::{
 /// the command layer supplies a closure that emits a Tauri event.
 pub type BatchProgressFn = dyn Fn(usize, &BatchStatementResult) + Send + Sync;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServiceRpcMethod {
+    ExactQuery,
+    SpatialColumns,
+    SpatialTransformValues,
+    SpatialQueryTable,
+    SpatialReadFeature,
+    SessionOpen,
+    SessionFinish,
+    SessionDiscard,
+    Test,
+    Catalog,
+    Row,
+    InvalidateAuth,
+    CosmosTest,
+    CosmosDatabases,
+    CosmosTables,
+    CosmosColumns,
+    CosmosMetadata,
+    CosmosQuery,
+    CosmosQueryPage,
+    DocumentRead,
+    DocumentCreate,
+    DocumentReplace,
+    DocumentDelete,
+}
+impl ServiceRpcMethod {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::ExactQuery => "execute_query_exact",
+            Self::SpatialColumns => "spatial_columns",
+            Self::SpatialTransformValues => "spatial_transform_values",
+            Self::SpatialQueryTable => "spatial_query_table",
+            Self::SpatialReadFeature => "spatial_read_feature",
+            Self::SessionOpen => "service_session_open",
+            Self::SessionFinish => "service_session_finish",
+            Self::SessionDiscard => "service_session_discard",
+            Self::Test => "service_test",
+            Self::Catalog => "service_catalog",
+            Self::Row => "service_row",
+            Self::InvalidateAuth => "service_invalidate_auth",
+            Self::CosmosTest => "test_connection",
+            Self::CosmosDatabases => "get_databases",
+            Self::CosmosTables => "get_tables",
+            Self::CosmosColumns => "get_columns",
+            Self::CosmosMetadata => "get_connection_metadata",
+            Self::CosmosQuery => "execute_query",
+            Self::CosmosQueryPage => "query_page",
+            Self::DocumentRead => "read_document",
+            Self::DocumentCreate => "create_document",
+            Self::DocumentReplace => "replace_document",
+            Self::DocumentDelete => "delete_document",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DriverServiceReadOnly {
+    ReadOnlyTransaction,
+    RestrictedDatabasePrincipal,
+    ReadOnlySdkOperations,
+    Unavailable,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DriverServiceCapabilities {
+    pub service_protocol: u8,
+    pub exact_query: bool,
+    pub spatial: bool,
+    pub documents: bool,
+    pub query_page: bool,
+    pub cancel: bool,
+    pub sessions: bool,
+    pub catalog: bool,
+    pub rows: bool,
+    pub exact_affected_rows: bool,
+    pub read_only: DriverServiceReadOnly,
+}
+impl DriverServiceCapabilities {
+    pub fn supports(&self, method: ServiceRpcMethod) -> bool {
+        if self.service_protocol != 1 {
+            return false;
+        }
+        match method {
+            ServiceRpcMethod::ExactQuery => self.exact_query,
+            ServiceRpcMethod::SpatialColumns
+            | ServiceRpcMethod::SpatialTransformValues
+            | ServiceRpcMethod::SpatialQueryTable
+            | ServiceRpcMethod::SpatialReadFeature => self.spatial,
+            ServiceRpcMethod::SessionOpen
+            | ServiceRpcMethod::SessionFinish
+            | ServiceRpcMethod::SessionDiscard => self.sessions,
+            ServiceRpcMethod::Catalog => self.catalog && !self.documents,
+            ServiceRpcMethod::Row => self.rows && !self.documents,
+            ServiceRpcMethod::Test => self.exact_query && !self.documents,
+            ServiceRpcMethod::CosmosTest
+            | ServiceRpcMethod::CosmosDatabases
+            | ServiceRpcMethod::CosmosTables
+            | ServiceRpcMethod::CosmosColumns
+            | ServiceRpcMethod::CosmosMetadata
+            | ServiceRpcMethod::DocumentRead
+            | ServiceRpcMethod::DocumentCreate
+            | ServiceRpcMethod::DocumentReplace
+            | ServiceRpcMethod::DocumentDelete => self.documents,
+            ServiceRpcMethod::CosmosQuery | ServiceRpcMethod::CosmosQueryPage => {
+                self.documents && self.query_page
+            }
+            ServiceRpcMethod::InvalidateAuth => self.exact_query || self.documents,
+        }
+    }
+}
+
 /// SQL dialect declaration used by the frontend statement splitter
 /// (`src/utils/sqlSplitter/`) to pick per-dialect tokenizer rules:
 /// string-literal quoting, identifier quoting (backticks vs brackets),
@@ -341,6 +453,33 @@ pub struct PluginManifest {
 /// fall back to `"public"` when it is `None`.
 #[async_trait]
 pub trait DatabaseDriver: Send + Sync {
+    async fn service_capabilities(
+        &self,
+    ) -> crate::services::error::ServiceResult<DriverServiceCapabilities> {
+        Err(crate::services::error::failure(
+            crate::services::contracts::ErrorCode::CapabilityUnavailable,
+        ))
+    }
+    async fn service_call(
+        &self,
+        _method: ServiceRpcMethod,
+        _params: &ConnectionParams,
+        _context: &crate::services::backend::DriverContext,
+        _input: serde_json::Value,
+    ) -> crate::services::error::ServiceResult<serde_json::Value> {
+        Err(crate::services::error::failure(
+            crate::services::contracts::ErrorCode::CapabilityUnavailable,
+        ))
+    }
+    async fn service_cancel(
+        &self,
+        _connection_id: &str,
+        _request_id: &str,
+    ) -> crate::services::error::ServiceResult<()> {
+        Err(crate::services::error::failure(
+            crate::services::contracts::ErrorCode::CapabilityUnavailable,
+        ))
+    }
     // --- Metadata -----------------------------------------------------------
 
     fn manifest(&self) -> &PluginManifest;

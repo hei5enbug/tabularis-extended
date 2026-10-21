@@ -10,13 +10,14 @@ pub(crate) fn kind_directory(kind: &str) -> &str {
     match kind {
         "theme" => "themes",
         "driver" => "drivers",
+        "extension" => "extensions",
         other => other,
     }
 }
 
 /// Containers must never be mistaken for removable flat package bundles.
 pub(crate) fn is_kind_directory(name: &str) -> bool {
-    ["theme", "driver"]
+    ["theme", "driver", "extension"]
         .iter()
         .any(|kind| kind_directory(kind) == name)
 }

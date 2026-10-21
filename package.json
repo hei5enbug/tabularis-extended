@@ -23,6 +23,8 @@
     "test:coverage": "vitest run --coverage",
     "test:rust": "cd src-tauri && cargo test",
     "test:all": "pnpm test:rust && pnpm test:coverage",
+    "test:service:parity": "node scripts/test-service-native.mjs parity",
+    "test:spatial:webview": "node scripts/test-service-native.mjs webview",
     "tauri": "tauri",
     "build:explain": "pnpm --filter @tabularis/explain build",
     "typecheck:explain": "pnpm --filter @tabularis/explain typecheck",
@@ -38,6 +40,7 @@
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
     "@tabularis/explain": "workspace:*",
+    "@tabularis/service-contracts": "workspace:*",
     "@tailwindcss/postcss": "^4.2.2",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.23",

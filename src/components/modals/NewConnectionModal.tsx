@@ -683,8 +683,9 @@ export const NewConnectionModal = ({
       database: typeof formData.database === "string" ? formData.database : "",
       onDatabaseChange,
       connectionName: name,
+      connectionId: initialConnection?.id,
     }),
-    [driver, formData.database, onDatabaseChange, name],
+    [driver, formData.database, onDatabaseChange, name, initialConnection?.id],
   );
   const hasConnectionContentSlot =
     noConnectionRequired &&
@@ -722,6 +723,7 @@ export const NewConnectionModal = ({
       setExtraField,
       credentialFieldsHidden,
       setCredentialFieldsHidden,
+      connectionId: initialConnection?.id,
     }),
     [
       driver,
@@ -729,6 +731,7 @@ export const NewConnectionModal = ({
       setExtraField,
       credentialFieldsHidden,
       setCredentialFieldsHidden,
+      initialConnection?.id,
     ],
   );
 
@@ -2798,6 +2801,8 @@ export const NewConnectionModal = ({
             context={extraFieldsSlotContext}
             className="flex flex-col gap-3"
           />
+
+          {!initialConnection?.id && <p className="text-xs text-muted">{t("serviceQuery.saveBeforeAuth")}</p>}
 
           {/* User + Password (a plugin may hide them via the extra_fields slot) */}
           {!credentialFieldsHidden && (

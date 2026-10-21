@@ -39,7 +39,12 @@ pub async fn fetch_plugin_registry(
         .into_iter()
         // Unknown or ambiguous kinds have no install path; keep them out of the
         // Plugin Center so the kind filter only ever offers drivers and themes.
-        .filter(|plugin| matches!(plugin.kind.as_deref(), None | Some("driver") | Some("theme")))
+        .filter(|plugin| {
+            matches!(
+                plugin.kind.as_deref(),
+                None | Some("driver") | Some("theme") | Some("extension")
+            )
+        })
         .map(|plugin| {
             let (installed_version, platform) = if plugin.kind.as_deref() == Some("theme") {
                 (themes.version_of(&plugin.id), "universal")
@@ -158,7 +163,10 @@ async fn resolve_api_install_asset(
     platform: &str,
 ) -> Result<(String, Option<String>, String), String> {
     let detail = crate::plugins::tabularium::fetch_plugin_detail(base, plugin_id).await?;
-    if !matches!(detail.kind.as_deref(), None | Some("driver")) {
+    if !matches!(
+        detail.kind.as_deref(),
+        None | Some("driver") | Some("extension")
+    ) {
         return Err(super::package_kind::KIND_ERROR.into());
     }
     let target_version = match version {
@@ -286,6 +294,11 @@ pub fn cancel_plugin_install(plugin_id: String) -> bool {
 
 #[tauri::command]
 pub async fn uninstall_plugin(plugin_id: String) -> Result<(), String> {
+    if let Ok(path) = installer::resolve_plugin_dir(&plugin_id) {
+        if super::extensions::read_package(&path)?.0 == super::extensions::PackageKind::Extension {
+            return installer::uninstall(&plugin_id);
+        }
+    }
     // Unregister from in-memory driver registry first
     crate::drivers::registry::unregister_driver(&plugin_id).await;
     crate::drivers::registry::unregister_manifest(&plugin_id).await;
@@ -305,6 +318,12 @@ pub async fn get_installed_plugins() -> Result<Vec<InstalledPluginInfo>, String>
 /// The plugin files remain on disk and can be re-enabled with `enable_plugin`.
 #[tauri::command]
 pub async fn disable_plugin(plugin_id: String) -> Result<(), String> {
+    super::extensions::disable(&plugin_id);
+    if let Ok(path) = installer::resolve_plugin_dir(&plugin_id) {
+        if super::extensions::read_package(&path)?.0 == super::extensions::PackageKind::Extension {
+            return Ok(());
+        }
+    }
     crate::drivers::registry::unregister_driver(&plugin_id).await;
     crate::drivers::registry::unregister_manifest(&plugin_id).await;
     Ok(())
@@ -330,6 +349,10 @@ pub async fn enable_plugin(app: AppHandle, plugin_id: String) -> Result<(), Stri
 pub async fn get_plugin_manifest(plugin_id: String) -> Result<PluginManifest, String> {
     let plugin_dir = installer::resolve_plugin_dir(&plugin_id)?;
 
+    if super::extensions::read_package(&plugin_dir)?.0 == super::extensions::PackageKind::Extension
+    {
+        return super::extensions::manifest(&plugin_dir);
+    }
     let config: ConfigManifest = installer::read_manifest(&plugin_dir)
         .map_err(|e| format!("Failed to read manifest for '{}': {}", plugin_id, e))?;
 
@@ -466,11 +489,20 @@ pub fn read_plugin_file(plugin_id: String, file_path: String) -> Result<String, 
             "Invalid file path: must be relative and contain no '..' components".to_string(),
         );
     }
-    let full_path = installer::resolve_plugin_dir(&plugin_id)?.join(&file_path);
+    let full_path =
+        super::extensions::fenced_file(&installer::resolve_plugin_dir(&plugin_id)?, &file_path)?;
     fs::read_to_string(&full_path).map_err(|e| {
         format!(
             "Failed to read '{}' from plugin '{}': {}",
             file_path, plugin_id, e
         )
     })
+}
+
+#[tauri::command]
+pub fn read_plugin_asset(
+    plugin_id: String,
+    file_path: String,
+) -> Result<super::extensions::PluginAsset, String> {
+    super::extensions::read_asset(&installer::resolve_plugin_dir(&plugin_id)?, &file_path)
 }

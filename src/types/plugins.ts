@@ -222,6 +222,7 @@ export interface RegistryPluginWithStatus {
 }
 
 export interface InstalledPluginInfo {
+  kind?: "driver" | "extension";
   id: string;
   name: string;
   version: string;

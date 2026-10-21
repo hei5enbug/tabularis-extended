@@ -219,6 +219,7 @@ mod tests {
         let dir = TempDir::new().expect("create temp dir");
         let path = dir.path().join("connections.json");
         let file = ConnectionsFile {
+            source_revision: None,
             groups: Vec::new(),
             // Builtin "postgres" is always skipped, regardless of ssl_mode.
             connections: vec![saved_connection("postgres", Some("required"))],

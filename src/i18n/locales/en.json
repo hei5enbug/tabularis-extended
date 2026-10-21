@@ -2539,5 +2539,23 @@
     "modes": { "light": "Light", "dark": "Dark", "high-contrast": "High contrast" },
     "importErrors": { "unrecognized": "Not a recognized VS Code theme.", "modeRequired": "Choose a mode explicitly, then preview again.", "includeOnly": "Include-only themes cannot be imported. Supply the actual colors.", "noSupportedData": "No supported colors or SQL token rules were found.", "invalidColor": "A supported color has an invalid value.", "invalidRules": "Invalid or excessive token rules." },
     "diagnostics": { "unsupportedKey": "Unsupported field", "unsupportedColor": "Unsupported color", "unsupportedScope": "Unsupported scope", "scopeApproximation": "Approximate SQL scope mapping", "unsupportedStyle": "Unsupported style", "ignoredInclude": "Include not loaded", "ignoredSemanticTokens": "Semantic tokens ignored", "unsupportedReference": "External reference not loaded", "unsupportedSetting": "Unsupported setting", "tokenAlphaFlattened": "Token opacity materialized against the base background", "modeApproximation": "Mode overridden or approximated", "diagnosticsTruncated": "Additional diagnostics omitted" }
+  },
+  "serviceQuery": {
+      "failed": "The service request did not succeed.",
+      "connectionWrites": "Allow writes for this connection",
+      "executionWrites": "Allow writes when running",
+      "beginReadOnly": "Begin read-only",
+      "beginWrite": "Begin write",
+      "writeSession": "Write transaction open",
+      "readOnlySession": "Read-only transaction open",
+      "commit": "Commit",
+      "rollback": "Rollback",
+      "sessionRequired": "Begin a transaction before running all statements.",
+      "notRun": "Not run after an earlier statement failed.",
+      "schemaHint": "Use qualified SQL for a schema other than the connection default.",
+      "pending": "Waiting for the request or approval…",
+      "saveBeforeAuth": "Save the connection before signing in.",
+      "cosmosWorkspace": "Open the Cosmos workspace to query and edit documents.",
+      "copyLimited": "Copied {{count}} snapshot rows; the copy limit was reached."
   }
 }

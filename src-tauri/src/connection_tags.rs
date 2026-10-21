@@ -250,6 +250,7 @@ mod tests {
 
     fn file_with_tags(tags: &[(&str, &str)]) -> ConnectionsFile {
         ConnectionsFile {
+            source_revision: None,
             groups: vec![],
             connections: vec![],
             tags: tags

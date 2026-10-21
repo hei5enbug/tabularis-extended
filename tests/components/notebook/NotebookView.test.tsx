@@ -18,6 +18,7 @@ const fixtures = vi.hoisted(() => ({
     activeSchema: "active_schema" as string | null,
     activeCapabilities: null,
     selectedDatabases: [] as string[],
+    connections: [{ id: "notebook-connection", params: { driver: "postgres", database: "fixture" } }],
   },
   settings: { resultPageSize: 37, safetyConfirmationDelayEnabled: false },
   guardQuery: vi.fn(),
@@ -25,6 +26,10 @@ const fixtures = vi.hoisted(() => ({
   matchesShortcut: vi.fn(),
   showAlert: vi.fn(),
   mounts: new Map<string, number>(),
+}));
+
+vi.mock("../../../src/hooks/usePluginService", () => ({
+  usePluginService: () => ({ capabilities: async () => ({ service_protocol: 1, operations: [] }), call: vi.fn(), executeWrite: vi.fn() }),
 }));
 
 vi.mock("../../../src/hooks/useDatabase", () => ({

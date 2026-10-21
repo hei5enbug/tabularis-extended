@@ -60,13 +60,14 @@ fn kind_folder_aliases_preserve_unknown_kinds() {
     for (kind, folder) in [
         ("theme", "themes"),
         ("driver", "drivers"),
-        ("extension", "extension"),
+        ("extension", "extensions"),
         ("custom-kind", "custom-kind"),
     ] {
         assert_eq!(kind_directory(kind), folder);
     }
     assert!(is_kind_directory("themes"));
     assert!(is_kind_directory("drivers"));
+    assert!(is_kind_directory("extensions"));
     assert!(!is_kind_directory("theme"));
     assert!(!is_kind_directory("driver"));
 }

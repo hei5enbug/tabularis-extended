@@ -13,6 +13,7 @@ export interface TableColumn {
   name: string;
   data_type: string;
   is_pk: boolean;
+  primary_key_position?: number | null;
   is_nullable: boolean;
   is_auto_increment: boolean;
   is_generated?: boolean;
@@ -36,7 +37,8 @@ export interface SchemaCache {
 export interface QueryResult {
   columns: string[];
   rows: unknown[][];
-  affected_rows: number;
+  affected_rows: number | null;
+  service?: ServiceResultReference;
   truncated?: boolean;
   pagination?: Pagination;
   /// Extra result sets beyond the first one from a single statement, e.g. a
@@ -44,6 +46,32 @@ export interface QueryResult {
   /// `src-tauri/src/models.rs::QueryResult`; the first set stays in
   /// `columns` / `rows`.
   additional_results?: QueryResult[];
+}
+
+export interface ServiceResultReference {
+  resultId: string;
+  resultSetIndex: number;
+  resultGeneration: number;
+  resultRowOffset: number;
+  connectionId: string;
+  driverId: string;
+  resultRevision: string;
+  resultSetCount: number;
+  pageOffsets: number[];
+  pageSize: number;
+  nextToken: string | null;
+  resumeMode: "none" | "native" | "materialized";
+  kind: "tabular" | "documents" | "json_values";
+  columnMetadata: Record<string, unknown>[];
+  warnings: string[];
+  limitReasons: string[];
+  origin?: { database: string; container: string };
+}
+
+export interface ServiceQuerySession {
+  sessionId: string;
+  mode: "read_only" | "write";
+  connectionId: string;
 }
 
 /// One statement's outcome inside an `execute_query_batch` invocation.
@@ -103,6 +131,8 @@ export interface Tab {
   foreignKeys?: ForeignKey[]; // FK definitions for the active table (used for click-to-navigate)
   isLoading?: boolean;
   connectionId: string;
+  serviceSession?: ServiceQuerySession;
+  serviceAllowExecutionWrites?: boolean;
   flowState?: FlowState;
   pendingChanges?: Record<
     string,

@@ -72,7 +72,24 @@ pub fn get_app_data_dir() -> PathBuf {
 /// declarative theme packages live here as well, under `themes/<name>`;
 /// driver installs use `drivers/<name>`. Flat bundles remain a discovery fallback.
 pub fn get_plugins_dir() -> PathBuf {
-    get_default_app_data_dir().join("plugins")
+    get_plugins_dir_checked().expect("TABULARIS_PLUGIN_DIR must be an absolute path")
+}
+
+pub fn plugin_dir_override() -> Result<Option<PathBuf>, String> {
+    match std::env::var_os("TABULARIS_PLUGIN_DIR") {
+        Some(value) => {
+            let path = PathBuf::from(value);
+            if !path.is_absolute() {
+                return Err("TABULARIS_PLUGIN_DIR must be an absolute path".into());
+            }
+            Ok(Some(path))
+        }
+        None => Ok(None),
+    }
+}
+
+pub fn get_plugins_dir_checked() -> Result<PathBuf, String> {
+    Ok(plugin_dir_override()?.unwrap_or_else(|| get_default_app_data_dir().join("plugins")))
 }
 
 /// Directory holding custom connection icons, relative to which

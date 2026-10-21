@@ -1,3 +1,5 @@
+import type { ServiceResultReference } from "../../types/editor";
+import { snapshotSlotContext } from "../../utils/serviceQuery";
 import React, {
   useState,
   useEffect,
@@ -122,6 +124,8 @@ export interface DataGridCommandTarget {
 }
 
 interface DataGridProps {
+  serviceReference?: ServiceResultReference;
+  schema?: string | null;
   ref?: React.Ref<DataGridCommandTarget>;
   columns: string[];
   data: unknown[][];
@@ -243,6 +247,8 @@ export const DataGrid = React.memo(
     onForeignKeyShowPanel,
     onForeignKeyHidePanel,
     connectionId,
+    serviceReference,
+    schema,
     onRefresh,
     pendingChanges,
     pendingDeletions,
@@ -271,6 +277,9 @@ export const DataGrid = React.memo(
   }: DataGridProps) {
     const { t } = useTranslation();
     const { activeSchema, connections } = useDatabase();
+    const toolbarContext = { connectionId, tableName, schema: schema ?? activeSchema,
+      driver: serviceReference?.driverId ?? connections.find((connection) => connection.id === connectionId)?.params.driver,
+      ...snapshotSlotContext(serviceReference) };
     const guardProductionWrite = useProductionGuard();
     const { showAlert } = useAlert();
     const { showToast } = useToast();
@@ -846,7 +855,9 @@ export const DataGrid = React.memo(
         rightSidebar.openRowEditor({
           rowData,
           originalRowData,
-          rowIndex,
+          rowIndex: mergedRow.displayIndex,
+          serviceReference: isInsertion ? undefined : serviceReference,
+          readonly: readonlyProp,
           focusField,
           focusTrigger: focusField ? ++focusTriggerRef.current : undefined,
           isInsertion,
@@ -858,7 +869,7 @@ export const DataGrid = React.memo(
           connectionId,
           tableName,
           pkColumns,
-          schema: activeSchema,
+          schema: schema ?? activeSchema,
         });
       },
       // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -876,6 +887,9 @@ export const DataGrid = React.memo(
         pkColumns,
         activeSchema,
         rightSidebar.openRowEditor,
+        serviceReference,
+        readonlyProp,
+        schema,
       ],
     );
 
@@ -905,7 +919,9 @@ export const DataGrid = React.memo(
       rightSidebar.updateRowEditorData({
         rowData,
         originalRowData,
-        rowIndex,
+        rowIndex: mergedRow.displayIndex,
+        serviceReference: isInsertion ? undefined : serviceReference,
+        readonly: readonlyProp,
         isInsertion,
         focusField: undefined,
       });
@@ -921,6 +937,8 @@ export const DataGrid = React.memo(
       mergedRows,
       buildRowDataWithPending,
       columns,
+      serviceReference,
+      readonlyProp,
     ]);
 
     // Handle keyboard shortcut toggle: if sidebar is open, close it.
@@ -2638,6 +2656,7 @@ export const DataGrid = React.memo(
 
     return (
       <>
+        <SlotAnchor name="data-grid.toolbar.actions" context={toolbarContext} className="flex gap-2 shrink-0" />
         {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions -- focus host for the spreadsheet keyboard model (arrows, ranges, copy); a full ARIA grid needs per-cell roles and activedescendant */}
         <div
           ref={parentRef}
@@ -3100,9 +3119,11 @@ export const DataGrid = React.memo(
                     context={{
                       connectionId,
                       tableName,
-                      schema: activeSchema,
+                      schema: schema ?? activeSchema,
+                      driver: serviceReference?.driverId ?? connections.find((connection) => connection.id === connectionId)?.params.driver,
                       columnName: contextMenu.colName,
-                      rowIndex: contextMenu.rowIndex,
+                      rowIndex: mergedRows[contextMenu.rowIndex]?.displayIndex,
+                      ...snapshotSlotContext(serviceReference, mergedRows[contextMenu.rowIndex]?.displayIndex, mergedRows[contextMenu.rowIndex]?.type === "insertion"),
                       rowData: mergedRows[contextMenu.rowIndex]
                         ?.rowData as unknown as
                         | Record<string, unknown>

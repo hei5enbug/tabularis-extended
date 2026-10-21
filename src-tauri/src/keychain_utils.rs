@@ -4,6 +4,82 @@ use crate::sandbox::{self, Sandbox};
 
 const SERVICE_NAME: &str = "tabularis";
 
+fn service_secret_slot(
+    connection_id: &str,
+    slot: crate::services::credentials::SecretSlot,
+) -> Result<String, String> {
+    if connection_id.is_empty()
+        || connection_id.len() > 128
+        || connection_id.chars().any(char::is_control)
+    {
+        return Err("The connection identifier is invalid.".into());
+    }
+    Ok(match slot {
+        crate::services::credentials::SecretSlot::DbPassword => format!("{connection_id}:db"),
+        slot => format!("{connection_id}:service:{}", slot.name()),
+    })
+}
+
+pub fn set_service_secret(
+    connection_id: &str,
+    slot: crate::services::credentials::SecretSlot,
+    secret: &str,
+) -> Result<(), String> {
+    let entry = Entry::new(SERVICE_NAME, &service_secret_slot(connection_id, slot)?)
+        .map_err(|_| "The system keychain is unavailable.".to_owned())?;
+    entry
+        .set_password(secret)
+        .map_err(|_| "The system keychain is unavailable.".to_owned())
+}
+
+pub fn get_service_secret(
+    connection_id: &str,
+    slot: crate::services::credentials::SecretSlot,
+) -> Result<Option<String>, String> {
+    let entry = Entry::new(SERVICE_NAME, &service_secret_slot(connection_id, slot)?)
+        .map_err(|_| "The system keychain is unavailable.".to_owned())?;
+    match entry.get_password() {
+        Ok(secret) => Ok(Some(secret)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(_) => Err("The system keychain is unavailable.".into()),
+    }
+}
+
+pub fn delete_service_secret(
+    connection_id: &str,
+    slot: crate::services::credentials::SecretSlot,
+) -> Result<(), String> {
+    let entry = Entry::new(SERVICE_NAME, &service_secret_slot(connection_id, slot)?)
+        .map_err(|_| "The system keychain is unavailable.".to_owned())?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err("The system keychain is unavailable.".into()),
+    }
+}
+
+pub fn service_secret_store() -> std::sync::Arc<dyn crate::services::credentials::SecretStore> {
+    use crate::services::{
+        contracts::ErrorCode,
+        credentials::{CallbackSecretStore, Secret},
+        error::failure,
+    };
+    std::sync::Arc::new(CallbackSecretStore {
+        read: std::sync::Arc::new(|connection, slot| {
+            get_service_secret(connection, slot)
+                .map_err(|_| failure(ErrorCode::AuthRequired))?
+                .map(|secret| Secret::new(secret.into_bytes()))
+                .transpose()
+        }),
+        write: std::sync::Arc::new(|connection, slot, secret| {
+            set_service_secret(connection, slot, secret.expose())
+                .map_err(|_| failure(ErrorCode::AuthRequired))
+        }),
+        remove: std::sync::Arc::new(|connection, slot| {
+            delete_service_secret(connection, slot).map_err(|_| failure(ErrorCode::AuthRequired))
+        }),
+    })
+}
+
 /// Advice appended to keychain failures inside the Snap package.
 ///
 /// `password-manager-service` is declared as a plug but is not auto-connected

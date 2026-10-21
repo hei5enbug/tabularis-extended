@@ -92,6 +92,7 @@ async fn table_query_template_fallback_requires_the_remote_method_not_found_code
     let driver = reply(Err(PluginCallError::Remote(JsonRpcError {
         code: -32601,
         message: "localized missing method".into(),
+        data: None,
     })));
     assert_eq!(
         driver
@@ -104,6 +105,7 @@ async fn table_query_template_fallback_requires_the_remote_method_not_found_code
         PluginCallError::Remote(JsonRpcError {
             code: -32000,
             message: "method not found inside SQL".into(),
+            data: None,
         }),
         PluginCallError::Transport("-32601 transport failure".into()),
     ] {

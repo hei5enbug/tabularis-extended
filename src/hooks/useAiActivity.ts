@@ -199,17 +199,17 @@ export function usePendingApprovals(): UsePendingApprovalsResult {
       reason,
       editedQuery,
     }: ApprovalDecisionPayload) => {
-      await invoke("decide_pending_approval", {
-        approvalId,
-        decision,
-        reason,
-        editedQuery,
-      });
+      const approval = pending.find((item) => item.id === approvalId);
+      if (approval?.queryKind.startsWith("service:")) {
+        await invoke("service_approve", { approvalId, decision, reason });
+      } else {
+        await invoke("decide_pending_approval", { approvalId, decision, reason, editedQuery });
+      }
       // Optimistically drop the approval from the list — the file watcher
       // will reconcile if anything else changes.
       setPending((prev) => prev.filter((p) => p.id !== approvalId));
     },
-    [],
+    [pending],
   );
 
   return { pending, loading, error, refetch, decide };

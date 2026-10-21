@@ -10,6 +10,9 @@ fn process_with_settings() -> (Arc<PluginProcess>, mpsc::Receiver<PluginCommand>
         pid: None,
         initialization_settings: Some(HashMap::from([("region".into(), json!("eu"))])),
         initialized: OnceCell::new(),
+        service_capabilities: OnceCell::new(),
+        native_slots: tokio::sync::Semaphore::new(64),
+        control_slots: tokio::sync::Semaphore::new(8),
     };
     (Arc::new(process), receiver)
 }

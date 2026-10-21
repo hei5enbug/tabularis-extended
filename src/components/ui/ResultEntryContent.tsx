@@ -123,7 +123,8 @@ export function ResultEntryContent({
           data={entry.result.rows}
           tableName={null}
           pkColumns={null}
-          connectionId={connectionId}
+          connectionId={entry.result.service?.connectionId ?? connectionId}
+          serviceReference={entry.result.service}
           selectedRows={new Set()}
           onSelectionChange={() => {}}
           copyFormat={copyFormat}
@@ -176,7 +177,8 @@ export function ResultEntryContent({
           data={entry.result.rows}
           tableName={null}
           pkColumns={null}
-          connectionId={connectionId}
+          connectionId={entry.result.service?.connectionId ?? connectionId}
+          serviceReference={entry.result.service}
           selectedRows={new Set()}
           onSelectionChange={() => {}}
           copyFormat={copyFormat}

@@ -13,6 +13,8 @@ pub struct JsonRpcRequest {
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 /// Preserve remote error codes internally without changing legacy callers'

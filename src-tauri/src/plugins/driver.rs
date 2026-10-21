@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,7 +10,10 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, OnceCell};
 
-use crate::drivers::driver_trait::{BatchProgressFn, DatabaseDriver, PluginManifest};
+use crate::drivers::driver_trait::{
+    BatchProgressFn, DatabaseDriver, DriverServiceCapabilities, DriverServiceReadOnly,
+    PluginManifest, ServiceRpcMethod,
+};
 use crate::models::{
     AiSchemaContext, BatchStatementResult, ColumnDefinition, ConnectionParams, DataTypeInfo,
     DbPrivilegeCatalog, DbUserInfo, ExplainQueryOutput, ForeignKey, Index, QueryResult,
@@ -21,12 +24,19 @@ use crate::plugins::connection_metadata::{ConnectionMetadataCache, ConnectionMet
 use crate::plugins::rpc::{
     cancel_notification_line, JsonRpcRequest, JsonRpcResponse, PluginCallError,
 };
+use crate::services::{
+    backend::{CancellationSignal, DriverContext, TransientAuth},
+    contracts::{ErrorCode, Outcome, ServiceError, ServiceResponse},
+    error::{failure, redact_error, ServiceResult},
+};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
 /// The first operation waits for initialization of its own plugin only.
 const PLUGIN_INIT_TIMEOUT: Duration = Duration::from_secs(15);
+const MAX_RPC_FRAME_BYTES: usize = 16 * 1024 * 1024;
+const MAX_PENDING_REQUESTS: usize = 128;
 
 /// Flag to create the process without a console window on Windows.
 #[cfg(windows)]
@@ -122,6 +132,188 @@ enum PluginCommand {
     /// (timed out), and send the plugin a `cancel` notification for it.
     /// Prevents an unbounded leak of orphaned response senders.
     Cancel(u64),
+    NativeCall(
+        JsonRpcRequest,
+        oneshot::Sender<Result<Value, PluginCallError>>,
+        Arc<NativeDispatch>,
+    ),
+    DropNative(u64),
+}
+
+struct NativeDispatch {
+    attempted: AtomicBool,
+    abandoned: AtomicBool,
+    deadline: tokio::time::Instant,
+    signal: CancellationSignal,
+}
+struct PendingPluginRequest {
+    response: oneshot::Sender<Result<Value, PluginCallError>>,
+    native: Option<Arc<NativeDispatch>>,
+}
+struct NativeWaitGuard<'a> {
+    process: &'a PluginProcess,
+    id: u64,
+    dispatch: Arc<NativeDispatch>,
+}
+impl Drop for NativeWaitGuard<'_> {
+    fn drop(&mut self) {
+        self.dispatch.abandoned.store(true, Ordering::SeqCst);
+        let _ = self
+            .process
+            .sender
+            .try_send(PluginCommand::DropNative(self.id));
+    }
+}
+struct NativeFailure {
+    error: PluginCallError,
+    attempted: bool,
+}
+
+async fn read_plugin_frame<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut Vec<u8>,
+) -> std::io::Result<usize> {
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if buffer.is_empty() {
+                Ok(0)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "Incomplete plugin frame",
+                ))
+            };
+        }
+        let end = available.iter().position(|byte| *byte == b'\n');
+        let count = end.map_or(available.len(), |index| index + 1);
+        if buffer.len().saturating_add(count) > MAX_RPC_FRAME_BYTES + 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Plugin frame exceeds its limit",
+            ));
+        }
+        buffer.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if end.is_some() {
+            return Ok(buffer.len());
+        }
+    }
+}
+
+fn native_failure(error: NativeFailure) -> ServiceError {
+    if let PluginCallError::Remote(remote) = &error.error {
+        if let Some(data) = &remote.data {
+            if let Ok(error) = serde_json::from_value::<ServiceError>(data.clone()) {
+                return redact_error(error);
+            }
+        }
+    }
+    let mut result = failure(match &error.error {
+        PluginCallError::Transport(message)
+            if message == "native_frame_limit" || message == "native_pending_limit" =>
+        {
+            ErrorCode::ResourceLimit
+        }
+        PluginCallError::Transport(message) if message == "native_deadline" => {
+            ErrorCode::DeadlineExceeded
+        }
+        PluginCallError::Transport(message) if message == "native_cancelled" => {
+            ErrorCode::Cancelled
+        }
+        _ => ErrorCode::DriverExited,
+    });
+    if error.attempted {
+        result.code = ErrorCode::OutcomeUnknown;
+        result.outcome = Outcome::Unknown;
+        result.message = failure(ErrorCode::OutcomeUnknown).message;
+    }
+    result
+}
+
+fn parse_service_capabilities(value: &Value) -> ServiceResult<DriverServiceCapabilities> {
+    let value = value.get("result").unwrap_or(value);
+    let caps = value
+        .get("service_capabilities")
+        .ok_or_else(|| failure(ErrorCode::CapabilityUnavailable))?;
+    if caps
+        .get("service_protocol")
+        .or_else(|| caps.get("protocol_version"))
+        .and_then(Value::as_u64)
+        != Some(1)
+    {
+        return Err(failure(ErrorCode::ProtocolMismatch));
+    }
+    let boolean = |names: &[&str]| -> ServiceResult<bool> {
+        match names.iter().find_map(|name| caps.get(*name)) {
+            Some(value) => value
+                .as_bool()
+                .ok_or_else(|| failure(ErrorCode::InvalidArgument)),
+            None => Ok(false),
+        }
+    };
+    let documents = boolean(&["documents_v1"])?;
+    let read_only = if documents {
+        DriverServiceReadOnly::ReadOnlySdkOperations
+    } else {
+        match caps["readonly_guarantee"].as_str() {
+            Some("read_only_transaction") => DriverServiceReadOnly::ReadOnlyTransaction,
+            Some("restricted_database_principal") => {
+                DriverServiceReadOnly::RestrictedDatabasePrincipal
+            }
+            None => DriverServiceReadOnly::Unavailable,
+            _ => return Err(failure(ErrorCode::InvalidArgument)),
+        }
+    };
+    Ok(DriverServiceCapabilities {
+        service_protocol: 1,
+        exact_query: boolean(&["exact_query"])?,
+        spatial: boolean(&["spatial_v1"])?,
+        documents,
+        query_page: boolean(&["query_page_v1"])?,
+        cancel: boolean(&["cancel_v1", "cancel"])?,
+        sessions: boolean(&["sessions", "sessions_v1"])?,
+        catalog: boolean(&["catalog"])? || documents,
+        rows: boolean(&["rows"])?,
+        exact_affected_rows: boolean(&["exact_affected_rows"])?,
+        read_only,
+    })
+}
+
+fn driver_wire(
+    params: &ConnectionParams,
+    context: &DriverContext,
+    input: Value,
+    remaining_ms: u64,
+) -> Value {
+    let mut driver_context = json!({"protocol_version":1,"connection_id":context.connection_id,"request_id":context.request_id,"deadline_ms":remaining_ms,"read_only":context.read_only});
+    if let Some(handle) = &context.session_handle {
+        driver_context["session_handle"] = handle.clone().into();
+    }
+    if let Some(auth) = &context.transient_auth {
+        driver_context["auth"] = match auth {
+            TransientAuth::AccountKey { key, identity } => {
+                json!({"kind":"account_key","account_key":key.expose(),"identity":identity})
+            }
+            TransientAuth::DbPassword { password, identity } => {
+                json!({"kind":"db_password","password":password.expose(),"identity":identity})
+            }
+            TransientAuth::EntraToken {
+                access_token,
+                expires_at_ms,
+                tenant_id,
+                client_id,
+                principal_id,
+                scope,
+            } => {
+                let identity = crate::services::security::value_hash(
+                    &json!({"tenant_id":tenant_id,"client_id":client_id,"principal_id":principal_id,"scope":scope}),
+                );
+                json!({"kind":"entra_token","access_token":access_token.expose(),"expires_at_ms":expires_at_ms,"tenant_id":tenant_id,"client_id":client_id,"principal_id":principal_id,"scope":scope,"identity":identity})
+            }
+        };
+    }
+    json!({"params":params,"driver_context":driver_context,"input":input})
 }
 
 pub struct PluginProcess {
@@ -132,10 +324,168 @@ pub struct PluginProcess {
     shutdown_tx: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
     pub pid: Option<u32>,
     initialization_settings: Option<HashMap<String, Value>>,
-    initialized: OnceCell<()>,
+    initialized: OnceCell<Value>,
+    service_capabilities: OnceCell<DriverServiceCapabilities>,
+    native_slots: tokio::sync::Semaphore,
+    control_slots: tokio::sync::Semaphore,
 }
 
 impl PluginProcess {
+    async fn send_native(
+        &self,
+        method: &str,
+        params: Value,
+        deadline: tokio::time::Instant,
+        signal: &CancellationSignal,
+    ) -> Result<Value, NativeFailure> {
+        let dispatch = Arc::new(NativeDispatch {
+            attempted: AtomicBool::new(false),
+            abandoned: AtomicBool::new(false),
+            deadline,
+            signal: signal.clone(),
+        });
+        let error = |message: &str| NativeFailure {
+            error: PluginCallError::Transport(message.into()),
+            attempted: dispatch.attempted.load(Ordering::SeqCst),
+        };
+        if signal.is_cancelled() {
+            return Err(error("native_cancelled"));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error("native_deadline"));
+        }
+        let semaphore = if matches!(
+            method,
+            "initialize" | "cancel_request" | "service_invalidate_auth" | "service_session_discard"
+        ) {
+            &self.control_slots
+        } else {
+            &self.native_slots
+        };
+        let _permit = tokio::select! {
+            permit = semaphore.acquire() => permit.map_err(|_| error("Plugin transport stopped"))?,
+            _ = signal.cancelled() => return Err(error("native_cancelled")),
+            _ = tokio::time::sleep_until(deadline) => return Err(error("native_deadline")),
+        };
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".into(),
+            method: method.into(),
+            params,
+            id,
+        };
+        if serde_json::to_vec(&request).map_or(true, |bytes| bytes.len() > MAX_RPC_FRAME_BYTES) {
+            return Err(error("native_frame_limit"));
+        }
+        let (tx, rx) = oneshot::channel();
+        let _guard = NativeWaitGuard {
+            process: self,
+            id,
+            dispatch: dispatch.clone(),
+        };
+        tokio::select! {
+            sent = self.sender.send(PluginCommand::NativeCall(request, tx, dispatch.clone())) => sent.map_err(|_| error("Plugin transport stopped"))?,
+            _ = signal.cancelled() => return Err(error("native_cancelled")),
+            _ = tokio::time::sleep_until(deadline) => return Err(error("native_deadline")),
+        }
+        tokio::select! {
+            result = rx => match result { Ok(Ok(value)) => Ok(value), Ok(Err(remote)) => Err(NativeFailure { error: remote, attempted: dispatch.attempted.load(Ordering::SeqCst) }), Err(_) => Err(error("Plugin transport stopped")) },
+            _ = signal.cancelled() => Err(error("native_cancelled")),
+            _ = tokio::time::sleep_until(deadline) => Err(error("native_deadline")),
+        }
+    }
+
+    async fn legacy_service_initialize(
+        &self,
+        settings: Value,
+        deadline: tokio::time::Instant,
+        signal: &CancellationSignal,
+    ) -> ServiceResult<Value> {
+        match self
+            .send_native("initialize", json!({"settings":settings}), deadline, signal)
+            .await
+        {
+            Ok(value) => Ok(value),
+            Err(NativeFailure {
+                error: PluginCallError::Remote(error),
+                ..
+            }) if error.code == -32601 => Ok(Value::Null),
+            Err(mut error) => {
+                error.attempted = false;
+                Err(native_failure(error))
+            }
+        }
+    }
+    async fn negotiate_service(
+        &self,
+        deadline: tokio::time::Instant,
+        signal: &CancellationSignal,
+    ) -> ServiceResult<DriverServiceCapabilities> {
+        let result = self
+            .service_capabilities
+            .get_or_try_init(|| async {
+                let settings = self
+                    .initialization_settings
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_default();
+                if self.plugin_id == "cosmos-nosql" {
+                    let value = self
+                        .initialized
+                        .get_or_try_init(|| async {
+                            self.legacy_service_initialize(
+                                serde_json::to_value(settings)
+                                    .map_err(|_| failure(ErrorCode::InvalidArgument))?,
+                                deadline,
+                                signal,
+                            )
+                            .await
+                        })
+                        .await?;
+                    return parse_service_capabilities(value);
+                }
+                let value = match self
+                    .send_native(
+                        "initialize",
+                        json!({"settings":settings,"service_protocol":1}),
+                        deadline,
+                        signal,
+                    )
+                    .await
+                {
+                    Ok(value) if !value.is_null() => value,
+                    Ok(_) => {
+                        self.legacy_service_initialize(
+                            serde_json::to_value(settings)
+                                .map_err(|_| failure(ErrorCode::InvalidArgument))?,
+                            deadline,
+                            signal,
+                        )
+                        .await?
+                    }
+                    Err(NativeFailure {
+                        error: PluginCallError::Remote(error),
+                        ..
+                    }) if error.code == -32601 => {
+                        self.legacy_service_initialize(
+                            serde_json::to_value(settings)
+                                .map_err(|_| failure(ErrorCode::InvalidArgument))?,
+                            deadline,
+                            signal,
+                        )
+                        .await?
+                    }
+                    Err(mut error) => {
+                        error.attempted = false;
+                        return Err(native_failure(error));
+                    }
+                };
+                let _ = self.initialized.set(value.clone());
+                parse_service_capabilities(&value)
+            })
+            .await;
+        result.cloned()
+    }
     async fn new(
         plugin_id: String,
         executable_path: PathBuf,
@@ -187,92 +537,81 @@ impl PluginProcess {
             let stdout = child.stdout.take().expect("Failed to open stdout");
             let mut reader = BufReader::new(stdout);
 
-            let mut pending_requests: HashMap<
-                u64,
-                oneshot::Sender<Result<Value, PluginCallError>>,
-            > = HashMap::new();
-            let mut line_buf = String::new();
-
+            let mut pending_requests: HashMap<u64, PendingPluginRequest> = HashMap::new();
+            let mut line_buf = Vec::new();
             loop {
+                pending_requests.retain(|_, pending| !pending.response.is_closed());
                 tokio::select! {
-                    _ = &mut shutdown_rx => {
-                        log::info!("Plugin process shutdown requested, terminating child");
-                        let _ = child.kill().await;
-                        break;
-                    }
+                    _ = &mut shutdown_rx => break,
                     msg = rx.recv() => {
-                        match msg {
-                            Some(PluginCommand::Call(req, resp_tx)) => {
-                                let id = req.id;
-                                pending_requests.insert(id, resp_tx);
-
-                                let mut req_str = serde_json::to_string(&req).unwrap();
-                                req_str.push('\n');
-
-                                if let Err(e) = stdin.write_all(req_str.as_bytes()).await {
-                                    log::error!("Failed to write to plugin stdin: {}", e);
-                                    if let Some(tx) = pending_requests.remove(&id) {
-                                        let _ = tx.send(Err(format!("Plugin communication error: {}", e).into()));
-                                    }
-                                }
-                            }
+                        let (request, response, native) = match msg {
+                            Some(PluginCommand::Call(request, response)) => (request, response, None),
+                            Some(PluginCommand::NativeCall(request, response, dispatch)) => (request, response, Some(dispatch)),
+                            Some(PluginCommand::DropNative(id)) => { pending_requests.remove(&id); continue; },
                             Some(PluginCommand::Cancel(id)) => {
-                                // Caller timed out; drop the orphaned sender so
-                                // pending_requests does not grow without bound.
-                                // If it was still pending, ask the plugin to stop
-                                // the work too, so e.g. a SQL statement does not
-                                // keep running on the server after the error.
                                 if pending_requests.remove(&id).is_some() {
                                     let line = cancel_notification_line(id);
-                                    if let Err(e) = stdin.write_all(line.as_bytes()).await {
-                                        log::warn!(
-                                            "Failed to send cancel for plugin request {}: {}",
-                                            id,
-                                            e
-                                        );
-                                    }
+                                    if !matches!(tokio::time::timeout(PLUGIN_INIT_TIMEOUT, stdin.write_all(line.as_bytes())).await, Ok(Ok(()))) { break; }
                                 }
+                                continue;
+                            },
+                            None => break,
+                        };
+                        if response.is_closed() { continue; }
+                        if pending_requests.len() >= MAX_PENDING_REQUESTS {
+                            let _ = response.send(Err(PluginCallError::Transport("native_pending_limit".into()))); continue;
+                        }
+                        if let Some(dispatch) = &native {
+                            if dispatch.abandoned.load(Ordering::SeqCst) || dispatch.signal.is_cancelled() {
+                                let _ = response.send(Err(PluginCallError::Transport("native_cancelled".into()))); continue;
                             }
-                            None => {
-                                // Channel closed without explicit shutdown — kill the process anyway.
-                                log::warn!("Plugin process channel closed without shutdown signal, terminating child");
-                                let _ = child.kill().await;
-                                break;
+                            if tokio::time::Instant::now() >= dispatch.deadline {
+                                let _ = response.send(Err(PluginCallError::Transport("native_deadline".into()))); continue;
                             }
                         }
+                        let mut encoded = match serde_json::to_vec(&request) {
+                            Ok(encoded) if encoded.len() <= MAX_RPC_FRAME_BYTES => encoded,
+                            _ => { let _ = response.send(Err(PluginCallError::Transport("native_frame_limit".into()))); continue; },
+                        };
+                        encoded.push(b'\n');
+                        let id = request.id;
+                        pending_requests.insert(id, PendingPluginRequest { response, native: native.clone() });
+                        let written = if let Some(dispatch) = &native {
+                            dispatch.attempted.store(true, Ordering::SeqCst);
+                            tokio::select! {
+                                result = stdin.write_all(&encoded) => result.is_ok(),
+                                _ = tokio::time::sleep_until(dispatch.deadline) => false,
+                                _ = dispatch.signal.cancelled() => false,
+                            }
+                        } else { matches!(tokio::time::timeout(PLUGIN_INIT_TIMEOUT, stdin.write_all(&encoded)).await, Ok(Ok(()))) };
+                        if !written { break; }
                     }
-                    line_result = reader.read_line(&mut line_buf) => {
-                        match line_result {
-                            Ok(0) => {
-                                log::error!("Plugin process exited unexpectedly");
-                                break;
-                            }
+                    frame = read_plugin_frame(&mut reader, &mut line_buf) => {
+                        match frame {
+                            Ok(0) | Err(_) => break,
                             Ok(_) => {
-                                match serde_json::from_str::<JsonRpcResponse>(&line_buf) {
-                                    Ok(JsonRpcResponse::Success { result, id, .. }) => {
-                                        if let Some(tx) = pending_requests.remove(&id) {
-                                            let _ = tx.send(Ok(result));
-                                        }
-                                    }
-                                    Ok(JsonRpcResponse::Error { error, id, .. }) => {
-                                        if let Some(tx) = pending_requests.remove(&id) {
-                                            let _ = tx.send(Err(PluginCallError::Remote(error)));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        log::error!("Failed to parse plugin response: {}", e);
-                                    }
-                                }
+                                if line_buf.last() == Some(&b'\n') { line_buf.pop(); }
+                                if line_buf.len() > MAX_RPC_FRAME_BYTES { break; }
+                                let response = match serde_json::from_slice::<JsonRpcResponse>(&line_buf) { Ok(response) => response, Err(_) => break };
                                 line_buf.clear();
-                            }
-                            Err(e) => {
-                                log::error!("Failed to read from plugin stdout: {}", e);
-                                break;
+                                let (id, outcome) = match response {
+                                    JsonRpcResponse::Success { jsonrpc, result, id } if jsonrpc == "2.0" => (id, Ok(result)),
+                                    JsonRpcResponse::Error { jsonrpc, error, id } if jsonrpc == "2.0" => (id, Err(PluginCallError::Remote(error))),
+                                    _ => break,
+                                };
+                                if let Some(pending) = pending_requests.remove(&id) { let _ = pending.response.send(outcome); }
                             }
                         }
                     }
                 }
             }
+            for (_, pending) in pending_requests {
+                let _ = pending.native;
+                let _ = pending.response.send(Err(PluginCallError::Transport(
+                    "Plugin transport stopped".into(),
+                )));
+            }
+            let _ = child.kill().await;
         });
 
         Ok(Self {
@@ -283,6 +622,9 @@ impl PluginProcess {
             pid,
             initialization_settings: None,
             initialized: OnceCell::new(),
+            service_capabilities: OnceCell::new(),
+            native_slots: tokio::sync::Semaphore::new(64),
+            control_slots: tokio::sync::Semaphore::new(8),
         })
     }
 
@@ -310,7 +652,7 @@ impl PluginProcess {
                 .get_or_init(|| async {
                     // Older plugins may not implement initialize. Preserve that
                     // compatibility, but serialize concurrent first calls behind it.
-                    if let Err(error) = self
+                    match self
                         .send_request(
                             "initialize",
                             json!({ "settings": settings }),
@@ -318,7 +660,11 @@ impl PluginProcess {
                         )
                         .await
                     {
-                        log::warn!("Plugin initialization failed (pid {:?}): {}", self.pid, error);
+                        Ok(value) => value,
+                        Err(_) => {
+                            log::warn!("Plugin initialization is unavailable (pid {:?})", self.pid);
+                            Value::Null
+                        }
                     }
                 })
                 .await;
@@ -428,6 +774,108 @@ impl RpcDriver {
 
 #[async_trait]
 impl DatabaseDriver for RpcDriver {
+    async fn service_capabilities(&self) -> ServiceResult<DriverServiceCapabilities> {
+        self.process
+            .negotiate_service(
+                tokio::time::Instant::now() + PLUGIN_INIT_TIMEOUT,
+                &CancellationSignal::default(),
+            )
+            .await
+    }
+    async fn service_call(
+        &self,
+        method: ServiceRpcMethod,
+        params: &ConnectionParams,
+        context: &DriverContext,
+        input: Value,
+    ) -> ServiceResult<Value> {
+        if context.deadline_ms == 0
+            || context.deadline_ms > 120_000
+            || params.driver != self.manifest.id
+            || context.connection_id.is_empty()
+            || context.connection_id.len() > 128
+            || context.request_id.is_empty()
+            || context.request_id.len() > 128
+        {
+            return Err(failure(ErrorCode::InvalidArgument));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(context.deadline_ms);
+        let capabilities = tokio::select! {
+            result = self.process.negotiate_service(deadline, &context.signal) => result?,
+            _ = tokio::time::sleep_until(deadline) => return Err(failure(ErrorCode::DeadlineExceeded)),
+            _ = context.signal.cancelled() => return Err(failure(ErrorCode::Cancelled)),
+        };
+        if !capabilities.supports(method) {
+            return Err(failure(ErrorCode::CapabilityUnavailable));
+        }
+        let remaining = deadline
+            .saturating_duration_since(tokio::time::Instant::now())
+            .as_millis() as u64;
+        if remaining == 0 {
+            return Err(failure(ErrorCode::DeadlineExceeded));
+        }
+        let wire = driver_wire(params, context, input, remaining);
+        let value = self
+            .process
+            .send_native(method.name(), wire, deadline, &context.signal)
+            .await
+            .map_err(native_failure)?;
+        if value.get("protocol_version").is_some() || value.get("status").is_some() {
+            let response: ServiceResponse = serde_json::from_value(value).map_err(|_| {
+                let mut error = failure(ErrorCode::OutcomeUnknown);
+                error.outcome = Outcome::Unknown;
+                error
+            })?;
+            if response.protocol_version != 1
+                || response.request_id != context.request_id
+                || response.connection_id.as_deref() != Some(&context.connection_id)
+            {
+                let mut error = failure(ErrorCode::OutcomeUnknown);
+                error.outcome = Outcome::Unknown;
+                return Err(error);
+            }
+            if let Some(error) = response.error {
+                return Err(redact_error(error));
+            }
+            if response.status != crate::services::contracts::JobStatus::Succeeded {
+                let mut error = failure(ErrorCode::OutcomeUnknown);
+                error.outcome = Outcome::Unknown;
+                return Err(error);
+            }
+            return Ok(
+                json!({"data":response.data,"metrics":response.metrics,"limits":response.limits,"warnings":response.warnings}),
+            );
+        }
+        Ok(value)
+    }
+    async fn service_cancel(&self, connection_id: &str, request_id: &str) -> ServiceResult<()> {
+        if connection_id.is_empty()
+            || connection_id.len() > 128
+            || request_id.is_empty()
+            || request_id.len() > 128
+        {
+            return Err(failure(ErrorCode::InvalidArgument));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let signal = CancellationSignal::default();
+        let capabilities =
+            tokio::time::timeout_at(deadline, self.process.negotiate_service(deadline, &signal))
+                .await
+                .map_err(|_| failure(ErrorCode::DeadlineExceeded))??;
+        if !capabilities.cancel {
+            return Err(failure(ErrorCode::CapabilityUnavailable));
+        }
+        self.process
+            .send_native(
+                "cancel_request",
+                json!({"connection_id":connection_id,"request_id":request_id}),
+                deadline,
+                &signal,
+            )
+            .await
+            .map_err(native_failure)?;
+        Ok(())
+    }
     fn has_connection_metadata(&self) -> bool {
         self.connection_metadata
     }
@@ -1716,6 +2164,9 @@ where
             pid: None,
             initialization_settings: None,
             initialized: OnceCell::new(),
+            service_capabilities: OnceCell::new(),
+            native_slots: tokio::sync::Semaphore::new(64),
+            control_slots: tokio::sync::Semaphore::new(8),
         }),
         data_types: Vec::new(),
         connection_metadata: false,
@@ -2665,6 +3116,9 @@ mod tests {
                 pid: None,
                 initialization_settings: None,
                 initialized: OnceCell::new(),
+                service_capabilities: OnceCell::new(),
+                native_slots: tokio::sync::Semaphore::new(64),
+                control_slots: tokio::sync::Semaphore::new(8),
             }),
             data_types: Vec::new(),
             connection_metadata: false,
@@ -2697,6 +3151,9 @@ mod tests {
                 pid: None,
                 initialization_settings: None,
                 initialized: OnceCell::new(),
+                service_capabilities: OnceCell::new(),
+                native_slots: tokio::sync::Semaphore::new(64),
+                control_slots: tokio::sync::Semaphore::new(8),
             }),
             data_types: Vec::new(),
             connection_metadata: false,
@@ -2720,3 +3177,7 @@ mod startup_tests;
 #[cfg(test)]
 #[path = "cancel_tests.rs"]
 mod cancel_tests;
+
+#[cfg(test)]
+#[path = "native_tests.rs"]
+pub(crate) mod native_tests;

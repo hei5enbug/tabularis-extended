@@ -12,6 +12,7 @@ import type { ComponentType } from "react";
  * `src/contexts/PluginSlotProvider.tsx` and related renderers.
  */
 export type SlotContextMap = {
+  "app.map.renderer": object;
   "row-edit-modal.field.after": {
     connectionId: string;
     tableName: string;
@@ -104,7 +105,7 @@ export type SlotName = keyof SlotContextMap;
  * Props passed to a slot component that used `defineSlot`.
  */
 export interface TypedSlotProps<S extends SlotName> {
-  context: SlotContextMap[S];
+  context: SlotContextMap[S] & Pick<SlotContext, "resultId" | "resultSetIndex" | "resultGeneration" | "resultRowOrdinal">;
   pluginId: string;
 }
 
@@ -113,6 +114,10 @@ export interface TypedSlotProps<S extends SlotName> {
  * written before the typed-slot contract existed. Prefer `defineSlot`.
  */
 export interface SlotContext {
+  resultId?: string;
+  resultSetIndex?: number;
+  resultGeneration?: number;
+  resultRowOrdinal?: number;
   connectionId?: string | null;
   tableName?: string | null;
   schema?: string | null;

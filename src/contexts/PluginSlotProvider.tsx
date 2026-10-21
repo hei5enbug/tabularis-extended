@@ -26,7 +26,7 @@ interface PluginSlotProviderProps {
  * Keep in sync with `packages/plugin-api/src/version.ts` (API_VERSION).
  * Bump when the host API shape changes in a way plugin bundles can observe.
  */
-const HOST_API_VERSION = "0.1.1";
+const HOST_API_VERSION = "0.2.0";
 
 let globalsExposed = false;
 function exposePluginGlobals() {
@@ -105,10 +105,12 @@ async function loadExternalPluginContributions(
       );
       const raw = fn(React, ReactJSXRuntime, pluginApi) as unknown;
       // Support both direct export (`return Component`) and ES-module style (`return { default: Component }`).
-      const component =
+      const candidate =
         typeof raw === "function"
           ? raw
           : (raw as { default?: unknown } | null)?.default ?? null;
+      const component = typeof candidate === "object" && candidate !== null && "component" in candidate
+        ? (candidate as { component: unknown }).component : candidate;
 
       if (!component || typeof component !== "function") {
         console.warn(

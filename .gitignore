@@ -40,3 +40,17 @@ AGENTS.override.md
 .claude/*
 !.claude/skills/
 !.claude/skills/**
+
+.azure/
+azure-local/
+*.azure.local.json
+*.token
+*.kubeconfig
+.env
+.env.*
+credentials.json
+secrets.json
+*.pem
+*.key
+*.pfx
+*.p12

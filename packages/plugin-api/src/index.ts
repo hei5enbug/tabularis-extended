@@ -8,6 +8,8 @@
 
 export {
   usePluginQuery,
+  usePluginService,
+  usePluginAssets,
   usePluginConnection,
   usePluginToast,
   usePluginSetting,
@@ -40,6 +42,14 @@ export type {
   PluginTranslator,
   TabularisHostApi,
   UsePluginQueryReturn,
+  UsePluginServiceReturn,
+  PluginCredentialSlot,
+  UsePluginAssetsReturn,
+  ServiceCapabilities,
+  PluginMapApplyRequest,
+  PluginMapApplyAck,
+  ServiceRequest,
+  ServiceResponse,
   UsePluginConnectionReturn,
   UsePluginToastReturn,
   UsePluginSettingReturn,

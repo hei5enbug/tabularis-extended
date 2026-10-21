@@ -11,6 +11,10 @@ export { usePluginQuery, usePluginConnection, usePluginToast, usePluginSetting, 
 // Types
 export type { SlotComponentProps, SlotContext, SlotName } from "./types/pluginSlots";
 export type { PluginModalOptions } from "./contexts/PluginModalContext";
+export { usePluginService } from "./hooks/usePluginService";
+export { usePluginAssets } from "./hooks/usePluginAssets";
+export type { ServiceRequest, ServiceResponse } from "@tabularis/service-contracts";
+export type { PluginMapApplyRequest, PluginMapApplyAck } from "../packages/plugin-api/src/types";
 
 // Slot registration helper — must be exposed via __TABULARIS_API__ so plugin
 // IIFE bundles that externalize @tabularis/plugin-api can call defineSlot().

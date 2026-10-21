@@ -1,4 +1,39 @@
 import type { ReactNode } from "react";
+import type { JsonValue, Operation, ServiceRequest, ServiceResponse } from "@tabularis/service-contracts";
+
+export type { ServiceRequest, ServiceResponse } from "@tabularis/service-contracts";
+export interface ServiceCapabilities {
+  service_protocol: 1;
+  operations: Operation[];
+  spatial_v1: boolean;
+  documents_v1: boolean;
+  cancel_v1: boolean;
+  gui_instance_id?: string;
+}
+export interface PluginMapApplyRequest {
+  map_id: string;
+  state_version: number;
+  generation: number;
+  state: JsonValue;
+}
+export interface PluginMapApplyAck {
+  state_version: number;
+  rendered_version: number | null;
+  generation: number;
+  gui_applied: boolean;
+}
+export type PluginCredentialSlot = ServiceRequest<"credential.import">["input"]["slot"];
+export interface UsePluginServiceReturn {
+  importCredential(connectionId: string, slot: PluginCredentialSlot, secret: string, options: { persistence: "keychain" | "session"; signal?: AbortSignal }): Promise<ServiceResponse>;
+  call(request: ServiceRequest, options?: { signal?: AbortSignal }): Promise<ServiceResponse>;
+  executeWrite(request: ServiceRequest<"query.execute">, options?: { signal?: AbortSignal }): Promise<ServiceResponse>;
+  saveArtifact(artifactId: string): Promise<boolean>;
+  capabilities(connectionId: string): Promise<ServiceCapabilities>;
+  subscribeMap(handler: (request: PluginMapApplyRequest) => Promise<PluginMapApplyAck>): Promise<() => void>;
+}
+export interface UsePluginAssetsReturn {
+  resolve(filePath: string): Promise<{ url: string; dispose(): void }>;
+}
 
 export interface PluginModalOptions {
   title: string;
@@ -119,6 +154,8 @@ export type PluginTranslator = (key: string, options?: Record<string, unknown>) 
  * import the named hooks/helpers from `@tabularis/plugin-api` instead.
  */
 export interface TabularisHostApi {
+  usePluginService: () => UsePluginServiceReturn;
+  usePluginAssets: (pluginId: string) => UsePluginAssetsReturn;
   usePluginQuery: () => UsePluginQueryReturn;
   usePluginConnection: () => UsePluginConnectionReturn;
   usePluginToast: () => UsePluginToastReturn;

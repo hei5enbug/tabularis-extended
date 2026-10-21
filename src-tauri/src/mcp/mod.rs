@@ -25,6 +25,7 @@ pub mod install;
 mod output;
 pub mod preflight;
 pub mod protocol;
+pub mod service_adapter;
 use cooldown::{DISABLE_CHECK_COOLDOWN, RELOAD_COOLDOWN};
 use output::{OutputFormatError, ToolOutputFormat};
 use protocol::*;
@@ -70,6 +71,13 @@ impl CallAudit {
 async fn expand_ssh_params_for_mcp(
     params: &ConnectionParams,
 ) -> Result<ConnectionParams, JsonRpcError> {
+    expand_ssh_params_for_mcp_in(&paths::get_app_config_dir(), params).await
+}
+
+pub(crate) async fn expand_ssh_params_for_mcp_in(
+    profile: &std::path::Path,
+    params: &ConnectionParams,
+) -> Result<ConnectionParams, JsonRpcError> {
     let mut expanded = params.clone();
 
     if !params.ssh_enabled.unwrap_or(false) {
@@ -81,7 +89,7 @@ async fn expand_ssh_params_for_mcp(
         None => return Ok(expanded), // legacy inline SSH fields already present
     };
 
-    let ssh_path = paths::get_app_config_dir().join("ssh_connections.json");
+    let ssh_path = profile.join("ssh_connections.json");
     if !ssh_path.exists() {
         return Err(JsonRpcError {
             code: -32000,
@@ -171,6 +179,13 @@ async fn expand_ssh_params_for_mcp(
 async fn expand_k8s_params_for_mcp(
     params: &ConnectionParams,
 ) -> Result<ConnectionParams, JsonRpcError> {
+    expand_k8s_params_for_mcp_in(&paths::get_app_config_dir(), params).await
+}
+
+pub(crate) async fn expand_k8s_params_for_mcp_in(
+    profile: &std::path::Path,
+    params: &ConnectionParams,
+) -> Result<ConnectionParams, JsonRpcError> {
     let mut expanded = params.clone();
 
     if !params.k8s_enabled.unwrap_or(false) {
@@ -182,7 +197,7 @@ async fn expand_k8s_params_for_mcp(
         None => return Ok(expanded),
     };
 
-    let k8s_path = paths::get_app_config_dir().join("k8s_connections.json");
+    let k8s_path = profile.join("k8s_connections.json");
     if !k8s_path.exists() {
         return Err(JsonRpcError {
             code: -32000,
@@ -319,7 +334,7 @@ async fn resolve_db_params(
 /// `active_external_drivers` preference. Without this, MCP can only reach
 /// mysql/postgres/sqlite connections — every other driver fails with
 /// "Unsupported driver".
-async fn register_drivers_for_mcp() {
+pub(crate) async fn register_drivers_for_mcp() {
     driver_registry::register_driver(mysql::MysqlDriver::new()).await;
     driver_registry::register_driver(postgres::PostgresDriver::new()).await;
     driver_registry::register_driver(sqlite::SqliteDriver::new()).await;

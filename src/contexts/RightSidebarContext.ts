@@ -1,8 +1,11 @@
+import type { ServiceResultReference } from "../types/editor";
 import { createContext, type MutableRefObject } from "react";
 
 export type RightSidebarPanel = "row-editor" | null;
 
 export interface RowEditorPanelData {
+	serviceReference?: ServiceResultReference;
+	readonly?: boolean;
 	rowData: Record<string, unknown>;
 	originalRowData?: Record<string, unknown>;
 	rowIndex: number;

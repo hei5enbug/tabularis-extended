@@ -49,6 +49,8 @@ export const RightSidebar = () => {
 					rowData={rowEditorData.rowData}
 					originalRowData={rowEditorData.originalRowData}
 					rowIndex={rowEditorData.rowIndex}
+					serviceReference={rowEditorData.serviceReference}
+					readonly={rowEditorData.readonly}
 					isInsertion={rowEditorData.isInsertion}
 					columns={rowEditorData.columns}
 					autoIncrementColumns={rowEditorData.autoIncrementColumns}

@@ -51,5 +51,8 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "dependencies": {
+    "@tabularis/service-contracts": "workspace:*"
   }
 }

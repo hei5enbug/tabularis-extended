@@ -4,6 +4,7 @@ import type { ComponentType } from "react";
  * All built-in slot locations where plugins can inject UI.
  */
 export type SlotName =
+  | "app.map.renderer"
   | "row-edit-modal.field.after"
   | "row-edit-modal.footer.before"
   | "row-editor-sidebar.field.after"
@@ -21,6 +22,7 @@ export type SlotName =
  * Single source of truth — import this instead of redefining locally.
  */
 export const VALID_SLOTS: ReadonlySet<string> = new Set<SlotName>([
+  "app.map.renderer",
   "row-edit-modal.field.after",
   "row-edit-modal.footer.before",
   "row-editor-sidebar.field.after",
@@ -38,6 +40,10 @@ export const VALID_SLOTS: ReadonlySet<string> = new Set<SlotName>([
  * Context data provided to every slot component via props.
  */
 export interface SlotContext {
+  resultId?: string;
+  resultSetIndex?: number;
+  resultGeneration?: number;
+  resultRowOrdinal?: number;
   /** Active connection identifier */
   connectionId?: string | null;
   /** Current table name */

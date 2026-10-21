@@ -1,3 +1,4 @@
+import { SlotAnchor } from "./components/ui/SlotAnchor";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
@@ -122,6 +123,7 @@ export function App() {
           <KeybindingsProvider>
             <PluginSlotProvider>
               <PluginModalProvider>
+                <SlotAnchor name="app.map.renderer" context={{}} />
                 <ConnectionLayoutProvider>
                   <RightSidebarProvider>
                     <Suspense fallback={<LoadingState />}>
