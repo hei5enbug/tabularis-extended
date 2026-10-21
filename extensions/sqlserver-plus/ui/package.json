@@ -2,7 +2,7 @@
   "name": "@tabularis/sqlserver-plugin-ui",
   "private": true,
   "version": "1.0.0-beta.3",
-  "description": "Connection-modal UI extension for the SQL Server plugin (Windows Authentication checkbox).",
+  "description": "Connection-modal authentication UI for the SQL Server Plus driver.",
   "type": "module",
   "scripts": {
     "build": "vite build",
@@ -10,7 +10,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@tabularis/plugin-api": "link:../../tabularis-spatial/build-support/sdk/packages/plugin-api",
+    "@tabularis/plugin-api": "link:../../../packages/plugin-api",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "5.2.0",

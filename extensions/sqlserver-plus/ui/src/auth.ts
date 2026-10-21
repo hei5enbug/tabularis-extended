@@ -1,193 +1,125 @@
-import type { ServiceRequest, ServiceResponse, UsePluginServiceReturn } from "@tabularis/plugin-api";
+export const DRIVER_ID = "sqlserver-plus";
+export const REQUIRED_HOST = "Tabularis Extended 0.27.0+extended.1";
+export const AZURE_CLI_SOURCE = "azure_cli";
 
-export type AuthMode = "sql_password" | "integrated" | "entra_user" | "entra_service_principal";
-export type EntraMode = Extract<AuthMode, "entra_user" | "entra_service_principal">;
-export type Persistence = "session" | "keychain";
-export interface AuthSettings { mode: AuthMode | null; tenant: string; client: string; source?: "oauth" | "azure_cli" }
-export interface AuthStatus {
-  jobId: string;
-  state: "pending" | "interaction_required" | "authenticated" | "cancelled" | "failed";
-  challenge: { code: string; url: string | null } | null;
-  errorCode: string | null;
+export const AUTH_MODES = ["sql_password", "integrated", "entra_user"] as const;
+export type AuthMode = (typeof AUTH_MODES)[number];
+
+export const ENTRA_KEYS = ["auth_source", "tenant_id", "entra_object_id", "azure_cli_path"] as const;
+
+export type Extra = Readonly<Record<string, string>>;
+export type FieldChange = readonly [key: string, value: string];
+
+export type IssueKey =
+  | "auth_mode"
+  | "integrated_auth"
+  | "entra_keys"
+  | "auth_source"
+  | "tenant_id"
+  | "entra_object_id"
+  | "azure_cli_path";
+
+export interface Issue {
+  key: IssueKey;
+  message: string;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const CONTROLS = /[\u0000-\u001f\u007f-\u009f]/;
-export const POLL_INTERVAL_MS = 1_000;
-export const POLL_LIMIT = 900;
-export const POLL_DURATION_MS = 15 * 60_000;
+const TRUE_VALUES = new Set(["true", "yes", "on", "1"]);
+const TENANT = /^(?!-)[A-Za-z0-9.-]+$/;
+const WINDOWS_DRIVE_PATH = /^[A-Za-z]:[\\/]/;
+const WINDOWS_UNC_PATH = /^\\\\[^\\]/;
 
-export class AuthFault extends Error {
-  constructor(readonly kind: "stale" | "failed" | "denied" | "unknown" | "malformed" | "capability") {
-    super(kind);
+function has(extra: Extra, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(extra, key);
+}
+
+export function isEnabled(value: string | undefined): boolean {
+  return value !== undefined && TRUE_VALUES.has(value.trim().toLowerCase());
+}
+
+/** Reads the mode the driver will use; `null` means the driver rejects the stored value. */
+export function authMode(extra: Extra): AuthMode | null {
+  if (!has(extra, "auth_mode")) return isEnabled(extra.integrated_auth) ? "integrated" : "sql_password";
+  const mode = extra.auth_mode;
+  return (AUTH_MODES as readonly string[]).includes(mode) ? (mode as AuthMode) : null;
+}
+
+/** Accepts the absolute forms the driver accepts on macOS, Linux, and Windows. */
+export function isAbsolutePath(value: string): boolean {
+  return value.startsWith("/") || WINDOWS_DRIVE_PATH.test(value) || WINDOWS_UNC_PATH.test(value);
+}
+
+/**
+ * Field writes for an explicit mode choice. Leaving Entra drops every Entra-only key;
+ * choosing Entra drops the integrated flag but keeps any identity already entered.
+ * An empty value asks the host to remove the key.
+ */
+export function modeChanges(extra: Extra, next: AuthMode): FieldChange[] {
+  const target: Record<string, string> = next === "entra_user"
+    ? { auth_mode: next, auth_source: AZURE_CLI_SOURCE, integrated_auth: "" }
+    : {
+      auth_mode: next,
+      integrated_auth: next === "integrated" ? "true" : "",
+      ...Object.fromEntries(ENTRA_KEYS.map((key) => [key, ""])),
+    };
+  return Object.entries(target).filter(([key, value]) => (extra[key] ?? "") !== value);
+}
+
+export function clearEntraChanges(extra: Extra): FieldChange[] {
+  return ENTRA_KEYS.filter((key) => has(extra, key)).map((key) => [key, ""] as const);
+}
+
+/** Mirrors the driver's connection checks for the values this form owns. */
+export function authIssues(extra: Extra): Issue[] {
+  const mode = authMode(extra);
+  if (mode === null) {
+    return [{
+      key: "auth_mode",
+      message: "저장된 인증 방식은 지원하지 않습니다. SQL Server, Windows/Kerberos, Microsoft Entra 중에서 다시 선택하세요.",
+    }];
   }
-}
 
-export function object(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-export function boundedId(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0 && value.length <= 128 && !CONTROLS.test(value);
-}
-
-export function validUuid(value: string): boolean { return UUID.test(value); }
-
-export function settings(extra: Record<string, string>): AuthSettings {
-  const raw = extra.auth_mode || (extra.integrated_auth === "true" ? "integrated" : "sql_password");
-  const mode = ["sql_password", "integrated", "entra_user", "entra_service_principal"].includes(raw)
-    ? raw as AuthMode : null;
-  return { mode, tenant: extra.tenant_id ?? "", client: extra.client_id ?? "", ...(extra.auth_source ? { source: extra.auth_source as "oauth" | "azure_cli" } : {}) };
-}
-
-export function savedSettings(value: unknown): AuthSettings | null {
-  if (!object(value)) return null;
-  const extra = object(value.extra) ? value.extra : {};
-  const fields: Record<string, string> = {};
-  for (const key of ["auth_mode", "auth_source", "integrated_auth", "tenant_id", "client_id"]) {
-    const field = Object.prototype.hasOwnProperty.call(extra, key) ? extra[key] : value[key];
-    if (field !== undefined && typeof field !== "string") return null;
-    fields[key] = typeof field === "string" ? field : "";
+  const issues: Issue[] = [];
+  if (mode !== "integrated" && isEnabled(extra.integrated_auth)) {
+    issues.push({
+      key: "integrated_auth",
+      message: mode === "entra_user"
+        ? "Microsoft Entra 인증은 Windows 통합 인증과 함께 쓸 수 없습니다."
+        : "SQL Server 인증은 Windows 통합 인증 설정과 함께 쓸 수 없습니다.",
+    });
   }
-  return settings(fields);
-}
 
-export function matchesSaved(data: unknown, connectionId: string, form: AuthSettings): boolean {
-  if (!object(data) || !Array.isArray(data.connections)) return false;
-  const matches = data.connections.filter((item: unknown) => object(item) && item.connection_id === connectionId);
-  if (matches.length !== 1 || !object(matches[0]) || matches[0].driver !== "sqlserver") return false;
-  const stored = savedSettings(matches[0].settings);
-  return stored !== null && stored.mode === form.mode && stored.tenant === form.tenant && stored.client === form.client && (stored.source ?? "oauth") === (form.source ?? "oauth");
-}
-
-export function request<O extends ServiceRequest["operation"]>(
-  operation: O, connectionId: string, input: ServiceRequest<O>["input"], deadline = 60_000,
-): ServiceRequest<O> {
-  return { protocol_version: 1, operation, connection_id: connectionId, request_id: crypto.randomUUID(), deadline_ms: deadline, input };
-}
-
-export function completed(response: unknown, connectionId: string, requestId?: string): ServiceResponse {
-  if (!object(response) || response.protocol_version !== 1 || response.connection_id !== connectionId
-    || !boundedId(response.request_id) || (requestId !== undefined && response.request_id !== requestId)) {
-    throw new AuthFault("malformed");
-  }
-  if (response.status === "outcome_unknown" || (object(response.error) && response.error.outcome === "unknown")) {
-    throw new AuthFault("unknown");
-  }
-  if (response.status !== "succeeded" || response.error !== null) {
-    const code = object(response.error) ? response.error.code : null;
-    throw new AuthFault(code === "PERMISSION_DENIED" || code === "WRITE_NOT_ALLOWED" ? "denied" : "failed");
-  }
-  if (!object(response.limits) || response.limits.truncated !== false) throw new AuthFault("malformed");
-  return response as unknown as ServiceResponse;
-}
-
-export function parseStatus(data: unknown): AuthStatus {
-  if (!object(data) || !boundedId(data.auth_job_id)
-    || !["pending", "interaction_required", "authenticated", "cancelled", "failed"].includes(String(data.state))
-    || typeof data.user_action_required !== "boolean"
-    || !(data.error_code === null || (typeof data.error_code === "string" && /^[A-Z_]{1,64}$/.test(data.error_code)))) {
-    throw new AuthFault("malformed");
-  }
-  if (data.state === "authenticated" && (data.error_code !== null || data.user_action_required !== false)) throw new AuthFault("malformed");
-  let challenge: AuthStatus["challenge"] = null;
-  if (data.challenge !== undefined) {
-    if (!object(data.challenge) || typeof data.challenge.user_code !== "string"
-      || data.challenge.user_code.length === 0 || data.challenge.user_code.length > 128
-      || CONTROLS.test(data.challenge.user_code) || typeof data.challenge.verification_uri !== "string") {
-      throw new AuthFault("malformed");
+  if (mode !== "entra_user") {
+    if (ENTRA_KEYS.some((key) => has(extra, key))) {
+      issues.push({
+        key: "entra_keys",
+        message: "이 인증 방식에는 Entra 전용 설정(로그인 소스, 테넌트 ID, 개체 ID, Azure CLI 경로)을 저장할 수 없습니다.",
+      });
     }
-    challenge = { code: data.challenge.user_code, url: data.challenge.verification_uri === "https://microsoft.com/devicelogin"
-      ? "https://microsoft.com/devicelogin" : null };
-  }
-  return { jobId: data.auth_job_id, state: data.state as AuthStatus["state"], challenge, errorCode: data.error_code as string | null };
-}
-
-export function faultMessage(error: unknown): string {
-  if (error instanceof AuthFault) {
-    if (error.kind === "denied") return "이 연결의 인증을 관리할 권한이 없습니다.";
-    if (error.kind === "unknown") return "처리 결과를 확인할 수 없습니다. 자동으로 다시 요청하지 않습니다.";
-    if (error.kind === "malformed") return "인증 응답을 확인할 수 없습니다.";
-    if (error.kind === "capability") return "호스트에서 공통 인증 기능을 사용할 수 없습니다.";
-  }
-  return "인증 요청을 완료하지 못했습니다.";
-}
-
-export function failedStatusMessage(code: string | null): string {
-  if (code === "AUTH_EXPIRED") return "인증 시간이 만료되었습니다. 다시 로그인을 시작해 주세요.";
-  if (code === "PERMISSION_DENIED") return "이 연결의 인증을 관리할 권한이 없습니다.";
-  if (code === "KEYCHAIN_UNAVAILABLE") return "키체인을 사용할 수 없습니다. 세션 보관을 선택해 주세요.";
-  return "로그인에 실패했습니다.";
-}
-
-export class AuthScope {
-  private generation = 0;
-  private active = true;
-  private controllers = new Set<AbortController>();
-  private job: string | null = null;
-  private cancelledJobs = new Set<string>();
-
-  constructor(readonly service: UsePluginServiceReturn, readonly connectionId: string) {}
-
-  activate(): void { this.active = true; }
-  isCurrent(generation: number): boolean { return this.active && generation === this.generation; }
-  current(): number { return this.generation; }
-  setJob(job: string | null): void { this.job = job; }
-
-  private observeJob(response: unknown, generation: number, requestId: string): void {
-    if (!object(response) || response.protocol_version !== 1 || response.connection_id !== this.connectionId
-      || response.request_id !== requestId || !object(response.data) || !boundedId(response.data.auth_job_id)) return;
-    const job = response.data.auth_job_id;
-    if (!this.isCurrent(generation)) this.cancelBestEffort(job);
-    else this.job = job;
+    return issues;
   }
 
-  cancelBestEffort(job: string): void {
-    if (this.cancelledJobs.has(job)) return;
-    this.cancelledJobs.add(job);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 10_000);
-    void Promise.resolve().then(() => this.service.call(request("auth.cancel", this.connectionId, { auth_job_id: job }, 10_000), { signal: controller.signal }))
-      .catch(() => undefined).finally(() => clearTimeout(timer));
+  if ((extra.auth_source ?? "").trim() !== AZURE_CLI_SOURCE) {
+    issues.push({ key: "auth_source", message: "Microsoft Entra 로그인 소스는 Azure CLI여야 합니다." });
   }
-
-  stop(): string | null {
-    this.generation += 1;
-    for (const controller of this.controllers) controller.abort();
-    this.controllers.clear();
-    const job = this.job;
-    this.job = null;
-    return job;
+  const tenant = (extra.tenant_id ?? "").trim();
+  if (tenant === "") {
+    issues.push({ key: "tenant_id", message: "테넌트 ID를 입력하세요." });
+  } else if (!TENANT.test(tenant)) {
+    issues.push({
+      key: "tenant_id",
+      message: "테넌트 ID에는 영문자, 숫자, 하이픈(-), 마침표(.)만 쓸 수 있고 하이픈으로 시작할 수 없습니다.",
+    });
   }
-
-  dispose(): void {
-    this.active = false;
-    const job = this.stop();
-    if (job !== null) this.cancelBestEffort(job);
+  if ((extra.entra_object_id ?? "").trim() === "") {
+    issues.push({ key: "entra_object_id", message: "Entra 개체 ID를 입력하세요." });
   }
-
-  async run<T>(action: (signal: AbortSignal) => Promise<T>, observe?: (value: T, generation: number) => void): Promise<T> {
-    const generation = this.generation;
-    if (!this.active) throw new AuthFault("stale");
-    const controller = new AbortController();
-    this.controllers.add(controller);
-    try {
-      const value = await action(controller.signal);
-      observe?.(value, generation);
-      if (!this.isCurrent(generation) || controller.signal.aborted) throw new AuthFault("stale");
-      return value;
-    } catch (error) {
-      if (!this.isCurrent(generation) || controller.signal.aborted) throw new AuthFault("stale");
-      throw error instanceof AuthFault ? error : new AuthFault("failed");
-    } finally {
-      this.controllers.delete(controller);
-    }
+  const path = extra.azure_cli_path;
+  if (path !== undefined && (path === "" || path.trim() !== path || !isAbsolutePath(path))) {
+    issues.push({
+      key: "azure_cli_path",
+      message: "Azure CLI 경로는 앞뒤 공백 없는 절대 경로여야 합니다. 비워 두면 PATH에서 az를 찾습니다.",
+    });
   }
-
-  async call<O extends ServiceRequest["operation"]>(operation: O, input: ServiceRequest<O>["input"], trackJob = false): Promise<ServiceResponse> {
-    const outgoing = request(operation, this.connectionId, input);
-    const response = await this.run((signal) => this.service.call(outgoing, { signal }),
-      trackJob ? (value, generation) => this.observeJob(value, generation, outgoing.request_id) : undefined);
-    return completed(response, this.connectionId, outgoing.request_id);
-  }
+  return issues;
 }

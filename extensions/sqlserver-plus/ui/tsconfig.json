@@ -7,7 +7,10 @@
     "moduleResolution": "Bundler",
     "strict": true,
     "skipLibCheck": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@tabularis/plugin-api": ["../../../packages/plugin-api/src/index.ts"]
+    }
   },
   "include": ["src"]
 }
