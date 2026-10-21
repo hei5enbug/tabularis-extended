@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 use deadpool_postgres::Object as PgClient;
 use tokio_postgres::CancelToken;
@@ -134,6 +135,105 @@ pub async fn cancel(request_id: u64) {
     }
 }
 
+struct ScopedState {
+    cancelled: AtomicBool,
+    backend_stopped: AtomicBool,
+    action: Mutex<Option<CancelAction>>,
+    pending: AtomicBool,
+    finished: tokio::sync::Notify,
+}
+
+type ScopeKey = (String, String);
+static SCOPES: LazyLock<Mutex<HashMap<ScopeKey, Arc<ScopedState>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+pub struct ScopedGuard { key: ScopeKey, state: Arc<ScopedState> }
+
+impl ScopedGuard {
+    pub fn reserve(connection_id: &str, request_id: &str) -> Result<Self, crate::handlers::spatial::SpatialError> {
+        let key = (connection_id.to_string(), request_id.to_string());
+        let mut scopes = SCOPES.lock().map_err(|_| crate::handlers::spatial::SpatialError::argument("Cancel registry unavailable"))?;
+        if scopes.contains_key(&key) {
+            return Err(crate::handlers::spatial::SpatialError::argument("Request ID is already active on this connection"));
+        }
+        let state = Arc::new(ScopedState { cancelled: AtomicBool::new(false), backend_stopped: AtomicBool::new(false), action: Mutex::new(None),
+            pending: AtomicBool::new(false), finished: tokio::sync::Notify::new() });
+        scopes.insert(key.clone(), state.clone());
+        Ok(Self { key, state })
+    }
+    pub fn cancelled(&self) -> bool { self.state.cancelled.load(Ordering::Acquire) }
+    pub fn backend_stopped(&self) -> bool { self.state.backend_stopped.load(Ordering::Acquire) }
+    pub fn seal(&self) {
+        if let Ok(mut scopes) = SCOPES.lock() {
+            if scopes.get(&self.key).is_some_and(|s| Arc::ptr_eq(s, &self.state)) { scopes.remove(&self.key); }
+        }
+        if let Ok(mut action) = self.state.action.lock() { action.take(); }
+    }
+    pub async fn attach(&self, pg_client: &PgClient, params: ConnectionParams) {
+        let token = pg_client.cancel_token();
+        if let Ok(mut action) = self.state.action.lock() {
+            *action = Some(Box::new(move || Box::pin(run_cancel(token, params))));
+        }
+        if self.cancelled() { trigger_scope(self.state.clone()).await; }
+    }
+    pub async fn settle(&self) {
+        loop {
+            let notified = self.state.finished.notified();
+            if !self.state.pending.load(Ordering::Acquire) { break; }
+            notified.await;
+        }
+    }
+    pub async fn stop_backend(&self) {
+        self.state.backend_stopped.store(true,Ordering::Release);
+        trigger_scope(self.state.clone()).await;
+    }
+}
+
+impl Drop for ScopedGuard {
+    fn drop(&mut self) {
+        self.seal();
+    }
+}
+
+async fn trigger_scope(state: Arc<ScopedState>) {
+    let action = state.action.lock().ok().and_then(|mut action| {
+        let action = action.take();
+        if action.is_some() { state.pending.store(true, Ordering::Release); }
+        action
+    });
+    if let Some(action) = action {
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), action()).await;
+        state.pending.store(false, Ordering::Release);
+        state.finished.notify_waiters();
+    }
+}
+
+pub async fn cancel_scoped(connection_id: &str, request_id: &str) -> bool {
+    let state = SCOPES.lock().ok().and_then(|scopes| {
+        let state=scopes.get(&(connection_id.to_string(),request_id.to_string())).cloned();
+        if let Some(state)=&state {state.cancelled.store(true,Ordering::Release);}
+        state
+    });
+    if let Some(state) = state {
+        trigger_scope(state).await;
+        true
+    } else { false }
+}
+
+pub async fn cancel_connection(connection_id: &str) -> usize {
+    let states = SCOPES.lock().map(|scopes| scopes.iter().filter_map(|((connection, _), state)| {
+        if connection != connection_id { return None; }
+        state.cancelled.store(true, Ordering::Release);
+        Some(state.clone())
+    }).collect::<Vec<_>>()).unwrap_or_default();
+    let count = states.len();
+    futures_util::future::join_all(states.into_iter().map(trigger_scope)).await;
+    count
+}
+
 #[cfg(test)]
 #[path = "cancel_tests.rs"]
 mod cancel_tests;
+#[cfg(test)]
+#[path="../tests/spatial/cancel.rs"]
+mod spatial_cancel_tests;

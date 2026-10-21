@@ -6,10 +6,22 @@ use std::time::Instant;
 
 use crate::cancel;
 use crate::client;
-use crate::extract::extract_value;
+use crate::extract::extract_value_with_catalog;
 use crate::models::{inner_params, ConnectionParams};
 use crate::rpc::{error_response, ok_response};
 use crate::session;
+
+enum QueryFailure { Legacy(String),Spatial(crate::handlers::spatial::SpatialError) }
+impl From<String> for QueryFailure {fn from(value: String)->Self{Self::Legacy(value)}}
+impl From<crate::handlers::spatial::SpatialError> for QueryFailure {fn from(value: crate::handlers::spatial::SpatialError)->Self{Self::Spatial(value)}}
+impl std::fmt::Display for QueryFailure {
+    fn fmt(&self,f: &mut std::fmt::Formatter<'_>)->std::fmt::Result {
+        match self {Self::Legacy(error)=>f.write_str(error),Self::Spatial(error)=>error.fmt(f)}
+    }
+}
+fn query_failure_response(id: Value,error: QueryFailure)->Value {
+    match error {QueryFailure::Legacy(error)=>error_response(id,-32603,&error),QueryFailure::Spatial(error)=>error.response(id)}
+}
 
 pub async fn execute_query(id: Value, params: &Value) -> Value {
     let conn_params = ConnectionParams::from_value(inner_params(params));
@@ -62,7 +74,7 @@ pub async fn execute_query(id: Value, params: &Value) -> Value {
 
     match exec_query(&conn_params, query, limit, page, schema, &id).await {
         Ok(result) => ok_response(id, result),
-        Err(e) => error_response(id, -32603, &e),
+        Err(e) => query_failure_response(id,e),
     }
 }
 
@@ -179,7 +191,8 @@ async fn run_batch_in_session(
             })),
             Err(e) => results.push(json!({
                 "result": null,
-                "error": e,
+                "error": e.to_string(),
+                "error_data": match &e {QueryFailure::Spatial(error)=>Some(error),_=>None},
                 "execution_time_ms": elapsed_ms,
             })),
         }
@@ -260,7 +273,7 @@ pub async fn explain_query(id: Value, params: &Value) -> Value {
                 None => ok_response(id, result),
             }
         }
-        Err(e) => error_response(id, -32603, &e),
+        Err(e) => query_failure_response(id,e),
     }
 }
 
@@ -289,7 +302,7 @@ async fn exec_query(
     page: u32,
     schema: Option<&str>,
     request_id: &Value,
-) -> Result<Value, String> {
+) -> Result<Value, QueryFailure> {
     let pool = client::build_pool_pub(conn_params).await?;
     let pg_client = pool
         .get()
@@ -320,7 +333,8 @@ async fn exec_query_on_client(
     query: &str,
     limit: Option<u32>,
     page: u32,
-) -> Result<Value, String> {
+) -> Result<Value, QueryFailure> {
+    let spatial_catalog=crate::handlers::spatial::catalog::Catalog::load(pg_client).await?;
     // Check if the statement returns a result set
     if !returns_result_set(query) {
         let affected = pg_client
@@ -363,6 +377,7 @@ async fn exec_query_on_client(
     if rows.is_empty() {
         // Get columns from the statement if possible
         let columns: Vec<String> = if let Ok(stmt) = pg_client.prepare(&final_query).await {
+            if let Some(catalog)=&spatial_catalog {catalog.validate_columns(stmt.columns())?;}
             stmt.columns()
                 .iter()
                 .map(|c| c.name().to_string())
@@ -397,6 +412,7 @@ async fn exec_query_on_client(
         .iter()
         .map(|c| c.name().to_string())
         .collect();
+    if let Some(catalog)=&spatial_catalog {catalog.validate_columns(rows[0].columns())?;}
 
     // Determine has_more/truncate — via the paginated page size for a real
     // SELECT, or by capping to the raw limit client-side otherwise.
@@ -415,12 +431,10 @@ async fn exec_query_on_client(
     let json_rows: Vec<Value> = result_rows
         .iter()
         .map(|row| {
-            let values: Vec<Value> = (0..row.columns().len())
-                .map(|i| extract_value(row, i))
-                .collect();
-            Value::Array(values)
+            (0..row.columns().len()).map(|i|extract_value_with_catalog(row,i,spatial_catalog.as_ref()))
+                .collect::<Result<Vec<_>,_>>().map(Value::Array)
         })
-        .collect();
+        .collect::<Result<Vec<_>,_>>()?;
 
     let pagination = if is_paginated {
         Some(json!({

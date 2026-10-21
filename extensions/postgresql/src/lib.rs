@@ -22,3 +22,9 @@ pub mod rpc;
 pub mod session;
 pub mod settings;
 pub mod utils;
+#[cfg(test)]
+#[path="../tests/spatial/unit.rs"]
+mod spatial_tests;
+#[cfg(test)]
+#[path="../tests/spatial/service_unit.rs"]
+mod service_tests;

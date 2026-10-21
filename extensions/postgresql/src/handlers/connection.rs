@@ -17,7 +17,15 @@ use crate::settings;
 pub async fn initialize(id: Value, params: &Value) -> Value {
     let settings_value = params.get("settings").cloned().unwrap_or(Value::Null);
     settings::set_pool_max_size(&settings_value);
-    ok_response(id, Value::Null)
+    match params.get("service_protocol") {
+        None => ok_response(id, Value::Null),
+        Some(protocol) if protocol.as_u64() == Some(1) => ok_response(id, serde_json::json!({
+            "service_capabilities": {"service_protocol":1,"exact_query":true,"spatial_v1":true,
+                "sessions":true,"cancel_v1":true,"catalog":true,"rows":true,
+                "readonly_guarantee":"read_only_transaction","exact_affected_rows":true}
+        })),
+        Some(_) => crate::handlers::spatial::SpatialError::new("PROTOCOL_MISMATCH", "Unsupported service protocol").response(id),
+    }
 }
 
 /// Lightweight health check — verify we can reach the database.

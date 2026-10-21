@@ -51,6 +51,37 @@ pub fn extract_value(row: &Row, index: usize) -> JsonValue {
     }
 }
 
+pub fn extract_value_checked(row: &Row, index: usize) -> Result<JsonValue, crate::handlers::spatial::SpatialError> {
+    match extract_spatial(row, index) {
+        Some(value) => value,
+        None => Ok(extract_value(row, index)),
+    }
+}
+
+pub fn extract_value_with_catalog(row: &Row, index: usize, catalog: Option<&crate::handlers::spatial::catalog::Catalog>)
+    -> Result<JsonValue, crate::handlers::spatial::SpatialError> {
+    if let Some(catalog)=catalog {
+        catalog.validate_columns(std::slice::from_ref(&row.columns()[index]))?;
+        if catalog.native_type(row.columns()[index].type_()).is_some() {extract_value_checked(row,index)}
+        else {Ok(extract_value(row,index))}
+    } else { Ok(extract_value(row,index)) }
+}
+
+fn extract_spatial(row: &Row, index: usize) -> Option<Result<JsonValue, crate::handlers::spatial::SpatialError>> {
+    use crate::handlers::spatial::{ewkb, SpatialError};
+    let ty = row.columns()[index].type_();
+    if ewkb::is_spatial_array(ty) {
+        return Some(Err(SpatialError::unsupported("Spatial arrays are unsupported")));
+    }
+    let native = ewkb::native_type(ty)?;
+    Some(match row.try_get::<_, Option<ewkb::SpatialBytes>>(index) {
+        Ok(None) => Ok(JsonValue::Null),
+        Ok(Some(bytes)) => ewkb::SpatialValue::from_bytes(native, &bytes.0)
+            .and_then(|v| serde_json::to_value(v).map_err(|_| SpatialError::geometry("Cannot encode spatial value"))),
+        Err(_) => Err(SpatialError::geometry("Cannot decode spatial EWKB")),
+    })
+}
+
 /// `Kind::Simple` bucket: scalar types with no element/subtype (everything
 /// except enum/array/range/composite/domain/multirange). Every arm here is
 /// unchanged from the pre-restructure flat match.

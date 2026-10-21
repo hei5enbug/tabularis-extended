@@ -270,6 +270,35 @@ pub async fn build_pool_pub(params: &ConnectionParams) -> Result<Pool, String> {
     get_or_create_pool(params).await
 }
 
+pub(crate) fn normalize_service_params(params: &ConnectionParams) -> Result<ConnectionParams, crate::handlers::spatial::SpatialError> {
+    use crate::handlers::spatial::SpatialError;
+    if params.startup_script.as_deref().is_some_and(|script| !script.trim().is_empty()) {
+        return Err(SpatialError::new("UNSUPPORTED_OPERATION", "Service connections do not support startup scripts"));
+    }
+    let mut normalized = params.clone();
+    if let Some(dsn) = params.connection_string.as_deref().filter(|value| !value.trim().is_empty()) {
+        let parsed = tokio_postgres::Config::from_str(dsn)
+            .map_err(|_| SpatialError::argument("Invalid service connection string"))?;
+        normalized.host = parsed.get_hosts().first().and_then(|host| match host {
+            tokio_postgres::config::Host::Tcp(host) => Some(host.clone()),
+            #[cfg(unix)]
+            tokio_postgres::config::Host::Unix(_) => None,
+        });
+        normalized.port = parsed.get_ports().first().copied();
+        normalized.database = parsed.get_dbname().map(str::to_string);
+        normalized.username = parsed.get_user().map(str::to_string);
+        normalized.password = params.password.clone().or_else(|| parsed.get_password().map(|value| String::from_utf8_lossy(value).into_owned()));
+    }
+    normalized.connection_string = None;
+    normalized.startup_script = None;
+    Ok(normalized)
+}
+
+pub async fn build_service_pool(params: &ConnectionParams) -> Result<Pool, crate::handlers::spatial::SpatialError> {
+    let normalized = normalize_service_params(params)?;
+    build_pool(&normalized).await.map_err(|_| crate::handlers::spatial::SpatialError::new("CONNECTION_NOT_FOUND", "Cannot create service connection pool"))
+}
+
 /// Identifies a connection target for pool-cache purposes.
 /// Matches on host:port:database:user:startup_script, plus every TLS param
 /// (ssl_mode/ssl_ca/ssl_cert/ssl_key) — otherwise two connections differing
