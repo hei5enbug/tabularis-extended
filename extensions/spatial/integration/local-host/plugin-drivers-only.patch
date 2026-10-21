@@ -1,0 +1,508 @@
+diff --git a/package.json b/package.json
+index 583cffe..c6dac7b 100644
+--- a/package.json
++++ b/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "tabularis",
+   "private": true,
+-  "version": "0.26.0",
++  "version": "0.26.0+local.1",
+   "type": "module",
+   "links": {
+     "discord": "https://discord.com/invite/K2hmhfHRSt",
+diff --git a/src-tauri/Cargo.lock b/src-tauri/Cargo.lock
+index d0e9a38..0e3d4df 100644
+--- a/src-tauri/Cargo.lock
++++ b/src-tauri/Cargo.lock
+@@ -6565,7 +6565,7 @@ dependencies = [
+ 
+ [[package]]
+ name = "tabularis"
+-version = "0.26.0"
++version = "0.26.0+local.1"
+ dependencies = [
+  "aes-gcm",
+  "argon2",
+diff --git a/src-tauri/Cargo.toml b/src-tauri/Cargo.toml
+index 0b857c1..35403c3 100644
+--- a/src-tauri/Cargo.toml
++++ b/src-tauri/Cargo.toml
+@@ -1,6 +1,6 @@
+ [package]
+ name = "tabularis"
+-version = "0.26.0"
++version = "0.26.0+local.1"
+ description = "tabularis - A database manager for developers"
+ authors = ["Debba"]
+ edition = "2021"
+diff --git a/src-tauri/src/cli.rs b/src-tauri/src/cli.rs
+index 65d3429..5f2c228 100644
+--- a/src-tauri/src/cli.rs
++++ b/src-tauri/src/cli.rs
+@@ -13,6 +13,10 @@ pub struct Args {
+     #[arg(long)]
+     pub mcp: bool,
+ 
++    /// List configured driver manifests without connecting to a database
++    #[arg(long, conflicts_with = "mcp")]
++    pub list_drivers: bool,
++
+     /// Enable debug logging (including sqlx queries)
+     #[arg(long)]
+     pub debug: bool,
+@@ -27,6 +31,7 @@ impl Args {
+     fn defaults() -> Self {
+         Self {
+             mcp: false,
++            list_drivers: false,
+             debug: false,
+             explain: None,
+         }
+diff --git a/src-tauri/src/connection_import/convert.rs b/src-tauri/src/connection_import/convert.rs
+index ade1e30..ec1bb95 100644
+--- a/src-tauri/src/connection_import/convert.rs
++++ b/src-tauri/src/connection_import/convert.rs
+@@ -287,11 +287,11 @@ mod tests {
+             connections: vec![base_conn()],
+             ..Default::default()
+         };
+-        let payload = build_payload(&env, &[res(0, "import")], &["postgres".into()], &[]);
++        let payload = build_payload(&env, &[res(0, "import")], &["postgresql".into()], &[]);
+         assert_eq!(payload.connections.len(), 1);
+         assert_eq!(payload.groups.len(), 1);
+         let c = &payload.connections[0];
+-        assert_eq!(c.params.driver, "postgres");
++        assert_eq!(c.params.driver, "postgresql");
+         assert_eq!(c.group_id.as_deref(), Some(payload.groups[0].id.as_str()));
+         assert_eq!(c.params.save_in_keychain, Some(false));
+     }
+@@ -303,7 +303,7 @@ mod tests {
+             connections: vec![base_conn()],
+             ..Default::default()
+         };
+-        let payload = build_payload(&env, &[res(0, "skip")], &["postgres".into()], &[]);
++        let payload = build_payload(&env, &[res(0, "skip")], &["postgresql".into()], &[]);
+         assert!(payload.connections.is_empty());
+     }
+ 
+@@ -329,7 +329,7 @@ mod tests {
+                 ..Default::default()
+             },
+         );
+-        let payload = build_payload(&env, &[res(0, "import")], &["postgres".into()], &[]);
++        let payload = build_payload(&env, &[res(0, "import")], &["postgresql".into()], &[]);
+         assert_eq!(payload.ssh_connections.len(), 1);
+         let ssh = &payload.ssh_connections[0];
+         let conn = &payload.connections[0];
+@@ -350,7 +350,7 @@ mod tests {
+         let mut r = res(0, "import");
+         r.group_id = Some("existing-group".into());
+         let groups = [group("existing-group", "My Group")];
+-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
++        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
+         // No new group is minted; the connection joins the chosen one.
+         assert!(payload.groups.is_empty());
+         assert_eq!(
+@@ -368,7 +368,7 @@ mod tests {
+         };
+         let mut r = res(0, "import");
+         r.new_group_name = Some("Fresh Group".into());
+-        let payload = build_payload(&env, &[r], &["postgres".into()], &[]);
++        let payload = build_payload(&env, &[r], &["postgresql".into()], &[]);
+         assert_eq!(payload.groups.len(), 1);
+         assert_eq!(payload.groups[0].name, "Fresh Group");
+         assert_eq!(
+@@ -388,7 +388,7 @@ mod tests {
+         r.new_group_name = Some("Child".into());
+         r.new_group_parent_id = Some("parent-id".into());
+         let groups = [group("parent-id", "Parent")];
+-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
++        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
+         // A new nested group is minted; the parent stays untouched.
+         assert_eq!(payload.groups.len(), 1);
+         assert_eq!(payload.groups[0].name, "Child");
+@@ -415,7 +415,7 @@ mod tests {
+             subgroup("child-id", "Child", "parent-id"),
+             subgroup("other-child", "Child", "somewhere-else"),
+         ];
+-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
++        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
+         // The existing subgroup under the requested parent is reused.
+         assert!(payload.groups.is_empty());
+         assert_eq!(payload.connections[0].group_id.as_deref(), Some("child-id"));
+@@ -431,7 +431,7 @@ mod tests {
+         let mut r = res(0, "import");
+         r.new_group_name = Some("  my group ".into()); // case/space-insensitive match
+         let groups = [group("g1", "My Group")];
+-        let payload = build_payload(&env, &[r], &["postgres".into()], &groups);
++        let payload = build_payload(&env, &[r], &["postgresql".into()], &groups);
+         assert!(payload.groups.is_empty());
+         assert_eq!(payload.connections[0].group_id.as_deref(), Some("g1"));
+     }
+@@ -446,7 +446,7 @@ mod tests {
+         };
+         let mut r = res(0, "import");
+         r.group_id = Some(String::new());
+-        let payload = build_payload(&env, &[r], &["postgres".into()], &[]);
++        let payload = build_payload(&env, &[r], &["postgresql".into()], &[]);
+         assert!(payload.groups.is_empty());
+         assert_eq!(payload.connections[0].group_id, None);
+     }
+@@ -458,7 +458,7 @@ mod tests {
+             connections: vec![base_conn()],
+             ..Default::default()
+         };
+-        let payload = build_payload(&env, &[res(0, "import")], &["postgres".into()], &[]);
++        let payload = build_payload(&env, &[res(0, "import")], &["postgresql".into()], &[]);
+         assert_eq!(payload.groups.len(), 1);
+         assert_eq!(payload.groups[0].name, "Work");
+     }
+@@ -472,7 +472,7 @@ mod tests {
+         };
+         let mut r = res(0, "replace");
+         r.replace_existing_id = Some("existing-123".into());
+-        let payload = build_payload(&env, &[r], &["postgres".into()], &[]);
++        let payload = build_payload(&env, &[r], &["postgresql".into()], &[]);
+         assert_eq!(payload.connections[0].id, "existing-123");
+     }
+ }
+diff --git a/src-tauri/src/connection_import/driver_map.rs b/src-tauri/src/connection_import/driver_map.rs
+index 8e64de5..13c17d4 100644
+--- a/src-tauri/src/connection_import/driver_map.rs
++++ b/src-tauri/src/connection_import/driver_map.rs
+@@ -1,7 +1,6 @@
+ //! Maps a foreign app's database label to a Tabularis driver id.
+ //!
+-//! Built-in drivers are `postgres`, `mysql`, `sqlite` (see
+-//! `src/utils/connections.ts`). MariaDB rides the MySQL driver. Anything else
++//! Built-in drivers are `mysql` and `sqlite`. MariaDB rides the MySQL driver. Anything else
+ //! is only importable when a plugin driver with the same id is registered; the
+ //! analyzer flags the rest with a "driver not installed" warning but still lets
+ //! the user import the metadata.
+@@ -15,14 +14,13 @@ pub fn map_driver_label(label: &str, registered_ids: &[String]) -> (String, bool
+ }
+ 
+ /// Normalize a source-app driver label/provider/subprotocol to a Tabularis id.
+-/// Built-ins win; for everything else we lower-case the label as a best guess
+-/// at a plugin id (e.g. "MongoDB" -> "mongodb").
++/// Known labels use the registered plugin identity; unknown labels are lowercased.
+ pub fn canonical_id(label: &str) -> String {
+     match label.trim().to_ascii_lowercase().as_str() {
+-        "postgresql" | "postgres" | "postgre" => "postgres".to_string(),
++        "postgresql" | "postgres" | "postgre" => "postgresql".to_string(),
+         "mysql" | "mariadb" => "mysql".to_string(),
+         "sqlite" | "sqlite3" => "sqlite".to_string(),
+-        "sql server" | "sqlserver" | "mssql" | "jtds" => "mssql".to_string(),
++        "sql server" | "sqlserver" | "mssql" | "jtds" => "sqlserver".to_string(),
+         "mongodb" | "mongo" => "mongodb".to_string(),
+         "redis" => "redis".to_string(),
+         "oracle" => "oracle".to_string(),
+@@ -41,10 +39,10 @@ pub fn canonical_id(label: &str) -> String {
+ /// 0 means "no port" (file-based drivers such as SQLite).
+ pub fn default_port(driver_id: &str) -> u16 {
+     match driver_id {
+-        "postgres" | "redshift" => 5432,
++        "postgres" | "postgresql" | "redshift" => 5432,
+         "mysql" => 3306,
+         "cockroachdb" => 26257,
+-        "mssql" => 1433,
++        "mssql" | "sqlserver" => 1433,
+         "oracle" => 1521,
+         "mongodb" => 27017,
+         "redis" => 6379,
+@@ -60,7 +58,7 @@ mod tests {
+ 
+     #[test]
+     fn maps_builtin_labels() {
+-        assert_eq!(canonical_id("PostgreSQL"), "postgres");
++        assert_eq!(canonical_id("PostgreSQL"), "postgresql");
+         assert_eq!(canonical_id("MySQL"), "mysql");
+         assert_eq!(canonical_id("MariaDB"), "mysql");
+         assert_eq!(canonical_id("SQLite"), "sqlite");
+@@ -69,16 +67,24 @@ mod tests {
+     #[test]
+     fn maps_plugin_labels_lowercased() {
+         assert_eq!(canonical_id("MongoDB"), "mongodb");
+-        assert_eq!(canonical_id("SQL Server"), "mssql");
++        assert_eq!(canonical_id("SQL Server"), "sqlserver");
+         assert_eq!(canonical_id("ClickHouse"), "clickhouse");
+     }
+ 
+     #[test]
+     fn installed_flag_reflects_registry() {
+-        let registered = vec!["postgres".to_string(), "mysql".to_string()];
++        let registered = vec![
++            "postgresql".to_string(),
++            "sqlserver".to_string(),
++            "mysql".to_string(),
++        ];
+         assert_eq!(
+             map_driver_label("PostgreSQL", &registered),
+-            ("postgres".to_string(), true)
++            ("postgresql".to_string(), true)
++        );
++        assert_eq!(
++            map_driver_label("SQL Server", &registered),
++            ("sqlserver".to_string(), true)
+         );
+         assert_eq!(
+             map_driver_label("MongoDB", &registered),
+@@ -89,8 +95,10 @@ mod tests {
+     #[test]
+     fn default_ports() {
+         assert_eq!(default_port("postgres"), 5432);
++        assert_eq!(default_port("postgresql"), 5432);
+         assert_eq!(default_port("mysql"), 3306);
+         assert_eq!(default_port("sqlite"), 0);
+         assert_eq!(default_port("mssql"), 1433);
++        assert_eq!(default_port("sqlserver"), 1433);
+     }
+ }
+diff --git a/src-tauri/src/drivers/registry.rs b/src-tauri/src/drivers/registry.rs
+index d1383ae..ef67e1c 100644
+--- a/src-tauri/src/drivers/registry.rs
++++ b/src-tauri/src/drivers/registry.rs
+@@ -51,6 +51,11 @@ pub async fn register_driver(driver: impl DatabaseDriver + 'static) {
+     reg.insert(id, Arc::new(driver));
+ }
+ 
++pub async fn register_builtin_drivers() {
++    register_driver(crate::drivers::mysql::MysqlDriver::new()).await;
++    register_driver(crate::drivers::sqlite::SqliteDriver::new()).await;
++}
++
+ /// Look up a driver by its `id` (matches `ConnectionParams.driver`).
+ /// Returns `None` if no driver with that id is registered.
+ pub async fn get_driver(id: &str) -> Option<Arc<dyn DatabaseDriver>> {
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index 51faf47..256eeff 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -189,6 +189,32 @@ pub fn run() {
+ 
+     let args = cli::parse();
+ 
++    if args.list_drivers {
++        init_logger(create_log_buffer(1000), log::LevelFilter::Info);
++        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
++        let manifests = rt.block_on(async {
++            drivers::registry::register_builtin_drivers().await;
++            plugins::manager::reload_plugins_from_disk_config().await;
++            drivers::registry::list_drivers().await
++        });
++        let summaries: Vec<_> = manifests
++            .iter()
++            .map(|manifest| {
++                serde_json::json!({
++                    "id": manifest.id,
++                    "name": manifest.name,
++                    "version": manifest.version,
++                    "is_builtin": manifest.is_builtin,
++                })
++            })
++            .collect();
++        println!(
++            "{}",
++            serde_json::to_string(&summaries).expect("Driver serialization failed")
++        );
++        return;
++    }
++
+     if args.mcp {
+         // Initialize the logger so plugin-loading and driver RPC errors (which
+         // use the `log` crate) are visible. The custom logger writes to stderr
+@@ -306,9 +332,7 @@ pub fn run() {
+ 
+             // Register built-in drivers
+             tauri::async_runtime::block_on(async {
+-                drivers::registry::register_driver(drivers::mysql::MysqlDriver::new()).await;
+-                drivers::registry::register_driver(drivers::postgres::PostgresDriver::new()).await;
+-                drivers::registry::register_driver(drivers::sqlite::SqliteDriver::new()).await;
++                drivers::registry::register_builtin_drivers().await;
+ 
+                 // Load only enabled external plugins (or all if no preference saved).
+                 crate::plugins::manager::load_plugins_with_configs(
+diff --git a/src-tauri/src/mcp/mod.rs b/src-tauri/src/mcp/mod.rs
+index 2542402..e951f1d 100644
+--- a/src-tauri/src/mcp/mod.rs
++++ b/src-tauri/src/mcp/mod.rs
+@@ -9,7 +9,6 @@ use crate::config::{
+ use crate::credential_cache;
+ use crate::drivers::driver_trait::{DatabaseDriver, SqlDialect};
+ use crate::drivers::registry as driver_registry;
+-use crate::drivers::{mysql, postgres, sqlite};
+ use crate::heartbeat;
+ use crate::models::{ConnectionParams, K8sConnection, SshConnection};
+ use crate::paths;
+@@ -314,15 +313,9 @@ async fn resolve_db_params(
+     Ok((conn, db_params))
+ }
+ 
+-/// Populate the driver registry for the standalone MCP subprocess: the three
+-/// built-in drivers plus any installed plugin drivers, honoring the user's
+-/// `active_external_drivers` preference. Without this, MCP can only reach
+-/// mysql/postgres/sqlite connections — every other driver fails with
+-/// "Unsupported driver".
++/// Load built-in and enabled plugin drivers for the standalone MCP subprocess.
+ async fn register_drivers_for_mcp() {
+-    driver_registry::register_driver(mysql::MysqlDriver::new()).await;
+-    driver_registry::register_driver(postgres::PostgresDriver::new()).await;
+-    driver_registry::register_driver(sqlite::SqliteDriver::new()).await;
++    driver_registry::register_builtin_drivers().await;
+ 
+     plugins::manager::reload_plugins_from_disk_config().await;
+ 
+diff --git a/src-tauri/src/mcp/tests.rs b/src-tauri/src/mcp/tests.rs
+index 8e16f0a..d3c2228 100644
+--- a/src-tauri/src/mcp/tests.rs
++++ b/src-tauri/src/mcp/tests.rs
+@@ -2,6 +2,7 @@
+ //! connection-resolution error paths.
+ 
+ use super::*;
++use crate::drivers::{mysql, postgres, sqlite};
+ use serde_json::{json, Map, Value};
+ 
+ #[test]
+diff --git a/src-tauri/tauri.conf.json b/src-tauri/tauri.conf.json
+index 489f474..6b3a5d8 100644
+--- a/src-tauri/tauri.conf.json
++++ b/src-tauri/tauri.conf.json
+@@ -1,7 +1,7 @@
+ {
+   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+   "productName": "tabularis",
+-  "version": "0.26.0",
++  "version": "0.26.0+local.1",
+   "identifier": "tabularis",
+   "build": {
+     "frontendDist": "../dist",
+diff --git a/src/hooks/useDrivers.ts b/src/hooks/useDrivers.ts
+index 83575e8..328a73d 100644
+--- a/src/hooks/useDrivers.ts
++++ b/src/hooks/useDrivers.ts
+@@ -7,44 +7,6 @@ import type { InstalledPluginInfo, PluginManifest } from "../types/plugins";
+ import { useSettings } from "./useSettings";
+ 
+ const FALLBACK_DRIVERS: PluginManifest[] = [
+-  {
+-    id: "postgres",
+-    name: "PostgreSQL",
+-    version: "1.0.0",
+-    description: "PostgreSQL databases",
+-    default_port: 5432,
+-    is_builtin: true,
+-    default_username: "postgres",
+-    color: "#3b82f6",
+-    icon: "postgres",
+-    settings: [
+-      {
+-        key: "poolMaxSize",
+-        label: "Pool Max Size",
+-        type: "number",
+-        default: 10,
+-        description: "Maximum number of PostgreSQL connections kept in the pool.",
+-      },
+-    ],
+-    capabilities: {
+-      schemas: true,
+-      views: true,
+-      routines: true,
+-      file_based: false,
+-      folder_based: false,
+-      connection_string: true,
+-      connection_string_example: "postgres://user:pass@localhost:5432/db",
+-      identifier_quote: '"',
+-      alter_primary_key: true,
+-      auto_increment_keyword: "",
+-      serial_type: "SERIAL",
+-      inline_pk: false,
+-      alter_column: true,
+-      create_foreign_keys: true,
+-      supports_ssl: true,
+-      sql_dialect: "postgres",
+-    },
+-  },
+   {
+     id: "mysql",
+     name: "MySQL",
+diff --git a/src/utils/connections.ts b/src/utils/connections.ts
+index afbcb2d..a17984d 100644
+--- a/src/utils/connections.ts
++++ b/src/utils/connections.ts
+@@ -11,7 +11,7 @@ import { isMultiDatabaseCapable } from "./database";
+ 
+ export type DatabaseDriver = string;
+ 
+-export const BUILTIN_DRIVER_IDS = ["postgres", "mysql", "sqlite"] as const;
++export const BUILTIN_DRIVER_IDS = ["mysql", "sqlite"] as const;
+ export type BuiltinDriverId = (typeof BUILTIN_DRIVER_IDS)[number];
+ 
+ /** Which direction a per-connection migration action would go, or `null` if
+diff --git a/src/version.ts b/src/version.ts
+index 562e5ac..fadc88e 100644
+--- a/src/version.ts
++++ b/src/version.ts
+@@ -1 +1 @@
+-export const APP_VERSION = "0.26.0";
++export const APP_VERSION = "0.26.0+local.1";
+diff --git a/tests/utils/connectionStringParser.test.ts b/tests/utils/connectionStringParser.test.ts
+index 1ae69ee..ec145c7 100644
+--- a/tests/utils/connectionStringParser.test.ts
++++ b/tests/utils/connectionStringParser.test.ts
+@@ -167,14 +167,6 @@ describe("connectionStringParser", () => {
+     });
+ 
+     it("should resolve aliases against builtin drivers when no drivers are provided", () => {
+-      const postgresql = parseConnectionString(
+-        "postgresql://user@host/db",
+-      );
+-      expect(postgresql.success).toBe(true);
+-      if (postgresql.success) {
+-        expect(postgresql.params.driver).toBe("postgres");
+-      }
+-
+       const mariadb = parseConnectionString("mariadb://user@host/db");
+       expect(mariadb.success).toBe(true);
+       if (mariadb.success) {
+@@ -182,6 +174,29 @@ describe("connectionStringParser", () => {
+       }
+     });
+ 
++    it("PostgreSQL 플러그인이 없으면 PostgreSQL URI를 지원하지 않는다", () => {
++      // given
++      const uri = "postgresql://user@host/db";
++
++      // when
++      const result = parseConnectionString(uri);
++
++      // then
++      expect(result.success).toBe(false);
++    });
++
++    it("공식 PostgreSQL 플러그인이 있으면 postgres URI도 공식 드라이버로 해석한다", () => {
++      // given
++      const drivers = [createRemoteDriver("postgresql", "postgres://user:pass@localhost:5432/db")];
++
++      // when
++      const result = parseConnectionString("postgres://user@host/db", drivers);
++
++      // then
++      expect(result.success).toBe(true);
++      if (result.success) expect(result.params.driver).toBe("postgresql");
++    });
++
+     it("should parse sqlite3:// as sqlite via protocol alias", () => {
+       const result = parseConnectionString(
+         "sqlite3:///path/to/database.db",
+@@ -506,7 +521,8 @@ describe("connectionStringParser", () => {
+ 
+     it("should include aliases for builtin drivers when no drivers are provided", () => {
+       const protocols = getSupportedConnectionStringProtocols();
+-      expect(protocols).toContain("postgresql");
++      expect(protocols).not.toContain("postgresql");
++      expect(protocols).not.toContain("postgres");
+       expect(protocols).toContain("mariadb");
+     });
+   });

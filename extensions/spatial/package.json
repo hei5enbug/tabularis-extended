@@ -1,0 +1,15 @@
+{
+  "name": "@tabularis/spatial",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "bootstrap": "node scripts/sdk-bootstrap.mjs",
+    "verify:sdk": "node scripts/sdk.mjs",
+    "build:sdk": "node scripts/sdk.mjs && corepack pnpm --filter @tabularis/service-contracts build && corepack pnpm --filter @tabularis/plugin-api build",
+    "build:ui": "corepack pnpm build:sdk && corepack pnpm --dir ui build",
+    "typecheck:ui": "corepack pnpm build:sdk && corepack pnpm --dir ui typecheck",
+    "test:sdk": "corepack pnpm build:sdk && node --test tests/sdk.test.mjs",
+    "test:ui": "corepack pnpm build:sdk && corepack pnpm --dir ui test"
+  },
+  "packageManager": "pnpm@10.30.3"
+}

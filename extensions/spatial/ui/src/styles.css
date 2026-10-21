@@ -1,0 +1,19 @@
+.spatial-toolbar { display: inline-flex; align-items: center; gap: .5rem; position: relative; }
+.spatial-toolbar [role="status"] { max-width: 24rem; font-size: .8rem; }
+.spatial-source-picker { position: absolute; z-index: 10; top: 100%; right: 0; width: 27rem; padding: 1rem; background: var(--spatial-panel, Canvas); color: var(--spatial-text, CanvasText); border: 1px solid var(--spatial-border, GrayText); }
+.spatial-map-modal { background: var(--spatial-bg); color: var(--spatial-text); max-width: 100%; }
+.spatial-map-actions { display: flex; align-items: end; flex-wrap: wrap; gap: .5rem; padding-bottom: .75rem; }
+.spatial-map-body { display: grid; grid-template-columns: minmax(0, 1fr) 19rem; min-height: 30rem; }
+.spatial-map-canvas { min-width: 0; height: min(65vh, 45rem); min-height: 24rem; }
+.spatial-map-sidebar { background: var(--spatial-panel); padding: .75rem; max-height: 65vh; overflow: auto; }
+.spatial-map-modal label, .spatial-source-picker label { display: block; margin: .35rem 0; }
+.spatial-map-modal input, .spatial-map-modal select, .spatial-source-picker input, .spatial-source-picker select { max-width: 100%; color: inherit; }
+.spatial-map-modal input:not([type="checkbox"]):not([type="color"]), .spatial-map-modal select { background: var(--spatial-bg); border: 1px solid var(--spatial-border); padding: .2rem; }
+.spatial-map-modal button { margin: .15rem; border: 1px solid var(--spatial-border); padding: .3rem .5rem; }
+.spatial-map-modal :focus-visible, .spatial-toolbar :focus-visible { outline: 2px solid var(--spatial-accent, Highlight); outline-offset: 2px; }
+.spatial-layer { border-bottom: 1px solid var(--spatial-border); padding-bottom: .75rem; }
+.spatial-layer h3 { font-size: 1rem; }
+.spatial-map-modal pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 18rem; overflow: auto; font-size: .75rem; }
+.spatial-map-modal [role="alert"] { padding: .5rem; border: 1px solid currentColor; }
+.spatial-attribution { white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 800px) { .spatial-map-body { grid-template-columns: 1fr; } .spatial-map-sidebar { max-height: 20rem; } .spatial-source-picker { width: min(27rem, 85vw); } }

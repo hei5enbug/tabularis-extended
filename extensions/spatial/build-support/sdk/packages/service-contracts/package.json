@@ -1,0 +1,38 @@
+{
+  "name": "@tabularis/service-contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js"
+    },
+    "./schema/v1/*": "./schema/v1/*",
+    "./fixtures/v1/*": "./fixtures/v1/*"
+  },
+  "files": [
+    "dist",
+    "schema",
+    "fixtures"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ajv": "8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.0",
+    "typescript": "5.9.3"
+  },
+  "packageManager": "pnpm@10.30.3",
+  "license": "Apache-2.0"
+}

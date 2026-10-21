@@ -1,0 +1,13 @@
+{
+  "features": [{
+    "type": "Feature",
+    "id": "pk:eyJjb2x1bW5zIjpbImlkIl0sInZhbHVlcyI6WzFdfQ",
+    "geometry": {"type":"Point","coordinates":[10,0]},
+    "properties": {"id":1,"label":"첫째","g":{"kind":"spatial","native_type":"geometry","srid":3857,"dimensions":"XYZ","encoding":"ewkb-base64","value":"AQEAAKARDwAAn0du6Gr8MEEAAAAAAAAAAAAAAAAAABxA","is_empty":false}}
+  }],
+  "row_references": [{"feature_id":"pk:eyJjb2x1bW5zIjpbImlkIl0sInZhbHVlcyI6WzFdfQ","identity":{"columns":["id"],"values":[1]},"row_ordinal":0}],
+  "page":{"next_token":"09db91c1-debf-4d46-bdc4-c75d5806d5d3","has_more":true,"resume_mode":"native"},
+  "limits":{"truncated":false,"reasons":[]},
+  "warnings":["DIMENSIONS_REDUCED_TO_XY"],
+  "feature_errors":[]
+}

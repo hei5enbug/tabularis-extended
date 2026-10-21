@@ -1,0 +1,29 @@
+{
+  "id": "spatial",
+  "name": "spatial",
+  "kind": "driver",
+  "version": "0.1.0",
+  "description": "PostGIS map extension for spatial query results and table layers in Tabularis.",
+  "service_protocol": 1,
+  "min_runtime_version": "0.26.0",
+  "ui_extensions": [
+    {
+      "slot": "data-grid.toolbar.actions",
+      "module": "ui/dist/index.js"
+    },
+    {
+      "slot": "app.map.renderer",
+      "module": "ui/dist/index.js"
+    }
+  ],
+  "ui_assets": [
+    {
+      "path": "ui/dist/style.css",
+      "mime": "text/css"
+    },
+    {
+      "path": "ui/dist/maplibre-worker.js",
+      "mime": "text/javascript"
+    }
+  ]
+}

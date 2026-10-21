@@ -1,0 +1,124 @@
+name: Spatial and native host checks
+
+on:
+  workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Run only the Windows native installation job
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.windows_only && '["windows-2022"]' || '["ubuntu-24.04", "windows-2022", "macos-15-intel"]') }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: tabularis-spatial
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TARGET_DIR: ${{ github.workspace }}/cargo-target
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: tabularis-spatial
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.21.0
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          version: 10.30.3
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.96.0
+      - name: Install Linux host build tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev build-essential libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libfuse2
+      - name: Install native Perl for the Windows OpenSSL build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install strawberryperl --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $perl = 'C:\Strawberry\perl\bin\perl.exe'
+          & $perl -MLocale::Maketext::Simple -e 'exit 0'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "OPENSSL_SRC_PERL=$perl" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Build the local SDK and Spatial plugin
+        run: pnpm bootstrap
+      - name: Prepare exact patched app source
+        run: |
+          node --test tests/bootstrap.test.mjs
+          node scripts/bootstrap.mjs --only host
+      - name: Build the patched app frontend
+        run: |
+          pnpm --dir ../tabularis-app-source install --frozen-lockfile --ignore-scripts
+          pnpm --dir ../tabularis-app-source --filter @tabularis/service-contracts build
+          pnpm --dir ../tabularis-app-source --filter @tabularis/plugin-api build
+          pnpm --dir ../tabularis-app-source build
+      - name: Test the SDK and Spatial plugin
+        run: |
+          pnpm test:sdk
+          pnpm test:ui
+          cargo test --locked --workspace
+      - name: Configure native installation fixture
+        run: node scripts/ci/install.mjs prepare
+      - name: Check ZIP packaging
+        run: node --test tests/install/*.test.mjs
+      - name: Install production ZIP with the native host
+        if: runner.os != 'Windows'
+        run: cargo test --locked --manifest-path ../tabularis-app-source/src-tauri/Cargo.toml --lib plugins::native_package_tests::현재_os의_실제_설치기는_지도_zip과_로컬_자산을_그대로_설치한다 -- --ignored --exact --test-threads=1
+      - name: Install production ZIP with the Windows native host
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/ci/windows-install.ps1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: spatial-${{ runner.os }}
+          path: tabularis-spatial/artifacts/
+          if-no-files-found: warn
+          retention-days: 14
+
+  drivers:
+    if: ${{ !inputs.windows_only }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: tabularis-spatial
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_TARGET_DIR: ${{ github.workspace }}/driver-target
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: tabularis-spatial
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24.21.0
+      - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4
+        with:
+          toolchain: 1.96.0
+          components: clippy
+      - name: Prepare pinned driver sources
+        run: |
+          node scripts/bootstrap.mjs --only postgresql
+          node scripts/bootstrap.mjs --only sqlserver
+      - name: Check existing drivers with their service extensions
+        run: |
+          cargo test --locked --manifest-path ../tabularis-postgresql-plugin/Cargo.toml --bin postgresql-plugin
+          cargo clippy --locked --manifest-path ../tabularis-postgresql-plugin/Cargo.toml --bin postgresql-plugin -- -D warnings
+          cargo test --locked --manifest-path ../tabularis-sqlserver-plugin/Cargo.toml --bin sqlserver-plugin
+          cargo clippy --locked --manifest-path ../tabularis-sqlserver-plugin/Cargo.toml --bin sqlserver-plugin -- -D warnings

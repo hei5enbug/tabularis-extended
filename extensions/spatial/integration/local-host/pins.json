@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/TabularisDB/tabularis.git",
+  "revision": "5d7e27408907c0faafc8cc6b940725f4a1258f42",
+  "base_version": "0.26.0",
+  "local_version": "0.26.0+local.1",
+  "patch": "plugin-drivers-only.patch",
+  "patch_sha256": "607a39712d162aeaa3983673594bc0ab2362696d60069e435ce13cf1dc3762ee"
+}

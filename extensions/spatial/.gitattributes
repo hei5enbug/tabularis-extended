@@ -1,0 +1,2 @@
+integration/patches/*.patch -text -whitespace
+build-support/sdk/** -text

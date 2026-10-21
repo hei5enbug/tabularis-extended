@@ -1,0 +1,10 @@
+packages:
+  - ui
+  - build-support/sdk/packages/plugin-api
+  - build-support/sdk/packages/service-contracts
+
+overrides:
+  'vite>esbuild': 0.28.1
+
+ignoredBuiltDependencies:
+  - esbuild

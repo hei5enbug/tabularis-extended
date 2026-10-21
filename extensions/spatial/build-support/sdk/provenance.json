@@ -1,0 +1,149 @@
+{
+  "version": 1,
+  "origin_repository": "https://github.com/hei5enbug/tabularis-azure",
+  "origin_revision": "7f165e677c167fc0f189e5f268cd57d2954f7913",
+  "origin_path": "build-support/host",
+  "upstream_repository": "https://github.com/TabularisDB/tabularis.git",
+  "upstream_base_sha": "b78a40946f072f6b8f2f1a4c80c1e04ff9b54cd4",
+  "canonical_host_commit": "a10ba47979320766f0cb706afd48e6cecd7331e8",
+  "api_version": "0.2.0",
+  "service_protocol": 1,
+  "files": [
+    {
+      "path": "LICENSE",
+      "sha256": "ee56d1727130f5d69da1d91883237e3b74b27dd392b0b8306ac0abb8d27a2a2d",
+      "size": 11346,
+      "origin_sha256": "ee56d1727130f5d69da1d91883237e3b74b27dd392b0b8306ac0abb8d27a2a2d"
+    },
+    {
+      "path": "packages/plugin-api/.gitignore",
+      "sha256": "6357d8cfc2c6e49b5cba69b71938c004cda2c400db1ed8ee28e2242eb506fa7a",
+      "size": 34,
+      "origin_sha256": "6357d8cfc2c6e49b5cba69b71938c004cda2c400db1ed8ee28e2242eb506fa7a"
+    },
+    {
+      "path": "packages/plugin-api/LICENSE",
+      "sha256": "ee56d1727130f5d69da1d91883237e3b74b27dd392b0b8306ac0abb8d27a2a2d",
+      "size": 11346,
+      "origin_sha256": "ee56d1727130f5d69da1d91883237e3b74b27dd392b0b8306ac0abb8d27a2a2d"
+    },
+    {
+      "path": "packages/plugin-api/README.md",
+      "sha256": "543ba415a08e4261e7e997df474deb13522c2830d8867d37f16b068c26d616a5",
+      "size": 2836,
+      "origin_sha256": "543ba415a08e4261e7e997df474deb13522c2830d8867d37f16b068c26d616a5"
+    },
+    {
+      "path": "packages/plugin-api/package.json",
+      "sha256": "d9b42c820345835367fd5422311c188a042ef0afda7b110bd8a6d058d25da9ad",
+      "size": 1241,
+      "origin_sha256": "8a13d8f06a9c53bf55e40e56864d53a5a2cbc4bd47a106d4f0eb2cf324259fc0"
+    },
+    {
+      "path": "packages/plugin-api/src/hooks.ts",
+      "sha256": "310b15d14abbae57b142629d59a3ef28628f74150757cf7e0c2da8c7fd61f2f8",
+      "size": 2306,
+      "origin_sha256": "310b15d14abbae57b142629d59a3ef28628f74150757cf7e0c2da8c7fd61f2f8"
+    },
+    {
+      "path": "packages/plugin-api/src/host.ts",
+      "sha256": "0a646814806bc78d88383251068be4316122736285d91ce10c85abdd4f5dd537",
+      "size": 2552,
+      "origin_sha256": "0a646814806bc78d88383251068be4316122736285d91ce10c85abdd4f5dd537"
+    },
+    {
+      "path": "packages/plugin-api/src/index.ts",
+      "sha256": "58e07104c949bedcff813dd9945a5591b4b2788dfc5875fe23880b12e6ce6b71",
+      "size": 1235,
+      "origin_sha256": "58e07104c949bedcff813dd9945a5591b4b2788dfc5875fe23880b12e6ce6b71"
+    },
+    {
+      "path": "packages/plugin-api/src/slots.ts",
+      "sha256": "caa4cc28ec3b437f5258d1cfee8838923143d4649c1b226ad21967d7d0c1d9ae",
+      "size": 5020,
+      "origin_sha256": "caa4cc28ec3b437f5258d1cfee8838923143d4649c1b226ad21967d7d0c1d9ae"
+    },
+    {
+      "path": "packages/plugin-api/src/types.ts",
+      "sha256": "ebe902b4e71f06bfb306cdedbb36b18796aacb5055dfaa702f1c5a18779ed928",
+      "size": 4777,
+      "origin_sha256": "ebe902b4e71f06bfb306cdedbb36b18796aacb5055dfaa702f1c5a18779ed928"
+    },
+    {
+      "path": "packages/plugin-api/src/version.ts",
+      "sha256": "6cbae634e1ec43b1c0124c8e00e4276b220bdaa12fd552dd159a5d0060b59f13",
+      "size": 483,
+      "origin_sha256": "6cbae634e1ec43b1c0124c8e00e4276b220bdaa12fd552dd159a5d0060b59f13"
+    },
+    {
+      "path": "packages/plugin-api/tsconfig.json",
+      "sha256": "81631af097abbe7b4246928517795939247750888aa841195e619c5da317b743",
+      "size": 662,
+      "origin_sha256": "81631af097abbe7b4246928517795939247750888aa841195e619c5da317b743"
+    },
+    {
+      "path": "packages/plugin-api/tsup.config.ts",
+      "sha256": "fe696428b7528511fe673ca9e01a3a16983af4823dcdf36c201cfc307ebf5ce0",
+      "size": 286,
+      "origin_sha256": "fe696428b7528511fe673ca9e01a3a16983af4823dcdf36c201cfc307ebf5ce0"
+    },
+    {
+      "path": "packages/service-contracts/LICENSE",
+      "sha256": "ee56d1727130f5d69da1d91883237e3b74b27dd392b0b8306ac0abb8d27a2a2d",
+      "size": 11346,
+      "origin_sha256": "ee56d1727130f5d69da1d91883237e3b74b27dd392b0b8306ac0abb8d27a2a2d"
+    },
+    {
+      "path": "packages/service-contracts/fixtures/v1/postgis-images.json",
+      "sha256": "cc3187d46d416a6e6ae9fbaf34d926d5ee3adfe3adfb11b2867156ccbbdaea66",
+      "size": 244,
+      "origin_sha256": "cc3187d46d416a6e6ae9fbaf34d926d5ee3adfe3adfb11b2867156ccbbdaea66"
+    },
+    {
+      "path": "packages/service-contracts/fixtures/v1/validation.json",
+      "sha256": "55b0e8ca95b1d318a27356cd902599072d4ff8270c58f00a2a9ae4e3f71c0f79",
+      "size": 291319,
+      "origin_sha256": "55b0e8ca95b1d318a27356cd902599072d4ff8270c58f00a2a9ae4e3f71c0f79"
+    },
+    {
+      "path": "packages/service-contracts/package.json",
+      "sha256": "78045cd4eb8f9154a911c1fa8ae5e696155239f561cd0e5666710944e34c72fe",
+      "size": 771,
+      "origin_sha256": "4cb96bd02a533540a78a1fa1e4fd5c6d75ee5f43bec95bcec40575a8884de2ca"
+    },
+    {
+      "path": "packages/service-contracts/schema/v1/request.json",
+      "sha256": "e058298905ecc1c718a7e0e7071a56defa9954a69d094007e2f851a05a949e19",
+      "size": 55881,
+      "origin_sha256": "e058298905ecc1c718a7e0e7071a56defa9954a69d094007e2f851a05a949e19"
+    },
+    {
+      "path": "packages/service-contracts/schema/v1/response.json",
+      "sha256": "30c965e5a6b60bcfcdc7edb1a4bc03f30f65e49fd058b7cc7e8089131e9290ea",
+      "size": 5123,
+      "origin_sha256": "30c965e5a6b60bcfcdc7edb1a4bc03f30f65e49fd058b7cc7e8089131e9290ea"
+    },
+    {
+      "path": "packages/service-contracts/src/index.ts",
+      "sha256": "b59c5e5b36224db0c5028efc6bf7a4733c13e42c44efc656565fc3818d066a1a",
+      "size": 2634,
+      "origin_sha256": "b59c5e5b36224db0c5028efc6bf7a4733c13e42c44efc656565fc3818d066a1a"
+    },
+    {
+      "path": "packages/service-contracts/src/types.ts",
+      "sha256": "11041ef010e1f12c4c9b6e5067cfe88072ca91d4eb3ea560964fed149a507a5b",
+      "size": 9493,
+      "origin_sha256": "11041ef010e1f12c4c9b6e5067cfe88072ca91d4eb3ea560964fed149a507a5b"
+    },
+    {
+      "path": "packages/service-contracts/tsconfig.json",
+      "sha256": "1a17b757166e437788a1a6640fe86a12ef4199333784a8250b9ece994160de45",
+      "size": 376,
+      "origin_sha256": "1a17b757166e437788a1a6640fe86a12ef4199333784a8250b9ece994160de45"
+    }
+  ],
+  "adaptations": [
+    "Package manifests are private and expose only build/typecheck scripts.",
+    "SDK development dependency versions are pinned; host-only sync, Rust harness and host integration tests are omitted."
+  ]
+}
