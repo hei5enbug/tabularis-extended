@@ -1,2 +1,2 @@
-#[path="spatial/live.rs"]
+#[path = "spatial/live.rs"]
 mod live;

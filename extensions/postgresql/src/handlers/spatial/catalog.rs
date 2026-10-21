@@ -1,8 +1,8 @@
 use serde::Serialize;
 use tokio_postgres::{Client, Column};
 
-use crate::utils::identifiers::quote_identifier;
 use super::{ewkb, SpatialError};
+use crate::utils::identifiers::quote_identifier;
 
 #[derive(Clone, Debug)]
 pub struct Catalog {
@@ -21,25 +21,45 @@ impl Catalog {
               WHERE d.refobjid=e.oid AND d.refclassid='pg_extension'::regclass AND d.deptype='e' AND t.typname='geography') AS geography_oid \
              FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE e.extname='postgis'", &[])
             .await.map_err(SpatialError::database)?;
-        row.map(|r| Ok(Self { schema: r.get(0), geometry_oid: r.try_get(1)
-            .map_err(|_| SpatialError::unsupported("PostGIS geometry type is unavailable"))?,
-            geography_oid: r.try_get(2)
-            .map_err(|_| SpatialError::unsupported("PostGIS geography type is unavailable"))? })).transpose()
+        row.map(|r| {
+            Ok(Self {
+                schema: r.get(0),
+                geometry_oid: r.try_get(1).map_err(|_| {
+                    SpatialError::unsupported("PostGIS geometry type is unavailable")
+                })?,
+                geography_oid: r.try_get(2).map_err(|_| {
+                    SpatialError::unsupported("PostGIS geography type is unavailable")
+                })?,
+            })
+        })
+        .transpose()
     }
     pub fn function(&self, name: &str) -> String {
-        format!("{}.{}", quote_identifier(&self.schema), quote_identifier(name))
+        format!(
+            "{}.{}",
+            quote_identifier(&self.schema),
+            quote_identifier(name)
+        )
     }
-    pub fn native_type(&self,ty: &tokio_postgres::types::Type) -> Option<&'static str> {
-        let ty=ewkb::base_type(ty);
-        if ty.schema()!=self.schema {return None;}
-        if ty.oid()==self.geometry_oid {Some("geometry")}
-        else if ty.oid()==self.geography_oid {Some("geography")}
-        else {None}
+    pub fn native_type(&self, ty: &tokio_postgres::types::Type) -> Option<&'static str> {
+        let ty = ewkb::base_type(ty);
+        if ty.schema() != self.schema {
+            return None;
+        }
+        if ty.oid() == self.geometry_oid {
+            Some("geometry")
+        } else if ty.oid() == self.geography_oid {
+            Some("geography")
+        } else {
+            None
+        }
     }
-    fn spatial_array(&self,ty: &tokio_postgres::types::Type) -> bool {
+    fn spatial_array(&self, ty: &tokio_postgres::types::Type) -> bool {
         match ewkb::base_type(ty).kind() {
-            tokio_postgres::types::Kind::Array(element)=>self.native_type(element).is_some()||self.spatial_array(element),
-            _=>false,
+            tokio_postgres::types::Kind::Array(element) => {
+                self.native_type(element).is_some() || self.spatial_array(element)
+            }
+            _ => false,
         }
     }
     pub fn validate_columns(&self, columns: &[Column]) -> Result<(), SpatialError> {
@@ -49,9 +69,15 @@ impl Catalog {
                 return Err(SpatialError::unsupported("Spatial arrays are unsupported"));
             }
             if let Some(native) = self.native_type(ty) {
-                let oid = if native == "geometry" { self.geometry_oid } else { self.geography_oid };
+                let oid = if native == "geometry" {
+                    self.geometry_oid
+                } else {
+                    self.geography_oid
+                };
                 if ty.oid() != oid || ty.schema() != self.schema {
-                    return Err(SpatialError::unsupported("Type is not owned by the PostGIS extension"));
+                    return Err(SpatialError::unsupported(
+                        "Type is not owned by the PostGIS extension",
+                    ));
                 }
             }
         }
@@ -88,27 +114,64 @@ pub struct TableCatalog {
 
 fn supports_keyset(oid: u32) -> bool {
     use tokio_postgres::types::Type;
-    [Type::BOOL,Type::INT2,Type::INT4,Type::INT8,Type::FLOAT4,Type::FLOAT8,
-        Type::NUMERIC,Type::TEXT,Type::VARCHAR,Type::BPCHAR,Type::NAME,Type::UUID,
-        Type::DATE,Type::TIME,Type::TIMESTAMP,Type::TIMESTAMPTZ,
-        Type::OID,Type::INET,Type::CIDR,Type::MACADDR,Type::MACADDR8,Type::BIT,Type::VARBIT]
-        .iter().any(|ty|ty.oid()==oid)
+    [
+        Type::BOOL,
+        Type::INT2,
+        Type::INT4,
+        Type::INT8,
+        Type::FLOAT4,
+        Type::FLOAT8,
+        Type::NUMERIC,
+        Type::TEXT,
+        Type::VARCHAR,
+        Type::BPCHAR,
+        Type::NAME,
+        Type::UUID,
+        Type::DATE,
+        Type::TIME,
+        Type::TIMESTAMP,
+        Type::TIMESTAMPTZ,
+        Type::OID,
+        Type::INET,
+        Type::CIDR,
+        Type::MACADDR,
+        Type::MACADDR8,
+        Type::BIT,
+        Type::VARBIT,
+    ]
+    .iter()
+    .any(|ty| ty.oid() == oid)
 }
 
-pub async fn table_columns(client: &Client, catalog: &Catalog, schema: &str, table: &str)
-    -> Result<TableCatalog, SpatialError> {
-    let relation = client.query_opt(
-        "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
-         WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind IN ('r','p','v','m','f')", &[&schema, &table])
-        .await.map_err(SpatialError::database)?
+pub async fn table_columns(
+    client: &Client,
+    catalog: &Catalog,
+    schema: &str,
+    table: &str,
+) -> Result<TableCatalog, SpatialError> {
+    let relation = client
+        .query_opt(
+            "SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace \
+         WHERE n.nspname=$1 AND c.relname=$2 AND c.relkind IN ('r','p','v','m','f')",
+            &[&schema, &table],
+        )
+        .await
+        .map_err(SpatialError::database)?
         .ok_or_else(|| SpatialError::argument("Table does not exist"))?;
     let relation_oid: u32 = relation.get(0);
-    let primary_key = client.query(
-        "SELECT a.attname::text FROM pg_constraint c \
+    let primary_key = client
+        .query(
+            "SELECT a.attname::text FROM pg_constraint c \
          CROSS JOIN LATERAL unnest(c.conkey) WITH ORDINALITY AS k(attnum,ord) \
          JOIN pg_attribute a ON a.attrelid=c.conrelid AND a.attnum=k.attnum \
-         WHERE c.conrelid=$1 AND c.contype='p' ORDER BY k.ord", &[&relation_oid])
-        .await.map_err(SpatialError::database)?.iter().map(|r| r.get(0)).collect::<Vec<String>>();
+         WHERE c.conrelid=$1 AND c.contype='p' ORDER BY k.ord",
+            &[&relation_oid],
+        )
+        .await
+        .map_err(SpatialError::database)?
+        .iter()
+        .map(|r| r.get(0))
+        .collect::<Vec<String>>();
     let query = format!(
         "WITH RECURSIVE ty AS ( \
          SELECT a.attnum,a.attname,a.atttypid AS type_oid,a.atttypid AS base_oid,a.atttypmod AS typmod,a.attnotnull,0 AS depth \
@@ -130,30 +193,77 @@ pub async fn table_columns(client: &Client, catalog: &Catalog, schema: &str, tab
          WHERE t.typtype<>'d' OR ty.depth=64 ORDER BY ty.attnum",
         catalog.function("postgis_typmod_srid"), catalog.function("postgis_typmod_type"),
         quote_identifier(&catalog.schema), quote_identifier(&catalog.schema));
-    let rows = client.query(&query, &[&relation_oid,&catalog.geometry_oid,&catalog.geography_oid,&schema,&table])
-        .await.map_err(SpatialError::database)?;
+    let rows = client
+        .query(
+            &query,
+            &[
+                &relation_oid,
+                &catalog.geometry_oid,
+                &catalog.geography_oid,
+                &schema,
+                &table,
+            ],
+        )
+        .await
+        .map_err(SpatialError::database)?;
     let mut columns = Vec::new();
     let mut all_columns = Vec::new();
     let mut column_types = std::collections::HashMap::new();
-    let mut keyset_supported=true;
-    for (column_index,row) in rows.into_iter().enumerate() {
+    let mut keyset_supported = true;
+    for (column_index, row) in rows.into_iter().enumerate() {
         let name: String = row.get(0);
         all_columns.push(name.clone());
         column_types.insert(name.clone(), row.get(6));
         let oid: u32 = row.get(2);
-        if primary_key.contains(&name) && !supports_keyset(oid) {keyset_supported=false;}
-        if oid != catalog.geometry_oid && oid != catalog.geography_oid { continue; }
+        if primary_key.contains(&name) && !supports_keyset(oid) {
+            keyset_supported = false;
+        }
+        if oid != catalog.geometry_oid && oid != catalog.geography_oid {
+            continue;
+        }
         let srid: i32 = row.get(7);
         let typmod: i32 = row.get(3);
         let geometry_type: Option<String> = row.get(8);
         let dimensions = geometry_type.as_deref().map(|g| {
-            if g.ends_with("ZM") { "XYZM" } else if g.ends_with('Z') { "XYZ" }
-            else if g.ends_with('M') { "XYM" } else { "XY" }.to_string()
+            if g.ends_with("ZM") {
+                "XYZM"
+            } else if g.ends_with('Z') {
+                "XYZ"
+            } else if g.ends_with('M') {
+                "XYM"
+            } else {
+                "XY"
+            }
+            .to_string()
         });
-        columns.push(SpatialColumn { column: name, column_index, native_type: row.get(5), type_oid: row.get(1),
-            base_oid: oid, typmod, nullable: !row.get::<_, bool>(4), srid: (srid != 0).then_some(srid),
-            srid_status: if srid != 0 { "known" } else if typmod < 0 { "mixed" } else { "unknown" }.into(),
-            dimensions, geometry_type, primary_key: primary_key.clone(), spatial_index: row.get(11) });
+        columns.push(SpatialColumn {
+            column: name,
+            column_index,
+            native_type: row.get(5),
+            type_oid: row.get(1),
+            base_oid: oid,
+            typmod,
+            nullable: !row.get::<_, bool>(4),
+            srid: (srid != 0).then_some(srid),
+            srid_status: if srid != 0 {
+                "known"
+            } else if typmod < 0 {
+                "mixed"
+            } else {
+                "unknown"
+            }
+            .into(),
+            dimensions,
+            geometry_type,
+            primary_key: primary_key.clone(),
+            spatial_index: row.get(11),
+        });
     }
-    Ok(TableCatalog { columns, primary_key, all_columns, column_types, keyset_supported })
+    Ok(TableCatalog {
+        columns,
+        primary_key,
+        all_columns,
+        column_types,
+        keyset_supported,
+    })
 }

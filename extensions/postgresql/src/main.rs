@@ -30,7 +30,10 @@ const REQUEST_QUEUE_CAPACITY: usize = 64;
 
 const POOL_CLEANUP_INTERVAL: Duration = Duration::from_secs(30);
 
-struct Request {line: String,scope: Option<postgresql_plugin::cancel::ScopedGuard>}
+struct Request {
+    line: String,
+    scope: Option<postgresql_plugin::cancel::ScopedGuard>,
+}
 
 #[tokio::main]
 async fn main() {
@@ -47,7 +50,7 @@ async fn main() {
     let worker_handles: Vec<_> = (0..WORKER_POOL_SIZE)
         .map(|_| tokio::spawn(run_worker(req_rx.clone(), resp_tx.clone())))
         .collect();
-    run_reader(req_tx,resp_tx).await;
+    run_reader(req_tx, resp_tx).await;
 
     let _ = shutdown_tx.send(true);
 
@@ -71,9 +74,9 @@ async fn run_pool_cleanup(mut shutdown_rx: watch::Receiver<bool>) {
     }
 }
 
-async fn run_reader(req_tx: mpsc::Sender<Request>,resp_tx: mpsc::UnboundedSender<String>) {
+async fn run_reader(req_tx: mpsc::Sender<Request>, resp_tx: mpsc::UnboundedSender<String>) {
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    let mut controls=tokio::task::JoinSet::new();
+    let mut controls = tokio::task::JoinSet::new();
 
     loop {
         let line = match lines.next_line().await {
@@ -90,34 +93,77 @@ async fn run_reader(req_tx: mpsc::Sender<Request>,resp_tx: mpsc::UnboundedSender
             continue;
         }
 
-        let request=serde_json::from_str::<serde_json::Value>(trimmed).ok();
-        let method=request.as_ref().and_then(|r|r["method"].as_str()).unwrap_or("");
-        if matches!(method,"cancel"|"cancel_request"|"service_invalidate_auth") {
-            let line=trimmed.to_string();let sender=resp_tx.clone();
+        let request = serde_json::from_str::<serde_json::Value>(trimmed).ok();
+        let method = request
+            .as_ref()
+            .and_then(|r| r["method"].as_str())
+            .unwrap_or("");
+        if matches!(
+            method,
+            "cancel" | "cancel_request" | "service_invalidate_auth"
+        ) {
+            let line = trimmed.to_string();
+            let sender = resp_tx.clone();
             controls.spawn(async move {
-                if let Some(response)=postgresql_plugin::rpc::handle_line(&line).await {send_response(&sender,response);}
+                if let Some(response) = postgresql_plugin::rpc::handle_line(&line).await {
+                    send_response(&sender, response);
+                }
             });
             while controls.try_join_next().is_some() {}
             continue;
         }
-        let scope=if matches!(method,"execute_query_exact"|"spatial_columns"|"spatial_transform_values"|"spatial_query_table"|"spatial_read_feature"|
-            "service_session_open"|"service_session_finish"|"service_session_discard"|"service_test"|"service_catalog"|"service_row") {
-            let context=request.as_ref().map(|r|&r["params"]["driver_context"]);
-            match context.and_then(|c|Some((c["connection_id"].as_str()?,c["request_id"].as_str()?))) {
-                Some((connection,request_id))=>match postgresql_plugin::cancel::ScopedGuard::reserve(connection,request_id) {
-                    Ok(scope)=>Some(scope),Err(error)=>{
-                        if let Some(request)=request.as_ref().filter(|r|r.get("id").is_some()) {send_response(&resp_tx,error.response(request["id"].clone()));}
-                        continue;
+        let scope = if matches!(
+            method,
+            "execute_query_exact"
+                | "spatial_columns"
+                | "spatial_transform_values"
+                | "spatial_query_table"
+                | "spatial_read_feature"
+                | "service_session_open"
+                | "service_session_finish"
+                | "service_session_discard"
+                | "service_test"
+                | "service_catalog"
+                | "service_row"
+        ) {
+            let context = request.as_ref().map(|r| &r["params"]["driver_context"]);
+            match context
+                .and_then(|c| Some((c["connection_id"].as_str()?, c["request_id"].as_str()?)))
+            {
+                Some((connection, request_id)) => {
+                    match postgresql_plugin::cancel::ScopedGuard::reserve(connection, request_id) {
+                        Ok(scope) => Some(scope),
+                        Err(error) => {
+                            if let Some(request) =
+                                request.as_ref().filter(|r| r.get("id").is_some())
+                            {
+                                send_response(&resp_tx, error.response(request["id"].clone()));
+                            }
+                            continue;
+                        }
                     }
-                },None=>None,
+                }
+                None => None,
             }
-        } else {None};
-        match req_tx.try_send(Request {line:trimmed.to_string(),scope}) {
-            Ok(())=>{},
-            Err(mpsc::error::TrySendError::Closed(_))=>break,
-            Err(mpsc::error::TrySendError::Full(_))=>{
-                if let Some(request)=request.as_ref().filter(|r|r.get("id").is_some()) {
-                    send_response(&resp_tx,postgresql_plugin::handlers::spatial::SpatialError::new("RATE_LIMITED","Driver request queue is full").response(request["id"].clone()));
+        } else {
+            None
+        };
+        match req_tx.try_send(Request {
+            line: trimmed.to_string(),
+            scope,
+        }) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Closed(_)) => break,
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                if let Some(request) = request.as_ref().filter(|r| r.get("id").is_some()) {
+                    send_response(
+                        &resp_tx,
+                        postgresql_plugin::handlers::spatial::SpatialError::new(
+                            "RATE_LIMITED",
+                            "Driver request queue is full",
+                        )
+                        .response(request["id"].clone()),
+                    );
                 }
             }
         }
@@ -125,8 +171,10 @@ async fn run_reader(req_tx: mpsc::Sender<Request>,resp_tx: mpsc::UnboundedSender
     while controls.join_next().await.is_some() {}
 }
 
-fn send_response(sender: &mpsc::UnboundedSender<String>,response: serde_json::Value) {
-    if let Ok(body)=serde_json::to_string(&response) {let _=sender.send(body);}
+fn send_response(sender: &mpsc::UnboundedSender<String>, response: serde_json::Value) {
+    if let Ok(body) = serde_json::to_string(&response) {
+        let _ = sender.send(body);
+    }
 }
 
 async fn run_worker(
@@ -145,7 +193,9 @@ async fn run_worker(
         // on a plugin-call timeout, #126). A notification gets no response
         // per JSON-RPC convention, and writing one would corrupt the protocol
         // stream — so only forward a `Some` response to the writer.
-        if let Some(response) = postgresql_plugin::rpc::handle_line_with_scope(&line.line,line.scope).await {
+        if let Some(response) =
+            postgresql_plugin::rpc::handle_line_with_scope(&line.line, line.scope).await
+        {
             let body = match serde_json::to_string(&response) {
                 Ok(s) => s,
                 Err(err) => format!(

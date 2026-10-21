@@ -184,7 +184,9 @@ pub struct ServiceSlot {
 
 impl Drop for ServiceSlot {
     fn drop(&mut self) {
-        if let Some(client) = self.client.take() { drop(Client::take(client)); }
+        if let Some(client) = self.client.take() {
+            drop(Client::take(client));
+        }
     }
 }
 
@@ -202,30 +204,72 @@ fn service_sessions() -> &'static Mutex<ServiceMap> {
 pub async fn open_service(client: Client, connection_id: String, read_only: bool) -> String {
     let handle = uuid::Uuid::new_v4().to_string();
     let invalidated = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    service_sessions().lock().await.insert(handle.clone(), ServiceEntry {
-        connection_id: connection_id.clone(), invalidated: invalidated.clone(),
-        slot: Arc::new(Mutex::new(ServiceSlot {
-            client: Some(client),connection_id,read_only,last_used: Instant::now(),invalidated })) });
+    service_sessions().lock().await.insert(
+        handle.clone(),
+        ServiceEntry {
+            connection_id: connection_id.clone(),
+            invalidated: invalidated.clone(),
+            slot: Arc::new(Mutex::new(ServiceSlot {
+                client: Some(client),
+                connection_id,
+                read_only,
+                last_used: Instant::now(),
+                invalidated,
+            })),
+        },
+    );
     handle
 }
 
-pub async fn lock_service(handle: &str, connection_id: &str, read_only: bool)
-    -> Result<OwnedMutexGuard<ServiceSlot>, crate::handlers::spatial::SpatialError> {
+pub async fn lock_service(
+    handle: &str,
+    connection_id: &str,
+    read_only: bool,
+) -> Result<OwnedMutexGuard<ServiceSlot>, crate::handlers::spatial::SpatialError> {
     use crate::handlers::spatial::SpatialError;
-    let slot = service_sessions().lock().await.get(handle).map(|entry| entry.slot.clone())
+    let slot = service_sessions()
+        .lock()
+        .await
+        .get(handle)
+        .map(|entry| entry.slot.clone())
         .ok_or_else(|| SpatialError::new("CURSOR_EXPIRED", "Service session does not exist"))?;
     let mut guard = slot.lock_owned().await;
     if guard.invalidated.load(std::sync::atomic::Ordering::Acquire) {
-        if let Some(client) = guard.client.take() { drop(Client::take(client)); }
-        return Err(SpatialError::new("CURSOR_EXPIRED", "Service session authentication was invalidated"));
+        if let Some(client) = guard.client.take() {
+            drop(Client::take(client));
+        }
+        return Err(SpatialError::new(
+            "CURSOR_EXPIRED",
+            "Service session authentication was invalidated",
+        ));
     }
-    if guard.connection_id != connection_id { return Err(SpatialError::new("PERMISSION_DENIED", "Session belongs to another connection")); }
-    if guard.read_only != read_only { return Err(SpatialError::new("WRITE_NOT_ALLOWED", "Session access mode cannot be changed")); }
+    if guard.connection_id != connection_id {
+        return Err(SpatialError::new(
+            "PERMISSION_DENIED",
+            "Session belongs to another connection",
+        ));
+    }
+    if guard.read_only != read_only {
+        return Err(SpatialError::new(
+            "WRITE_NOT_ALLOWED",
+            "Session access mode cannot be changed",
+        ));
+    }
     if guard.last_used.elapsed() >= Duration::from_secs(300) {
-        if let Some(client) = guard.client.take() { rollback_service_client(client).await; }
-        return Err(SpatialError::new("CURSOR_EXPIRED", "Service session expired"));
+        if let Some(client) = guard.client.take() {
+            rollback_service_client(client).await;
+        }
+        return Err(SpatialError::new(
+            "CURSOR_EXPIRED",
+            "Service session expired",
+        ));
     }
-    if guard.client.is_none() { return Err(SpatialError::new("CURSOR_EXPIRED", "Service session is closed")); }
+    if guard.client.is_none() {
+        return Err(SpatialError::new(
+            "CURSOR_EXPIRED",
+            "Service session is closed",
+        ));
+    }
     guard.last_used = Instant::now();
     Ok(guard)
 }
@@ -237,19 +281,39 @@ pub async fn forget_service(handle: &str) {
 pub async fn invalidate_service_connection(connection_id: &str) -> usize {
     let entries = {
         let mut map = service_sessions().lock().await;
-        let handles = map.iter().filter_map(|(handle, entry)| (entry.connection_id == connection_id).then_some(handle.clone())).collect::<Vec<_>>();
-        handles.into_iter().filter_map(|handle| map.remove(&handle).inspect(|entry| entry.invalidated.store(true, std::sync::atomic::Ordering::Release))).collect::<Vec<_>>()
+        let handles = map
+            .iter()
+            .filter_map(|(handle, entry)| {
+                (entry.connection_id == connection_id).then_some(handle.clone())
+            })
+            .collect::<Vec<_>>();
+        handles
+            .into_iter()
+            .filter_map(|handle| {
+                map.remove(&handle).inspect(|entry| {
+                    entry
+                        .invalidated
+                        .store(true, std::sync::atomic::Ordering::Release)
+                })
+            })
+            .collect::<Vec<_>>()
     };
     let count = entries.len();
     for entry in entries {
-        entry.invalidated.store(true, std::sync::atomic::Ordering::Release);
+        entry
+            .invalidated
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut slot) = entry.slot.try_lock() {
-            if let Some(client) = slot.client.take() { drop(Client::take(client)); }
+            if let Some(client) = slot.client.take() {
+                drop(Client::take(client));
+            }
         } else {
             let pending = entry.slot.clone();
             tokio::spawn(async move {
                 let mut slot = pending.lock_owned().await;
-                if let Some(client) = slot.client.take() { drop(Client::take(client)); }
+                if let Some(client) = slot.client.take() {
+                    drop(Client::take(client));
+                }
             });
         }
     }
@@ -257,16 +321,20 @@ pub async fn invalidate_service_connection(connection_id: &str) -> usize {
 }
 
 pub async fn rollback_service_client(client: Client) -> bool {
-    if confirm_rollback(&client).await { true }
-    else { drop(Client::take(client)); false }
+    if confirm_rollback(&client).await {
+        true
+    } else {
+        drop(Client::take(client));
+        false
+    }
 }
 
 pub async fn confirm_rollback(client: &tokio_postgres::Client) -> bool {
     for _ in 0..2 {
-        match tokio::time::timeout(Duration::from_secs(5),client.batch_execute("ROLLBACK")).await {
-            Ok(Ok(()))=>return true,
-            Ok(Err(error)) if error.code().is_some_and(|code|code.code()=="57014")=>{},
-            _=>return false,
+        match tokio::time::timeout(Duration::from_secs(5), client.batch_execute("ROLLBACK")).await {
+            Ok(Ok(())) => return true,
+            Ok(Err(error)) if error.code().is_some_and(|code| code.code() == "57014") => {}
+            _ => return false,
         }
     }
     false
@@ -275,18 +343,31 @@ pub async fn confirm_rollback(client: &tokio_postgres::Client) -> bool {
 async fn sweep_service_idle() {
     let mut clients = Vec::new();
     service_sessions().lock().await.retain(|_, entry| {
-        let Ok(mut guard) = entry.slot.try_lock() else { return true; };
-        if guard.last_used.elapsed() >= Duration::from_secs(300) { clients.extend(guard.client.take()); false }
-        else { guard.client.is_some() }
+        let Ok(mut guard) = entry.slot.try_lock() else {
+            return true;
+        };
+        if guard.last_used.elapsed() >= Duration::from_secs(300) {
+            clients.extend(guard.client.take());
+            false
+        } else {
+            guard.client.is_some()
+        }
     });
-    for client in clients { rollback_service_client(client).await; }
+    for client in clients {
+        rollback_service_client(client).await;
+    }
 }
 
 async fn release_service_all() {
     let mut clients = Vec::new();
     service_sessions().lock().await.retain(|_, entry| {
-        let Ok(mut guard) = entry.slot.try_lock() else { return true; };
-        clients.extend(guard.client.take()); false
+        let Ok(mut guard) = entry.slot.try_lock() else {
+            return true;
+        };
+        clients.extend(guard.client.take());
+        false
     });
-    for client in clients { rollback_service_client(client).await; }
+    for client in clients {
+        rollback_service_client(client).await;
+    }
 }

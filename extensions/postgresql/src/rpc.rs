@@ -17,10 +17,13 @@ use crate::handlers;
 /// `None` so `main.rs`'s worker skips the stdout write entirely — a stray
 /// response line for a notification would corrupt the protocol stream.
 pub async fn handle_line(line: &str) -> Option<Value> {
-    handle_line_with_scope(line,None).await
+    handle_line_with_scope(line, None).await
 }
 
-pub async fn handle_line_with_scope(line: &str,scope: Option<crate::cancel::ScopedGuard>) -> Option<Value> {
+pub async fn handle_line_with_scope(
+    line: &str,
+    scope: Option<crate::cancel::ScopedGuard>,
+) -> Option<Value> {
     let request: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(err) => {
@@ -97,15 +100,33 @@ pub async fn handle_line_with_scope(line: &str,scope: Option<crate::cancel::Scop
 
         // Query execution
         "execute_query" => handlers::query::execute_query(id, &params).await,
-        "execute_query_exact" | "spatial_columns" | "spatial_transform_values" | "spatial_query_table" | "spatial_read_feature" |
-        "service_test" | "service_catalog" | "service_row" | "service_invalidate_auth" =>
-            handlers::spatial::dispatch_with_scope(id,&params,&method,scope).await,
-        "service_session_open" | "service_session_finish" | "service_session_discard" =>
-            handlers::spatial::sessions::dispatch_with_scope(id,&params,&method,scope).await,
+        "execute_query_exact"
+        | "spatial_columns"
+        | "spatial_transform_values"
+        | "spatial_query_table"
+        | "spatial_read_feature"
+        | "service_test"
+        | "service_catalog"
+        | "service_row"
+        | "service_invalidate_auth" => {
+            handlers::spatial::dispatch_with_scope(id, &params, &method, scope).await
+        }
+        "service_session_open" | "service_session_finish" | "service_session_discard" => {
+            handlers::spatial::sessions::dispatch_with_scope(id, &params, &method, scope).await
+        }
         "cancel_request" => {
-            match (params.get("connection_id").and_then(Value::as_str),params.get("request_id").and_then(Value::as_str)) {
-                (Some(connection),Some(request))=>ok_response(id,json!({"accepted":crate::cancel::cancel_scoped(connection,request).await})),
-                _=>handlers::spatial::SpatialError::argument("connection_id and request_id are required").response(id),
+            match (
+                params.get("connection_id").and_then(Value::as_str),
+                params.get("request_id").and_then(Value::as_str),
+            ) {
+                (Some(connection), Some(request)) => ok_response(
+                    id,
+                    json!({"accepted":crate::cancel::cancel_scoped(connection,request).await}),
+                ),
+                _ => handlers::spatial::SpatialError::argument(
+                    "connection_id and request_id are required",
+                )
+                .response(id),
             }
         }
         "execute_query_batch" => handlers::query::execute_query_batch(id, &params).await,

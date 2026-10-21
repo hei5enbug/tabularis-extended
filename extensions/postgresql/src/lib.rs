@@ -19,12 +19,12 @@ mod extract_tests;
 pub mod handlers;
 pub mod models;
 pub mod rpc;
+#[cfg(test)]
+#[path = "../tests/spatial/service_unit.rs"]
+mod service_tests;
 pub mod session;
 pub mod settings;
-pub mod utils;
 #[cfg(test)]
-#[path="../tests/spatial/unit.rs"]
+#[path = "../tests/spatial/unit.rs"]
 mod spatial_tests;
-#[cfg(test)]
-#[path="../tests/spatial/service_unit.rs"]
-mod service_tests;
+pub mod utils;
