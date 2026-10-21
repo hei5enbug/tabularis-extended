@@ -4,20 +4,29 @@ use once_cell::sync::Lazy;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, Mutex,
     },
     time::Duration,
 };
 use tokio::{sync::Semaphore, time::Instant};
 
+#[cfg(test)]
+pub static SHUTDOWN_GATE: std::sync::RwLock<()> = std::sync::RwLock::new(());
 type Key = (String, String);
 static REQUESTS: Lazy<Mutex<HashMap<Key, Arc<State>>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static CONNECTION_LIMITS: Lazy<Mutex<HashMap<String, Arc<Semaphore>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cause {
+    Cancelled,
+    Deadline,
+}
+const NO_CAUSE: u8 = 0;
 pub struct State {
     cancel: Mutex<Option<CancelHandle>>,
     cancelled: AtomicBool,
+    cause: AtomicU8,
     sealed: AtomicBool,
     write_dispatched: AtomicBool,
     session_touched: AtomicBool,
@@ -30,6 +39,17 @@ pub struct Scope {
     key: Key,
 }
 impl State {
+    pub fn cause(&self) -> Option<Cause> {
+        match self.cause.load(Ordering::Acquire) {
+            1 => Some(Cause::Cancelled),
+            2 => Some(Cause::Deadline),
+            _ => None,
+        }
+    }
+    fn seal(&self) {
+        let _serialized = self.cancel.lock().unwrap();
+        self.sealed.store(true, Ordering::Release);
+    }
     pub fn mark_write(&self) {
         self.write_dispatched.store(true, Ordering::Release);
     }
@@ -57,6 +77,7 @@ impl Scope {
         let state = Arc::new(State {
             cancel: Mutex::new(Some(CancelHandle::new())),
             cancelled: AtomicBool::new(false),
+            cause: AtomicU8::new(NO_CAUSE),
             sealed: AtomicBool::new(false),
             write_dispatched: AtomicBool::new(false),
             session_touched: AtomicBool::new(false),
@@ -83,7 +104,12 @@ impl Scope {
     }
     pub fn remaining(&self) -> Result<u64, ServiceError> {
         if self.cancelled() {
-            return Err(ServiceError::new("CANCELLED", "The request was cancelled"));
+            return Err(match self.cause() {
+                Some(Cause::Deadline) => {
+                    ServiceError::new("DEADLINE_EXCEEDED", "The request deadline was exceeded")
+                }
+                _ => ServiceError::new("CANCELLED", "The request was cancelled"),
+            });
         }
         let remaining = self
             .state
@@ -100,6 +126,9 @@ impl Scope {
     }
     pub fn cancelled(&self) -> bool {
         self.state.cancelled.load(Ordering::Acquire)
+    }
+    pub fn cause(&self) -> Option<Cause> {
+        self.state.cause()
     }
     pub fn mark_write(&self) {
         self.state.mark_write();
@@ -119,11 +148,15 @@ impl Scope {
     pub fn opened_session(&self) -> Option<String> {
         self.state.opened_session.lock().unwrap().clone()
     }
+    #[cfg(test)]
     pub fn stop(&self) {
-        stop(&self.state);
+        stop(&self.state, Cause::Cancelled);
+    }
+    pub fn expire(&self) {
+        stop(&self.state, Cause::Deadline);
     }
     pub fn seal(&self) {
-        self.state.sealed.store(true, Ordering::Release);
+        self.state.seal();
     }
     pub fn connection_id(&self) -> &str {
         &self.key.0
@@ -135,40 +168,64 @@ impl Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         self.seal();
-        REQUESTS.lock().unwrap().remove(&self.key);
+        let mut requests = REQUESTS.lock().unwrap();
+        if requests
+            .get(&self.key)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.state))
+        {
+            requests.remove(&self.key);
+        }
     }
 }
-fn stop(state: &State) {
-    if state.sealed.load(Ordering::Acquire) {
-        return;
+/// Signals one execution exactly once. Returns false when the entry is
+/// already sealed (completed) or was already signalled, so repeated or late
+/// calls are no-ops. Sealing and signalling share one lock, which makes the
+/// outcome of a completion-versus-cancel race a single decision.
+fn stop(state: &State, cause: Cause) -> bool {
+    let mut parent = state.cancel.lock().unwrap();
+    if state.sealed.load(Ordering::Acquire) || state.cancelled.load(Ordering::Acquire) {
+        return false;
     }
+    state.cause.store(
+        match cause {
+            Cause::Cancelled => 1,
+            Cause::Deadline => 2,
+        },
+        Ordering::Release,
+    );
     state.cancelled.store(true, Ordering::Release);
     state.notify.notify_waiters();
-    if let Some(handle) = state.cancel.lock().unwrap().take() {
+    if let Some(handle) = parent.take() {
         handle.cancel();
     }
+    true
 }
 pub fn cancel(connection: &str, request: &str) -> bool {
     let requests = REQUESTS.lock().unwrap();
-    if let Some(state) = requests.get(&(connection.to_owned(), request.to_owned())) {
-        if !state.sealed.load(Ordering::Acquire) {
-            stop(state);
-            return true;
-        }
-    }
-    false
+    requests
+        .get(&(connection.to_owned(), request.to_owned()))
+        .is_some_and(|state| stop(state, Cause::Cancelled))
 }
 pub fn cancel_connection(connection: &str) {
     for ((id, _), state) in REQUESTS.lock().unwrap().iter() {
         if id == connection {
-            stop(state);
+            stop(state, Cause::Cancelled);
         }
     }
 }
 pub fn cancel_all() {
     for state in REQUESTS.lock().unwrap().values() {
-        stop(state);
+        stop(state, Cause::Cancelled);
     }
+}
+#[cfg(test)]
+pub fn active_count(connection: &str) -> usize {
+    REQUESTS
+        .lock()
+        .unwrap()
+        .keys()
+        .filter(|(id, _)| id == connection)
+        .count()
 }
 pub fn connection_limit(connection: &str) -> Arc<Semaphore> {
     CONNECTION_LIMITS

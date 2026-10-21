@@ -58,7 +58,14 @@ async fn run() {
     let (resp_tx, resp_rx) = mpsc::channel::<String>(RESPONSE_QUEUE_CAPACITY);
     let writer_handle = tokio::spawn(run_writer(resp_rx, shutdown_tx.clone()));
     let mut tasks = JoinSet::new();
-    run_reader(resp_tx.clone(), &mut tasks, shutdown_rx).await;
+    run_reader(
+        tokio::io::stdin(),
+        resp_tx.clone(),
+        &mut tasks,
+        shutdown_rx,
+        |line: String, scope| async move { Box::pin(rpc::handle_line_with_scope(&line, scope)).await },
+    )
+    .await;
     driver::service::registry::cancel_all();
 
     let _ = shutdown_tx.send(true);
@@ -128,13 +135,22 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
         }
     }
 }
-async fn run_reader(
+async fn run_reader<R, H, F>(
+    input: R,
     resp_tx: mpsc::Sender<String>,
     tasks: &mut JoinSet<()>,
     mut shutdown_rx: watch::Receiver<bool>,
-) {
-    let mut reader = BufReader::new(tokio::io::stdin());
+    handler: H,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+    H: Fn(String, Option<driver::service::registry::Scope>) -> F + Clone + Send + 'static,
+    F: std::future::Future<Output = serde_json::Value> + Send + 'static,
+{
+    let mut reader = BufReader::new(input);
     let queued = Arc::new(Semaphore::new(REQUEST_QUEUE_CAPACITY));
+    // Caps legacy requests that are waiting for or holding a queue slot, so
+    // the reader itself never blocks on admission.
+    let legacy_pending = Arc::new(Semaphore::new(REQUEST_QUEUE_CAPACITY));
     let active = Arc::new(Semaphore::new(WORKER_POOL_SIZE));
 
     loop {
@@ -186,6 +202,11 @@ async fn run_reader(
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         let method = request["method"].as_str().unwrap_or("");
+        // The pre-service `cancel` notification carries no request scope this
+        // driver can match; it never receives a response.
+        if method == "cancel" && request.get("id").is_none() {
+            continue;
+        }
         if handlers::service::is_method(method) && !driver::service::types::valid_rpc_id(&id) {
             if send_response(
                 &resp_tx,
@@ -228,9 +249,9 @@ async fn run_reader(
         } else {
             None
         };
-        let queue_permit = if scope.is_some() {
+        let (queue_permit, legacy_permit) = if scope.is_some() {
             match queued.clone().try_acquire_owned() {
-                Ok(permit) => permit,
+                Ok(permit) => (Some(permit), None),
                 Err(_) => {
                     if send_response(
                         &resp_tx,
@@ -249,7 +270,25 @@ async fn run_reader(
                 }
             }
         } else {
-            tokio::select! { permit = queued.clone().acquire_owned() => match permit { Ok(permit) => permit, Err(_) => break }, _ = shutdown_rx.changed() => break }
+            match legacy_pending.clone().try_acquire_owned() {
+                Ok(permit) => (queued.clone().try_acquire_owned().ok(), Some(permit)),
+                Err(_) => {
+                    if send_response(
+                        &resp_tx,
+                        driver::service::ServiceError::new(
+                            "RESOURCE_LIMIT",
+                            "The driver request queue is full",
+                        )
+                        .response(id),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+            }
         };
         let connection = scope
             .as_ref()
@@ -262,9 +301,16 @@ async fn run_reader(
             });
         let connection_limit = driver::service::registry::connection_limit(&connection);
         let active = active.clone();
+        let queued = queued.clone();
         let resp_tx = resp_tx.clone();
         let line = trimmed.to_owned();
+        let handler = handler.clone();
         tasks.spawn(async move {
+            let _legacy_permit = legacy_permit;
+            let queue_permit = match queue_permit {
+                Some(permit) => permit,
+                None => queued.acquire_owned().await.unwrap(),
+            };
             let permits = async { let connection = connection_limit.acquire_owned().await.unwrap(); let active = active.acquire_owned().await.unwrap(); (connection, active) };
             tokio::pin!(permits);
             let admission = if let Some(scope) = &scope {
@@ -276,7 +322,7 @@ async fn run_reader(
             } else { Ok(permits.await) };
             drop(queue_permit);
             let response = match admission {
-                Ok(_permits) => Box::pin(rpc::handle_line_with_scope(&line, scope)).await,
+                Ok(_permits) => handler(line, scope).await,
                 Err(error) => error.response(id),
             };
             let _ = send_response(&resp_tx, response).await;
@@ -369,5 +415,286 @@ mod tests {
         assert_eq!(actual.1["id"], Value::Null);
         assert_eq!(actual.1["error"]["data"]["code"], "RESOURCE_LIMIT");
         assert_eq!(actual.1["error"]["data"]["outcome"], "not_applied");
+    }
+
+    fn on_worker_stack<F: std::future::Future<Output = ()> + Send + 'static>(future: F) {
+        let _gate = driver::service::registry::SHUTDOWN_GATE.read().unwrap();
+        std::thread::Builder::new()
+            .stack_size(WORKER_STACK_SIZE)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(future)
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn service_line(connection: &str, request: &str, method: &str) -> String {
+        json!({"jsonrpc":"2.0","id":request,"method":method,"params":{
+            "params":{"driver":"sqlserver","host":"localhost","database":"fixture"},
+            "driver_context":{"protocol_version":1,"connection_id":connection,"request_id":request,"deadline_ms":60_000},
+            "input":{}
+        }})
+        .to_string()
+    }
+    fn cancel_line(connection: &str, request: &str) -> String {
+        json!({"jsonrpc":"2.0","id":format!("cancel-{request}"),"method":"cancel_request","params":{"connection_id":connection,"request_id":request}}).to_string()
+    }
+
+    struct Harness {
+        input: tokio::io::DuplexStream,
+        output: mpsc::Receiver<String>,
+        started: Arc<std::sync::atomic::AtomicUsize>,
+        shutdown: watch::Sender<bool>,
+        reader: tokio::task::JoinHandle<()>,
+    }
+    impl Harness {
+        fn new() -> Self {
+            let (input, server) = tokio::io::duplex(1 << 20);
+            let (resp_tx, output) = mpsc::channel(RESPONSE_QUEUE_CAPACITY);
+            let (shutdown, shutdown_rx) = watch::channel(false);
+            let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter = started.clone();
+            let reader = tokio::spawn(async move {
+                let mut tasks = JoinSet::new();
+                run_reader(
+                    server,
+                    resp_tx,
+                    &mut tasks,
+                    shutdown_rx,
+                    move |line: String, scope: Option<driver::service::registry::Scope>| {
+                        counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        async move {
+                            let id = serde_json::from_str::<Value>(&line).unwrap()["id"].clone();
+                            let Some(scope) = scope else {
+                                return std::future::pending().await;
+                            };
+                            scope.wait_cancelled().await;
+                            driver::service::ServiceError::new(
+                                "CANCELLED",
+                                "fake execution cancelled",
+                            )
+                            .response(id)
+                        }
+                    },
+                )
+                .await;
+                tasks.shutdown().await;
+            });
+            Self {
+                input,
+                output,
+                started,
+                shutdown,
+                reader,
+            }
+        }
+        async fn send(&mut self, line: &str) {
+            self.input.write_all(line.as_bytes()).await.unwrap();
+            self.input.write_all(b"\n").await.unwrap();
+        }
+        async fn receive(&mut self) -> Value {
+            let line = tokio::time::timeout(Duration::from_secs(5), self.output.recv())
+                .await
+                .expect("response within five seconds")
+                .unwrap();
+            serde_json::from_str(&line).unwrap()
+        }
+        async fn wait_started(&self, count: usize) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while self.started.load(std::sync::atomic::Ordering::SeqCst) < count {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("workers started");
+        }
+        async fn finish(self) {
+            let _ = self.shutdown.send(true);
+            let _ = self.reader.await;
+        }
+    }
+
+    #[test]
+    fn 모든_worker가_실행_중이어도_cancel_request는_queue를_거치지_않고_즉시_응답한다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            let connections = [
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            ];
+            for (index, connection) in connections.iter().enumerate() {
+                for slot in 0..4 {
+                    harness
+                        .send(&service_line(
+                            connection,
+                            &format!("long-{index}-{slot}"),
+                            "service_test",
+                        ))
+                        .await;
+                }
+            }
+            harness.wait_started(WORKER_POOL_SIZE).await;
+            // when
+            let started = std::time::Instant::now();
+            harness
+                .send(&cancel_line(&connections[0], "long-0-0"))
+                .await;
+            let first = harness.receive().await;
+            let elapsed = started.elapsed();
+            // then
+            assert_eq!(first["id"], "cancel-long-0-0");
+            assert_eq!(first["result"]["acknowledged"], true);
+            assert_eq!(first["result"]["cancellation_requested"], true);
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+            let cancelled = harness.receive().await;
+            assert_eq!(cancelled["id"], "long-0-0");
+            assert_eq!(cancelled["error"]["data"]["code"], "CANCELLED");
+            harness.finish().await;
+        });
+    }
+
+    #[test]
+    fn worker_admission_전에_취소된_요청은_실행되지_않고_cancelled로_끝난다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            let connection = uuid::Uuid::new_v4().to_string();
+            for slot in 0..4 {
+                harness
+                    .send(&service_line(
+                        &connection,
+                        &format!("busy-{slot}"),
+                        "service_test",
+                    ))
+                    .await;
+            }
+            harness.wait_started(4).await;
+            harness
+                .send(&service_line(&connection, "queued", "service_test"))
+                .await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // when
+            harness.send(&cancel_line(&connection, "queued")).await;
+            let mut responses = vec![harness.receive().await, harness.receive().await];
+            responses.sort_by_key(|response| response["id"].to_string());
+            // then
+            let queued = responses
+                .iter()
+                .find(|r| r["id"] == "queued")
+                .unwrap_or_else(|| panic!("{responses:?}"));
+            assert_eq!(queued["error"]["data"]["code"], "CANCELLED");
+            assert_eq!(queued["error"]["data"]["outcome"], "not_applied");
+            assert_eq!(harness.started.load(std::sync::atomic::Ordering::SeqCst), 4);
+            harness.finish().await;
+        });
+    }
+
+    #[test]
+    fn 알_수_없는_id와_다른_연결의_같은_id_취소는_실행_중인_요청을_건드리지_않는다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            let connection = uuid::Uuid::new_v4().to_string();
+            let other = uuid::Uuid::new_v4().to_string();
+            harness
+                .send(&service_line(&connection, "same", "service_test"))
+                .await;
+            harness.wait_started(1).await;
+            // when
+            harness.send(&cancel_line(&other, "same")).await;
+            harness.send(&cancel_line(&connection, "unknown")).await;
+            let acks = [harness.receive().await, harness.receive().await];
+            // then
+            for ack in &acks {
+                assert_eq!(ack["result"]["acknowledged"], true);
+                assert_eq!(ack["result"]["cancellation_requested"], false);
+            }
+            assert!(harness.output.try_recv().is_err());
+            harness.finish().await;
+        });
+    }
+
+    #[test]
+    fn id_없는_legacy_cancel_notification은_응답과_충돌_없이_무시된다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            let connection = uuid::Uuid::new_v4().to_string();
+            harness
+                .send(&service_line(&connection, "running", "service_test"))
+                .await;
+            harness.wait_started(1).await;
+            // when
+            harness
+                .send(r#"{"jsonrpc":"2.0","method":"cancel","params":{"id":42}}"#)
+                .await;
+            harness.send(&cancel_line(&connection, "nothing")).await;
+            let next = harness.receive().await;
+            // then
+            assert_eq!(next["id"], "cancel-nothing");
+            assert!(harness.output.try_recv().is_err());
+            assert!(!harness.reader.is_finished());
+            harness.finish().await;
+        });
+    }
+
+    #[test]
+    fn legacy_요청이_포화돼도_reader는_막히지_않고_cancel_request에_즉시_응답한다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            let legacy = |id: String, connection: &str| {
+                json!({"jsonrpc":"2.0","id":id,"method":"get_tables","params":{"params":{"connection_id":connection}}}).to_string()
+            };
+            let connections = [
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            ];
+            for (index, connection) in connections.iter().enumerate() {
+                for slot in 0..4 {
+                    harness
+                        .send(&legacy(format!("run-{index}-{slot}"), connection))
+                        .await;
+                }
+            }
+            harness.wait_started(WORKER_POOL_SIZE).await;
+            let flood = REQUEST_QUEUE_CAPACITY + 36;
+            for index in 0..flood {
+                harness
+                    .send(&legacy(format!("wait-{index}"), &connections[0]))
+                    .await;
+            }
+            let target = uuid::Uuid::new_v4().to_string();
+            harness
+                .send(&service_line(&target, "service-target", "service_test"))
+                .await;
+            // when
+            let started = std::time::Instant::now();
+            harness.send(&cancel_line(&target, "service-target")).await;
+            let mut rejected = Vec::new();
+            let ack = loop {
+                let response = harness.receive().await;
+                if response["id"] == "cancel-service-target" {
+                    break response;
+                }
+                rejected.push(response);
+            };
+            let elapsed = started.elapsed();
+            // then
+            assert_eq!(ack["result"]["cancellation_requested"], true);
+            assert!(elapsed < Duration::from_secs(1), "{elapsed:?}");
+            assert!(!rejected.is_empty());
+            for response in &rejected {
+                assert!(response["id"].as_str().unwrap().starts_with("wait-"));
+                assert_eq!(response["error"]["data"]["code"], "RESOURCE_LIMIT");
+            }
+            harness.finish().await;
+        });
     }
 }

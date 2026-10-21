@@ -177,6 +177,7 @@ fn service_capabilities는_host_token을_광고하지_않는다() {
 }
 #[test]
 fn 다른_연결의_같은_request_id는_별도로_취소한다() {
+    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
     // given
     let (_, first) = entra();
     let (_, mut second) = entra();

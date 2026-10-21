@@ -5,6 +5,7 @@ pub mod readonly;
 pub mod registry;
 pub mod row;
 pub mod sessions;
+pub mod supervise;
 #[cfg(test)]
 mod tests;
 pub mod types;

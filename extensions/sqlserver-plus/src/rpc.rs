@@ -424,6 +424,9 @@ mod tests {
 
     #[test]
     fn shutdown_closes_cached_pools_and_returns_null() {
+        let _gate = crate::driver::service::registry::SHUTDOWN_GATE
+            .write()
+            .unwrap();
         std::thread::Builder::new()
             .stack_size(crate::WORKER_STACK_SIZE)
             .spawn(|| {

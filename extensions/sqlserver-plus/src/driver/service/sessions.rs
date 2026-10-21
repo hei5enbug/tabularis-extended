@@ -116,14 +116,21 @@ pub async fn lock(
         .get(handle)
         .map(|entry| entry.slot.clone())
         .ok_or_else(|| closed_error("The physical session was not found"))?;
-    let mut slot = tokio::time::timeout_at(scope.state.deadline, slot.lock_owned())
-        .await
-        .map_err(|_| {
-            ServiceError::new(
-                "DEADLINE_EXCEEDED",
-                "The session lock deadline was exceeded",
-            )
-        })?;
+    let mut slot = tokio::select! {
+        locked = tokio::time::timeout_at(scope.state.deadline, slot.lock_owned()) => {
+            locked.map_err(|_| {
+                ServiceError::new(
+                    "DEADLINE_EXCEEDED",
+                    "The session lock deadline was exceeded",
+                )
+            })?
+        }
+        _ = scope.wait_cancelled() => {
+            return Err(scope.remaining().err().unwrap_or_else(|| {
+                ServiceError::new("CANCELLED", "The service request was cancelled")
+            }));
+        }
+    };
     if slot.client.is_none() || slot.expired() {
         if let Some(client) = slot.client.take() {
             pool::discard(client);

@@ -2,7 +2,7 @@ use crate::{
     driver::service::{
         catalog, exact, pool, readonly,
         registry::{self, Scope},
-        row, sessions,
+        row, sessions, supervise,
         types::{self, DriverContext},
         ServiceError,
     },
@@ -10,7 +10,6 @@ use crate::{
 };
 use mssql_tds::message::transaction_management::TransactionIsolationLevel;
 use serde_json::{json, Value};
-use std::time::Duration;
 
 pub const METHODS: &[&str] = &[
     "execute_query_exact",
@@ -27,7 +26,7 @@ pub fn is_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 pub fn capabilities() -> Value {
-    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel":true,"entra_token":false,"readonly_guarantee":"restricted_database_principal","catalog":true,"rows":true})
+    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel_v1":true,"cancel":true,"entra_token":false,"readonly_guarantee":"restricted_database_principal","catalog":true,"rows":true})
 }
 pub fn prepare(params: &Value) -> Result<Scope, ServiceError> {
     let (context, _) = DriverContext::parse(params)?;
@@ -84,6 +83,11 @@ async fn acquire(
             false,
         ))
     }
+}
+/// A connection returns to the pool only after a complete, uncancelled
+/// execution; a cancelled or truncated one is discarded.
+fn reusable(data: &Value, scope: &Scope) -> bool {
+    data["truncated"] != true && !scope.cancelled()
 }
 async fn run(
     params: &Value,
@@ -289,7 +293,6 @@ async fn run(
             "The row operation did not confirm a single-row outcome",
         ));
     }
-    scope.remaining()?;
     if let Lease::Session(slot, _) = &mut lease {
         if !slot.client.as_ref().unwrap().has_active_transaction() {
             return Err(ServiceError::new(
@@ -304,7 +307,7 @@ async fn run(
             "User SQL opened an unmanaged transaction",
         ));
     }
-    if data["truncated"] != true {
+    if reusable(&data, scope) {
         lease.completed();
     }
     Ok(if let Some(query) = prepared.5 {
@@ -323,25 +326,7 @@ pub async fn dispatch(id: Value, params: &Value, method: &str, supplied: Option<
         .response(Value::Null);
     }
     if method == "cancel_request" {
-        if types::only_keys(params, &["connection_id", "request_id"]).is_err() {
-            return ServiceError::argument("Invalid cancellation input").response(id);
-        }
-        let Some(connection) = params["connection_id"]
-            .as_str()
-            .filter(|v| !v.is_empty() && v.chars().count() <= 128)
-        else {
-            return ServiceError::argument("connection_id is required").response(id);
-        };
-        let Some(request) = params["request_id"]
-            .as_str()
-            .filter(|v| !v.is_empty() && v.chars().count() <= 128)
-        else {
-            return ServiceError::argument("request_id is required").response(id);
-        };
-        return crate::rpc::ok_response(
-            id,
-            json!({"cancellation_requested":registry::cancel(connection, request)}),
-        );
+        return supervise::acknowledge(id, params);
     }
     let parsed = if method == "service_invalidate_auth" {
         DriverContext::parse_control(params).map(|context| (context, ConnectionParams::default()))
@@ -356,76 +341,66 @@ pub async fn dispatch(id: Value, params: &Value, method: &str, supplied: Option<
         Ok(scope) => scope,
         Err(error) => return error.response(id),
     };
-    let result;
-    {
-        let response_overhead =
-            serde_json::to_vec(&crate::rpc::ok_response(id.clone(), Value::Null))
-                .unwrap()
-                .len()
-                - 4;
-        let action = run(
-            params,
-            method,
-            &context,
-            &connection,
-            &scope,
-            response_overhead,
-        );
-        tokio::pin!(action);
-        result = tokio::select! {
-            result = &mut action => result,
-            _ = tokio::time::sleep_until(scope.state.deadline) => {
-                scope.stop(); let _ = tokio::time::timeout(Duration::from_secs(5), &mut action).await;
-                Err(ServiceError::new("DEADLINE_EXCEEDED", "The service execution deadline was exceeded"))
-            }
-            _ = scope.wait_cancelled() => {
-                let _ = tokio::time::timeout(Duration::from_secs(5), &mut action).await;
-                Err(ServiceError::new("CANCELLED", "The service request was cancelled"))
-            }
-        };
+    let response_overhead = serde_json::to_vec(&crate::rpc::ok_response(id.clone(), Value::Null))
+        .unwrap()
+        .len()
+        - 4;
+    let action = run(
+        params,
+        method,
+        &context,
+        &connection,
+        &scope,
+        response_overhead,
+    );
+    supervise::supervise(
+        id,
+        context.session_handle.as_deref(),
+        &scope,
+        action,
+        supervise::SETTLE,
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope() -> Scope {
+        let context: DriverContext = serde_json::from_value(json!({"protocol_version":1,"connection_id":uuid::Uuid::new_v4().to_string(),"request_id":"reuse"})).unwrap();
+        Scope::reserve(&context).unwrap()
     }
-    scope.seal();
-    let response = match result {
-        Ok(value) if !scope.cancelled() => crate::rpc::ok_response(id.clone(), value),
-        result => {
-            let mut error = result.err().unwrap_or_else(|| {
-                ServiceError::new("CANCELLED", "The service request was cancelled")
-            });
-            if scope.cancelled() {
-                error.code = if tokio::time::Instant::now() >= scope.state.deadline {
-                    "DEADLINE_EXCEEDED"
-                } else {
-                    "CANCELLED"
-                };
-            }
-            if scope.write_dispatched() {
-                error.code = "OUTCOME_UNKNOWN";
-                error.unknown = true;
-            }
-            if scope.session_touched() {
-                if let Some(handle) = context.session_handle.as_deref() {
-                    sessions::forget(handle).await;
-                    error.session_closed = true;
-                }
-            }
-            if let Some(handle) = scope.opened_session() {
-                sessions::forget(&handle).await;
-                error.session_closed = true;
-            }
-            error.response(id.clone())
-        }
-    };
-    if serde_json::to_vec(&response).unwrap().len() > types::FRAME_LIMIT {
-        let mut error = ServiceError::new(
-            "RESOURCE_LIMIT",
-            "The actual driver response exceeds its byte limit",
-        );
-        if scope.write_dispatched() {
-            error.code = "OUTCOME_UNKNOWN";
-            error.unknown = true;
-        }
-        error.response(id)
-    } else {
-        response
+
+    #[test]
+    fn 취소됐거나_잘린_실행의_연결은_pool로_돌려주지_않는다() {
+        let _gate = registry::SHUTDOWN_GATE.read().unwrap();
+        // given
+        let complete = scope();
+        let cancelled = scope();
+        let truncated = scope();
+        registry::cancel(cancelled.connection_id(), "reuse");
+
+        // when
+        let actual = [
+            reusable(&json!({"truncated":false}), &complete),
+            reusable(&json!({"truncated":false}), &cancelled),
+            reusable(&json!({"truncated":true}), &truncated),
+        ];
+
+        // then
+        assert_eq!(actual, [true, false, false]);
+    }
+
+    #[test]
+    fn service_capabilities는_host가_읽는_cancel_키를_광고한다() {
+        // given
+        let capabilities = capabilities();
+
+        // when
+        let actual = (&capabilities["cancel_v1"], &capabilities["cancel"]);
+
+        // then
+        assert_eq!(actual, (&json!(true), &json!(true)));
     }
 }

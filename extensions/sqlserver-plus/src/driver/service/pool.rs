@@ -200,7 +200,12 @@ impl Manager for ServiceManager {
         let mut client = TdsConnectionProvider
             .create_client(login, &cfg.datasource_string(), Some(&cancel))
             .await
-            .map_err(|_| ServiceError::new("AUTH_REQUIRED", "SQL Server physical login failed"))?;
+            .map_err(|error| match error {
+                mssql_tds::error::Error::OperationCancelledError(_) => {
+                    ServiceError::new("CANCELLED", "The service request was cancelled")
+                }
+                _ => ServiceError::new("AUTH_REQUIRED", "SQL Server physical login failed"),
+            })?;
         if self.read_only {
             readonly::probe(&mut client, Some(&cancel)).await?;
         }
@@ -267,16 +272,19 @@ pub async fn acquire(
         cancel: scope.cancel_handle(),
         state: scope.state.clone(),
     };
-    LOGIN
-        .scope(login, pool.get())
-        .await
-        .map_err(|error| match error {
+    let checkout = LOGIN.scope(login, pool.get());
+    tokio::select! {
+        result = checkout => result.map_err(|error| match error {
             deadpool::managed::PoolError::Backend(error) => error,
             _ => ServiceError::new(
                 "CONNECTION_NOT_FOUND",
                 "Cannot acquire a service connection",
             ),
-        })
+        }),
+        _ = scope.wait_cancelled() => Err(scope.remaining().err().unwrap_or_else(|| {
+            ServiceError::new("CANCELLED", "The service request was cancelled")
+        })),
+    }
 }
 pub async fn invalidate(connection: &str) {
     let mut pools = POOLS.write().await;
@@ -443,6 +451,152 @@ mod tests {
 
         // then
         assert!(actual.entra.is_none());
+    }
+
+    mod loopback {
+        use super::*;
+        use std::{
+            io::Read,
+            net::TcpListener,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc,
+            },
+            time::Duration,
+        };
+
+        struct Silent {
+            port: u16,
+            accepted: Arc<AtomicBool>,
+            closed: Arc<AtomicBool>,
+        }
+        fn silent_server() -> Silent {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let accepted = Arc::new(AtomicBool::new(false));
+            let closed = Arc::new(AtomicBool::new(false));
+            let (a, c) = (accepted.clone(), closed.clone());
+            std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                a.store(true, Ordering::SeqCst);
+                let mut buffer = [0_u8; 4096];
+                while stream.read(&mut buffer).is_ok_and(|read| read > 0) {}
+                c.store(true, Ordering::SeqCst);
+            });
+            Silent {
+                port,
+                accepted,
+                closed,
+            }
+        }
+        fn fixture(port: u16) -> (ConnectionParams, DriverContext) {
+            let params = ConnectionParams {
+                host: Some("127.0.0.1".into()),
+                port: Some(port),
+                username: Some("user".into()),
+                database: crate::models::DatabaseSelection::Single("fixture".into()),
+                ssl_mode: Some("disable".into()),
+                ..Default::default()
+            };
+            let context = serde_json::from_value(json!({"protocol_version":1,"connection_id":uuid::Uuid::new_v4().to_string(),"request_id":"login","deadline_ms":60000,"read_only":false,"auth":{"kind":"db_password","password":"synthetic-key","identity":"principal"}})).unwrap();
+            (params, context)
+        }
+        fn on_worker_stack<F, T>(future: F) -> T
+        where
+            F: std::future::Future<Output = T> + Send + 'static,
+            T: Send + 'static,
+        {
+            let _gate = registry::SHUTDOWN_GATE.read().unwrap();
+            std::thread::Builder::new()
+                .stack_size(16 * 1024 * 1024)
+                .spawn(move || {
+                    tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .unwrap()
+                        .block_on(future)
+                })
+                .unwrap()
+                .join()
+                .unwrap()
+        }
+        async fn until(flag: &AtomicBool) {
+            while !flag.load(Ordering::SeqCst) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        #[test]
+        fn 취소_요청은_physical_login의_tds_cancel_handle을_깨우고_소켓을_닫는다() {
+            // given
+            let server = silent_server();
+            let (params, context) = fixture(server.port);
+            let (accepted, closed) = (server.accepted.clone(), server.closed.clone());
+
+            // when
+            let (error, closed_by_cancel) = on_worker_stack(async move {
+                let manager =
+                    ServiceManager::new(params, PluginSettings::default(), false).unwrap();
+                let scope = registry::Scope::reserve(&context).unwrap();
+                let login = Login {
+                    context: context.clone(),
+                    deadline: scope.state.deadline,
+                    cancel: scope.cancel_handle(),
+                    state: scope.state.clone(),
+                };
+                let canceller = async {
+                    until(&accepted).await;
+                    registry::cancel(&context.connection_id, &context.request_id)
+                };
+                let (created, signalled) =
+                    tokio::join!(LOGIN.scope(login, manager.create()), canceller);
+                assert!(signalled);
+                tokio::time::timeout(Duration::from_secs(10), until(&closed))
+                    .await
+                    .unwrap();
+                (created.err().unwrap(), closed.load(Ordering::SeqCst))
+            });
+
+            // then
+            assert_eq!(error.code, "CANCELLED");
+            assert!(closed_by_cancel);
+        }
+
+        #[test]
+        fn 이미_취소된_요청은_checkout_전에_네트워크_없이_끝난다() {
+            // given
+            let (params, context) = fixture(1);
+            // when
+            let error = on_worker_stack(async move {
+                let scope = registry::Scope::reserve(&context).unwrap();
+                registry::cancel(&context.connection_id, &context.request_id);
+                acquire(&params, &context, &scope).await.err().unwrap()
+            });
+            // then
+            assert_eq!(error.code, "CANCELLED");
+        }
+
+        #[test]
+        fn acquire_도중_취소는_유예_시간_없이_즉시_끝난다() {
+            // given
+            let server = silent_server();
+            let (params, context) = fixture(server.port);
+            let accepted = server.accepted.clone();
+            // when
+            let (error, elapsed) = on_worker_stack(async move {
+                let scope = registry::Scope::reserve(&context).unwrap();
+                let canceller = async {
+                    until(&accepted).await;
+                    registry::cancel(&context.connection_id, &context.request_id)
+                };
+                let started = std::time::Instant::now();
+                let (acquired, _) = tokio::join!(acquire(&params, &context, &scope), canceller);
+                (acquired.err().unwrap(), started.elapsed())
+            });
+            // then
+            assert_eq!(error.code, "CANCELLED");
+            assert!(elapsed < Duration::from_secs(5));
+        }
     }
 
     #[cfg(unix)]
