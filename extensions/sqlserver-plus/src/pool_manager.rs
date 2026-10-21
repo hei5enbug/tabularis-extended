@@ -1,0 +1,213 @@
+//! Connection-pool registry.
+//!
+//! Pools are cached per connection key so repeated RPC calls reuse warm
+//! sessions instead of paying a fresh TDS handshake each time.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use deadpool::managed::Pool as DeadPool;
+use once_cell::sync::Lazy;
+use tokio::sync::RwLock;
+
+use crate::connection::resolve_connection_params;
+use crate::driver::pool::{build_config, BridgeManager};
+use crate::models::ConnectionParams;
+use crate::settings;
+
+pub type SqlServerPool = DeadPool<BridgeManager>;
+type SqlServerPoolMap = Arc<RwLock<HashMap<String, SqlServerPool>>>;
+
+static SQLSERVER_POOLS: Lazy<SqlServerPoolMap> =
+    Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
+
+/// Stable cache key. Prefers `connection_id`; else host:port:database.
+/// Folds in username (bastions route by it), ssl_mode, and auth mode, so
+/// none of those can silently reuse a pool built under different ones.
+/// Gap: password isn't in the key, so rotating it still reuses the pool.
+fn build_connection_key(params: &ConnectionParams) -> String {
+    let ssl_mode = params.ssl_mode.as_deref().unwrap_or("prefer");
+    let auth = if params.integrated_auth {
+        "integrated".to_string()
+    } else {
+        format!("sql:{}", params.username.as_deref().unwrap_or(""))
+    };
+    let base_key = if let Some(conn_id) = params.connection_id.as_deref() {
+        format!("{}:conn:{}:{}", params.driver, conn_id, params.database)
+    } else {
+        format!(
+            "{}:{}:{}:{}",
+            params.driver,
+            params.host.as_deref().unwrap_or("localhost"),
+            params.port.unwrap_or(1433),
+            params.database
+        )
+    };
+    format!("{base_key}:auth:{auth}:ssl:{ssl_mode}")
+}
+
+fn startup_script(params: &ConnectionParams) -> Option<String> {
+    params
+        .startup_script
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+}
+
+pub async fn get_sqlserver_pool(params: &ConnectionParams) -> Result<SqlServerPool, String> {
+    let params = resolve_connection_params(params)?;
+    let key = build_connection_key(&params);
+    let mut pools = SQLSERVER_POOLS.write().await;
+    if let Some(pool) = pools.get(&key).cloned() {
+        return Ok(pool);
+    }
+
+    // A pool snapshots process settings. The host initializes the process
+    // before opening connections, and live pools are never mutated in place.
+    let settings = settings::current();
+    let manager = BridgeManager::new(
+        build_config(&params, &settings)?,
+        startup_script(&params),
+        params.ssl_mode.as_deref().unwrap_or("prefer"),
+        &settings,
+    );
+    let pool = DeadPool::builder(manager)
+        .max_size(settings.max_pool_size)
+        .build()
+        .map_err(|error| error.to_string())?;
+    pools.insert(key, pool.clone());
+    Ok(pool)
+}
+
+/// Remove a cached pool after checkout failed. This lets corrected connection
+/// parameters replace a failed lazy manager under the same connection id.
+pub async fn remove_sqlserver_pool(params: &ConnectionParams) {
+    let Ok(params) = resolve_connection_params(params) else {
+        return;
+    };
+    SQLSERVER_POOLS
+        .write()
+        .await
+        .remove(&build_connection_key(&params));
+}
+
+/// Drop pools that currently have no checked-out connections. Called
+/// periodically so long-idle sessions don't linger for the plugin's lifetime.
+pub async fn cleanup_idle_pools() {
+    let mut pools = SQLSERVER_POOLS.write().await;
+    pools.retain(|_, pool| {
+        let status = pool.status();
+        let has_checked_out_connection = status.size > status.available;
+        if !has_checked_out_connection {
+            // Explicit close makes the server-side sessions disappear now;
+            // removing the last registry handle alone would rely on drop
+            // timing inside deadpool.
+            pool.close();
+        }
+        has_checked_out_connection
+    });
+}
+
+/// Close every cached pool and remove it from the process-wide registry.
+pub async fn shutdown() {
+    let pools: Vec<_> = SQLSERVER_POOLS
+        .write()
+        .await
+        .drain()
+        .map(|(_, pool)| pool)
+        .collect();
+    for pool in pools {
+        pool.close();
+    }
+}
+
+#[cfg(test)]
+pub async fn pool_count() -> usize {
+    SQLSERVER_POOLS.read().await.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn params(connection_id: Option<&str>) -> ConnectionParams {
+        ConnectionParams {
+            driver: "sqlserver".into(),
+            host: Some("localhost".into()),
+            port: Some(1433),
+            username: Some("sa".into()),
+            database: crate::models::DatabaseSelection::Single("master".into()),
+            connection_id: connection_id.map(str::to_owned),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn key_prefers_connection_id() {
+        let key = build_connection_key(&params(Some("abc")));
+        assert!(key.contains(":conn:abc:"));
+    }
+
+    #[test]
+    fn key_includes_user_and_ssl_mode_for_adhoc_connections() {
+        let mut p = params(None);
+        p.ssl_mode = Some("require".into());
+        let key = build_connection_key(&p);
+        assert_eq!(
+            key,
+            "sqlserver:localhost:1433:master:auth:sql:sa:ssl:require"
+        );
+    }
+
+    #[test]
+    fn integrated_auth_is_part_of_the_key_even_with_a_shared_connection_id() {
+        let sql_auth = params(Some("ss045-key"));
+        let mut integrated = sql_auth.clone();
+        integrated.username = None;
+        integrated.integrated_auth = true;
+
+        assert_ne!(
+            build_connection_key(&sql_auth),
+            build_connection_key(&integrated),
+            "editing a saved connection between SQL and Windows auth must not reuse a stale pool"
+        );
+    }
+
+    #[test]
+    fn database_is_part_of_the_key_and_identical_params_are_stable() {
+        let master = params(Some("ss045-key"));
+        let identical = master.clone();
+        let mut other_database = master.clone();
+        other_database.database = crate::models::DatabaseSelection::Single("tempdb".into());
+
+        assert_eq!(
+            build_connection_key(&master),
+            build_connection_key(&identical)
+        );
+        assert_ne!(
+            build_connection_key(&master),
+            build_connection_key(&other_database)
+        );
+    }
+
+    #[test]
+    fn equivalent_discrete_and_connection_string_params_share_a_key() {
+        let mut discrete = params(None);
+        discrete.ssl_mode = Some("require".into());
+        let discrete = resolve_connection_params(&discrete).unwrap();
+        let from_string = resolve_connection_params(&ConnectionParams {
+            connection_string: Some(
+                "sqlserver://sa@localhost/master?Encrypt=true&TrustServerCertificate=true".into(),
+            ),
+            password: Some(String::new()),
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            build_connection_key(&discrete),
+            build_connection_key(&from_string)
+        );
+    }
+}

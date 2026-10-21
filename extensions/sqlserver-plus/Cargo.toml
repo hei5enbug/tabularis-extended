@@ -1,0 +1,41 @@
+[package]
+name = "sqlserver-plugin"
+version = "1.0.0-beta.3"
+edition = "2021"
+description = "Tabularis driver plugin for Microsoft SQL Server"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+base64 = "0.23"
+chrono = "0.4"
+deadpool = "0.13"
+infer = "0.22"
+# SQL Server driver — Microsoft's mssql-tds protocol implementation behind a
+# tiberius-compatible API, pooled with deadpool. Keep the exact preview pin:
+# preview releases may change bridge semantics without a stable-version signal.
+# To upgrade, review both changelogs and dependency diffs, update both pins,
+# then run the full unit, live-database, clippy, audit, and release-build gates.
+mssql-tiberius-bridge = "=0.1.0-preview.5"
+# Direct dependency on the underlying protocol crate (lib name `mssql_tds`):
+# the result-set traits used through `Client::inner_mut()` are not re-exported
+# by the bridge. Pinned in lockstep with the bridge; default features
+# (sspi/gssapi) stay on for Windows/Kerberos auth.
+mssql-tds-preview = "=0.1.0-preview.1"
+once_cell = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Linux release archives link OpenSSL statically. The cross container used for
+# the linux-arm64 build ships no aarch64 libssl-dev, and a dynamically linked
+# libssl would tie the binary to the runner's OpenSSL major version. Other
+# targets keep the platform TLS stack selected by native-tls.
+openssl = { version = "0.10", features = ["vendored"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"
