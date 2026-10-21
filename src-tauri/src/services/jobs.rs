@@ -232,6 +232,19 @@ impl JobManager {
         is_write: bool,
         control: bool,
     ) -> ServiceResult<JobLease> {
+        self.queue_as(request, caller, is_write, control, false)
+    }
+    /// An `internal` job runs on behalf of the service itself, such as a
+    /// catalog lookup that validates an argument. It is never recorded in
+    /// history and is not listed as a user's job.
+    pub fn queue_as(
+        self: &Arc<Self>,
+        request: &ServiceRequest,
+        caller: &CallerContext,
+        is_write: bool,
+        control: bool,
+        internal: bool,
+    ) -> ServiceResult<JobLease> {
         let record = JobRecord {
             job_id: format!("j-{}", uuid::Uuid::new_v4()),
             request_id: request.request_id.clone(),
@@ -249,7 +262,7 @@ impl JobManager {
             expires_at_ms: now_ms().saturating_add(JOB_TTL_MS),
             response: None,
         };
-        let history = (!control && self.history.get().is_some()).then(|| {
+        let history = (!control && !internal && self.history.get().is_some()).then(|| {
             let operation = serde_json::to_value(request.operation)
                 .ok()
                 .and_then(|value| value.as_str().map(str::to_owned))

@@ -341,7 +341,9 @@ impl ServiceTransport {
             "deadline_ms": decoded.deadline_ms.min(30_000),
             "input": {},
         });
-        let response = self.call(raw, caller.clone(), signal.clone()).await?;
+        let response = self
+            .call_internal(raw, caller.clone(), signal.clone())
+            .await?;
         if let Some(error) = response.error {
             return Err(error);
         }
@@ -949,7 +951,7 @@ impl ServiceTransport {
         }
         // The catalog must know the table before any statement is built.
         let described = self
-            .call(
+            .call_internal(
                 serde_json::to_value(&describe).map_err(|_| failure(ErrorCode::InvalidArgument))?,
                 caller.clone(),
                 signal.clone(),

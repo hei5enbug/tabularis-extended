@@ -1439,6 +1439,23 @@ impl ServiceRuntime {
         request: ServiceRequest,
         caller: CallerContext,
     ) -> ServiceResponse {
+        self.submit_as(request, caller, false).await
+    }
+    /// Like `submit`, for a job the service starts on its own behalf: it
+    /// leaves no history entry.
+    pub async fn submit_internal(
+        self: &Arc<Self>,
+        request: ServiceRequest,
+        caller: CallerContext,
+    ) -> ServiceResponse {
+        self.submit_as(request, caller, true).await
+    }
+    async fn submit_as(
+        self: &Arc<Self>,
+        request: ServiceRequest,
+        caller: CallerContext,
+        internal: bool,
+    ) -> ServiceResponse {
         if let Err(error) = self.validate(&request) {
             self.secret_inputs.discard(&caller, &request.request_id);
             return error_response(&request, error);
@@ -1464,7 +1481,7 @@ impl ServiceRuntime {
                 return error_response(&request, error);
             }
         };
-        let mut lease = match self.jobs.queue(&request, &caller, false, false) {
+        let mut lease = match self.jobs.queue_as(&request, &caller, false, false, internal) {
             Ok(lease) => lease,
             Err(error) => {
                 self.secret_inputs.discard(&caller, &request.request_id);

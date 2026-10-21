@@ -167,6 +167,15 @@ impl ServiceTransport {
         decoded: ServiceRequest,
         caller: CallerContext,
     ) -> ServiceResult<ServiceResponse> {
+        self.submit_request_as(decoded, caller, false).await
+    }
+
+    async fn submit_request_as(
+        &self,
+        decoded: ServiceRequest,
+        caller: CallerContext,
+        internal: bool,
+    ) -> ServiceResult<ServiceResponse> {
         if caller.transport == CallerTransport::Mcp && mcp_forbidden(decoded.operation) {
             return Err(failure(ErrorCode::OperationNotAllowed));
         }
@@ -190,6 +199,8 @@ impl ServiceTransport {
             ipc.call_owner(owner, decoded.clone())
                 .await
                 .map_err(redact_error)?
+        } else if internal {
+            self.runtime.submit_internal(decoded.clone(), caller).await
         } else {
             self.runtime.submit(decoded.clone(), caller).await
         };
@@ -201,6 +212,26 @@ impl ServiceTransport {
         raw: Value,
         caller: CallerContext,
         signal: Option<CancellationSignal>,
+    ) -> ServiceResult<ServiceResponse> {
+        self.call_as(raw, caller, signal, false).await
+    }
+
+    /// A call the service makes for itself; it leaves no history entry.
+    pub(crate) async fn call_internal(
+        self: &Arc<Self>,
+        raw: Value,
+        caller: CallerContext,
+        signal: Option<CancellationSignal>,
+    ) -> ServiceResult<ServiceResponse> {
+        self.call_as(raw, caller, signal, true).await
+    }
+
+    async fn call_as(
+        self: &Arc<Self>,
+        raw: Value,
+        caller: CallerContext,
+        signal: Option<CancellationSignal>,
+        internal: bool,
     ) -> ServiceResult<ServiceResponse> {
         request::validate_caller(&caller)?;
         let decoded = request::decode(&self.validator, &raw)?;
@@ -219,7 +250,7 @@ impl ServiceTransport {
             );
         let queued = match timeout_at(
             deadline,
-            self.submit_request(decoded.clone(), caller.clone()),
+            self.submit_request_as(decoded.clone(), caller.clone(), internal),
         )
         .await
         {

@@ -920,3 +920,61 @@ async fn 감사를_끄면_job_list는_진행중_작업만_보여준다() {
     );
     h.state.release(1);
 }
+
+#[tokio::test]
+async fn 서비스가_스스로_시작한_조회_작업은_이력과_작업목록에_남지_않는다() {
+    // given
+    let h = Harness::new().await;
+    *h.state.databases.lock().unwrap() = vec!["fixture".into(), "analytics".into()];
+    // when
+    let executed = call(
+        &h,
+        "query_execute",
+        json!({"connection_id":h.id,"text":"select 1","database":"analytics"}),
+    )
+    .await;
+    let after_execute = call(&h, "job_list", json!({})).await;
+    let history_after_execute = h
+        .core
+        .platform
+        .runtime
+        .job_history(&HistoryQuery::default())
+        .unwrap()
+        .entries;
+    let previewed = call(
+        &h,
+        "table_preview",
+        json!({"connection_id":h.id,"table":"records","database":"analytics"}),
+    )
+    .await;
+    let after_preview = call(&h, "job_list", json!({})).await;
+    let history = h
+        .core
+        .platform
+        .runtime
+        .job_history(&HistoryQuery::default())
+        .unwrap()
+        .entries;
+    // then
+    assert_eq!(summary(&executed)["status"], "succeeded");
+    assert_eq!(summary(&previewed)["status"], "succeeded");
+    let rows = |listed: &Value| {
+        summary(listed)["data"]["entries"]
+            .as_array()
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(rows(&after_execute).len(), 1);
+    assert_eq!(history_after_execute.len(), 1);
+    assert_eq!(history_after_execute[0].operation, "query.execute");
+    assert_eq!(rows(&after_preview).len(), 2);
+    assert_eq!(history.len(), 2);
+    assert!(history
+        .iter()
+        .all(|entry| entry.operation == "query.execute"));
+    assert!(history.iter().any(|entry| entry
+        .query
+        .as_deref()
+        .is_some_and(|text| text.contains("LIMIT 10"))));
+    assert_eq!(summary(&after_preview)["data"]["returned"], 2);
+}
