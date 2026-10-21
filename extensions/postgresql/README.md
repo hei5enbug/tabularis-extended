@@ -23,9 +23,12 @@ directly into the Tabularis application. It is byte-for-byte behaviorally
 identical to that built-in driver, proven by an 82-test parity suite that runs
 both drivers against the same live database and compares every response.
 
-> **Requires Tabularis v0.20.0 or later.** This plugin relies on the plugin
-> runtime introduced in that release; it will not load on earlier versions of
-> [Tabularis](https://github.com/TabularisDB/tabularis).
+> **Requires Tabularis v0.20.0 or later; Tabularis Extended hosts use the
+> `postgresql-plus` package.** This fork ships the plugin as `postgresql-plus`
+> (display name *PostgreSQL Plus*, executable `postgresql-plugin`) at version
+> `1.0.0-rc.6+plus.1`. The manifest keeps `min_runtime_version` `0.20.0`, which
+> Tabularis Extended `0.27.0` satisfies. The host maps imported PostgreSQL
+> connections to this package once it is installed.
 
 ## Table of Contents
 
@@ -34,8 +37,7 @@ both drivers against the same live database and compares every response.
 - [Connection Configuration](#connection-configuration)
 - [Supported PostgreSQL Data Types](#supported-postgresql-data-types)
 - [Installation](#installation)
-  - [From the Tabularium registry](#from-the-tabularium-registry)
-  - [Manual Installation (alternative)](#manual-installation-alternative)
+  - [Manual Installation](#manual-installation)
 - [How It Works](#how-it-works)
 - [Supported Operations](#supported-operations)
 - [Known Limitations](#known-limitations)
@@ -114,36 +116,29 @@ both drivers against the same live database and compares every response.
 
 ## Installation
 
-### From the Tabularium registry
+### Manual Installation
 
-This plugin is published on the [Tabularium registry](https://registry.tabularis.dev) —
-the same one the [DuckDB](https://github.com/TabularisDB/tabularis-duckdb-plugin)
-and [Elasticsearch](https://github.com/TabularisDB/tabularis-elasticsearch-plugin)
-plugins ship through. Install it from Tabularis's in-app plugin browser:
-**Settings → Plugins**, search for **PostgreSQL**, and install.
-
-If you point Tabularis at a different Tabularium instance via
-`tabulariumRegistryUrl` in `config.json`, make sure that registry has
-ingested this plugin's releases first.
-
-### Manual Installation (alternative)
-
-1. Download the latest release for your platform from the
-   [Releases page](https://github.com/TabularisDB/tabularis-postgresql-plugin/releases) —
-   look for the most recent `1.0.0-rc.N` tag (releases through `1.0.0-beta.10`
-   shipped on the `beta` channel; new releases from `1.0.0-rc.1` onward ship
-   on the `rc` channel — see [Contributing: PR Titles & Versioning](#contributing-pr-titles--versioning)).
-2. Extract the archive.
+1. Build the package with `just package`, or download a `postgresql-plus-<os>-<arch>.zip`
+   release archive together with its `.sha256` file, and check the archive with
+   `shasum -a 256 -c`.
+2. Quit Tabularis Extended and extract the archive.
 3. Copy `postgresql-plugin` (or `postgresql-plugin.exe` on Windows) and
-   `.tabularium` into the Tabularis plugins directory:
+   `.tabularium` into the Extended profile's plugin directory, never into the
+   official `tabularis` directory:
 
    | OS | Plugins Directory |
    | --- | --- |
-   | **Linux** | `~/.local/share/tabularis/plugins/drivers/postgresql-plus/` |
-   | **macOS** | `~/Library/Application Support/tabularis/plugins/drivers/postgresql-plus/` |
-   | **Windows** | `%APPDATA%\tabularis\plugins\drivers\postgresql-plus\` |
+   | **Linux** | `~/.local/share/tabularis-extended/plugins/drivers/postgresql-plus/` |
+   | **macOS** | `~/Library/Application Support/tabularis-extended/plugins/drivers/postgresql-plus/` |
+   | **Windows** | `%APPDATA%\tabularis-extended\plugins\drivers\postgresql-plus\` |
 
-4. Restart Tabularis.
+   The host accepts the package only when `.tabularium` has `id`
+   `postgresql-plus`, a `min_runtime_version` the host satisfies, and an
+   `executable` that is a regular file inside the package directory. Setting
+   `TABULARIS_PLUGIN_DIR` to an absolute path moves the whole plugins root, for
+   the host and for the recipes alike.
+
+4. Start Tabularis Extended.
 
 ## How It Works
 
@@ -208,13 +203,14 @@ editing, extension-aware types, and more).
 
 ```bash
 just build      # debug build
-just release    # release build (what the GitHub Actions workflow ships)
+just release    # locked release build
+just package    # release package + SHA-256 file in dist/ (just package OUT_DIR for another folder)
 ```
 
 Or directly with cargo:
 
 ```bash
-cargo build --release
+cargo build --locked --release
 ```
 
 The binary will be located at `target/release/postgresql-plugin`.
@@ -222,9 +218,15 @@ The binary will be located at `target/release/postgresql-plugin`.
 ### Install Locally
 
 ```bash
-just dev-install   # build + copy binary and manifest into the Tabularis plugins dir
-just uninstall     # remove the installed plugin
+just preflight       # check package identity (postgresql-plus) and aligned versions
+just install-dry-run # show the destination without writing anything
+just dev-install     # debug build + copy binary and manifest into the Extended plugin directory
+just install-package dist/postgresql-plus-darwin-arm64.zip   # verify the SHA-256, then extract
+just uninstall       # remove the installed package
 ```
+
+The destination is `<Extended app data>/plugins/drivers/postgresql-plus`; set
+`TABULARIS_APP_DIR` only to target a different profile deliberately.
 
 ### Local Test Database
 

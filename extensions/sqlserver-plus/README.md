@@ -18,12 +18,15 @@ A [Microsoft SQL Server](https://www.microsoft.com/sql-server) plugin for [Tabul
 
 This plugin enables Tabularis to connect to SQL Server instances, providing schema introspection, query execution, full CRUD, DDL, trigger and stored-routine management, BLOB handling, database-user management, and visual execution plans through a JSON-RPC 2.0 over stdio interface. It is written in Rust on top of Microsoft's [`mssql-tds`](https://github.com/microsoft/mssql-rust) protocol implementation (via [`mssql-tiberius-bridge`](https://crates.io/crates/mssql-tiberius-bridge)) with [`deadpool`](https://crates.io/crates/deadpool) connection pooling.
 
-> **Requires Tabularis v0.25.1-5 or later.** Plugin v1.0.0-beta.3 pairs native
-> SQL Server Generate SQL previews with the host extension from
-> [TabularisDB/tabularis#818](https://github.com/TabularisDB/tabularis/pull/818).
-> Update both the app and the plugin to get the complete TOP/LIMIT fix.
-> The target host is nightly `0.25.1-5` or the following stable release;
-> earlier hosts should remain on plugin v1.0.0-beta.2.
+> **Requires Tabularis Extended `0.27.0` or later.** This fork ships the
+> package as `sqlserver-plus` (manifest `id`, display name *SQL Server Plus*,
+> executable `sqlserver-plugin`) with version `1.0.0-beta.3+plus.1` and
+> `min_runtime_version` `0.27.0`. The host maps existing `sqlserver` and
+> `sqlserver-entra` connections to `sqlserver-plus` after this package is
+> installed; the official app, its profile and the old packages stay untouched
+> for rollback. The connection-modal UI also needs the host's
+> `setPasswordFieldHidden` extension and shows a compatible-host notice when it
+> is missing.
 
 **Discord** — [Join our Discord server](https://discord.com/invite/K2hmhfHRSt) and chat with the maintainers.
 
@@ -311,23 +314,33 @@ in [`docs/explain-architecture.md`](docs/explain-architecture.md).
 
 ## Installation
 
-### Automatic (via Tabularis)
+### From a release package
 
-After the first release is published and registered, open **Settings → Plugins**
-in Tabularis and install *SQL Server* from the plugin registry. Publication
-status is tracked in [issue #4](https://github.com/TabularisDB/tabularis-sqlserver-plugin/issues/4).
+`just package` builds `sqlserver-plus-<os>-<arch>.zip` with a matching
+`.sha256` file. The package is not registered in the upstream plugin registry.
+Verify and install an archive with the recipes below, or extract it by hand:
 
-### Manual Installation
+1. Quit Tabularis Extended.
+2. Check the archive against its `.sha256` file (`shasum -a 256 -c`).
+3. Extract it into the Extended profile's plugin directory, never into the
+   official `tabularis` directory:
+   - **Linux:** `~/.local/share/tabularis-extended/plugins/drivers/sqlserver-plus/`
+   - **macOS:** `~/Library/Application Support/tabularis-extended/plugins/drivers/sqlserver-plus/`
+   - **Windows:** `%APPDATA%\tabularis-extended\plugins\drivers\sqlserver-plus\`
+4. On Linux/macOS, make the binary executable: `chmod +x sqlserver-plugin`
+5. Start Tabularis Extended — *SQL Server Plus* appears in the connection picker.
 
-Once release assets are available:
+The host accepts the package only when `.tabularium` has `id`
+`sqlserver-plus`, a `min_runtime_version` the host satisfies, and an
+`executable` that is a regular file inside the package directory. Setting
+`TABULARIS_PLUGIN_DIR` to an absolute path moves the whole plugins root, for
+the host and for the recipes alike.
 
-1. Download the ZIP for your platform from the [releases page](https://github.com/TabularisDB/tabularis-sqlserver-plugin/releases).
-2. Extract it into the Tabularis plugins directory:
-   - **Linux:** `~/.local/share/tabularis/plugins/sqlserver/`
-   - **macOS:** `~/Library/Application Support/tabularis/plugins/sqlserver/`
-   - **Windows:** `%APPDATA%\tabularis\plugins\sqlserver\`
-3. On Linux/macOS, make the binary executable: `chmod +x sqlserver-plugin`
-4. Restart Tabularis — *SQL Server* appears in the connection picker.
+```bash
+just install-dry-run                 # show the destination and run the manifest preflight; writes nothing
+just verify-package dist/sqlserver-plus-darwin-arm64.zip
+just install-package dist/sqlserver-plus-darwin-arm64.zip
+```
 
 ## How It Works
 
@@ -363,7 +376,7 @@ remaining pools.
 
 ## Known Limitations
 
-- SQL authentication and Windows/Kerberos integrated authentication (`integrated_auth`) are supported; Azure AD authentication is follow-up work.
+- SQL authentication, Windows/Kerberos integrated authentication (`integrated_auth`), and Microsoft Entra user authentication through the signed-in Azure CLI (`auth_mode=entra_user`) are supported. The driver obtains its own Azure SQL token for each new session; the host never supplies one, and the service capability `entra_token` is `false`. Entra login and MFA stay a user action in Azure CLI.
 - Primary-key membership changes are disabled: the single-column alteration API cannot safely preserve composite PKs and referencing foreign keys.
 - Custom CA files are rejected explicitly; strict verification uses the system trust store.
 - SQL Server has indexed views, not materialized views. Indexed views are maintained synchronously and have no refresh operation, so `get_materialized_views`, `get_materialized_view_columns`, `get_materialized_view_definition`, and `refresh_materialized_view` deliberately return `-32601` rather than pretending the features are equivalent.
@@ -381,15 +394,24 @@ remaining pools.
 
 ```bash
 just build      # debug build
-just release    # release build (what the GitHub Actions workflow ships)
+just release    # locked release build, UI and EXPLAIN bundles included
+just package    # release package + SHA-256 file in dist/ (just package OUT_DIR for another folder)
 ```
+
+`ui/` and `explain/` install from their frozen pnpm lockfiles. A backend-only
+build is not a complete package: the UI bundle and the EXPLAIN parser bundle
+are required.
 
 ### Install Locally
 
 ```bash
-just dev-install   # build + copy the binary, manifest and optional bundles
-just uninstall     # remove the installed plugin
+just preflight        # check package identity, aligned versions and plugin settings
+just dev-install      # debug build + copy binary, manifest and bundles into the Extended plugin directory
+just uninstall        # remove the installed package
 ```
+
+The destination is `<Extended app data>/plugins/drivers/sqlserver-plus`; set
+`TABULARIS_APP_DIR` only to target a different profile deliberately.
 
 ## Development
 
@@ -455,12 +477,10 @@ so a missing or ambiguous label fails the version-suggestion check.
 
 ### Releasing
 
-A release is a single `v<version>` tag. The Release workflow builds the plugin
-binaries for every platform, publishes the GitHub release, and publishes the
-`@tabularis/explain-sqlserver` npm package from the same commit. Before
-tagging, set the same version in `.tabularium`, `Cargo.toml`, and
-`explain/package.json`; the workflow rejects a tag that disagrees with the
-manifest or the npm package.
+A release is a single tag. Before tagging, set the same version in
+`.tabularium`, `Cargo.toml` (and `Cargo.lock`), `explain/package.json`, and
+`ui/package.json`; `just preflight` checks that they agree and that the
+manifest identity is `sqlserver-plus`.
 
 Before opening a PR, run:
 

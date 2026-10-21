@@ -3,9 +3,9 @@ mod harness;
 
 #[test]
 #[allow(non_snake_case)]
-fn 실제Azure_SQL_전용_fixture는_인증_TLS_조회_CRUD와_취소를_검증한다() {
+fn 실제Azure_SQL_전용_조회는_인증_TLS_세션과_취소를_SELECT만으로_검증한다() {
     // given
-    let expected_cleanup = 0;
+    let expected_writes = 0;
     // when
     let actual = harness::run::run_live_from_stdin();
     // then
@@ -14,7 +14,7 @@ fn 실제Azure_SQL_전용_fixture는_인증_TLS_조회_CRUD와_취소를_검증�
         "Azure manual harness failed with sanitized code: {:?}",
         actual.error
     );
-    assert_eq!(actual.cleanup_remaining, expected_cleanup);
+    assert_eq!(actual.writes_dispatched, expected_writes);
     assert_eq!(actual.evidence_kind, "actual_azure");
     assert!(!actual.integration_complete);
 }

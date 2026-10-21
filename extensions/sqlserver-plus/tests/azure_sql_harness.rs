@@ -6,47 +6,42 @@ use harness::{
     credentials::{Credentials, SecretReader},
     fixture,
     report::Report,
-    rpc::{Response, Rpc},
+    rpc::{AzureEnv, Response, Rpc},
     Error, Result,
 };
 use serde_json::{json, Value};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
+    ffi::OsString,
     rc::Rc,
 };
 
 const _: fn() -> Report = harness::run::run_live_from_stdin;
 const TENANT: &str = "11111111-1111-4111-8111-111111111111";
-const CLIENT: &str = "22222222-2222-4222-8222-222222222222";
-const PRINCIPAL: &str = "33333333-3333-4333-8333-333333333333";
+const OBJECT: &str = "22222222-2222-4222-8222-222222222222";
+const USERNAME: &str = "synthetic-user@example.test";
 const CANARY: &str = "synthetic-secret-DO-NOT-REPORT";
+const SYNTHETIC_HOST: &str = "synthetic-server.database.windows.net";
+fn principal_value(mode: &str) -> Value {
+    if mode == "sql_password" {
+        json!({"auth_mode":mode,"username":USERNAME})
+    } else {
+        json!({"auth_mode":mode,"username":USERNAME,"tenant_id":TENANT,"entra_object_id":OBJECT})
+    }
+}
 fn config_value(mode: &str) -> Value {
-    let principal = |username| {
-        if mode == "sql_password" {
-            json!({"auth_mode":mode,"username":username})
-        } else {
-            json!({"auth_mode":mode,"tenant_id":TENANT,"client_id":CLIENT})
-        }
-    };
-    json!({"version":1,"dedicated_test_resource":true,"host":"synthetic-server.database.windows.net","database":"synthetic_db","schema":"tabularis_test_schema","table":"tabularis_test_rows","writer":principal("writer"),"reader":principal("reader")})
+    json!({"version":2,"nonproduction_resource":true,"host":SYNTHETIC_HOST,"database":"synthetic_db","principal":principal_value(mode)})
 }
 fn config(mode: &str) -> Config {
     Config::parse(&serde_json::to_vec(&config_value(mode)).unwrap()).unwrap()
 }
 fn secrets(mode: &str) -> Value {
-    let auth = |identity, token: &str, extra: u64| {
-        if mode == "sql_password" {
-            json!({"kind":"db_password","password":token,"identity":identity})
-        } else {
-            json!({"kind":"entra_token","access_token":token,"expires_at_ms":harness::now_ms()+3_600_000+extra,"identity":identity,"tenant_id":TENANT,"client_id":CLIENT,"principal_id":PRINCIPAL,"scope":harness::credentials::SQL_SCOPE})
-        }
-    };
-    let mut value = json!({"writer":auth("writer-revision",CANARY,0),"reader":auth("reader-revision","synthetic-reader-secret",0)});
-    if mode != "sql_password" {
-        value["refresh"] = auth("writer-revision", "synthetic-refreshed-secret", 1000);
+    if mode == "sql_password" {
+        json!({"principal":{"kind":"db_password","password":CANARY,"identity":"principal-revision"}})
+    } else {
+        json!({})
     }
-    value
 }
 struct Reader {
     bytes: Vec<u8>,
@@ -72,39 +67,30 @@ fn reader(mode: &str) -> Reader {
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     Normal,
-    BadMetadata,
-    ReaderAllowed,
-    WrongPermissionError,
-    UnknownInsert,
-    UnknownAppliedInsert,
-    CleanupForeign,
-    CleanupFailure,
-    MissingRow,
-    WrongCount,
-    CancelQueued,
+    HostTokenCapability,
+    ChangingSpid,
+    CancelUnknown,
     ShutdownFailure,
     Timeout,
 }
 struct State {
     mode: Mode,
-    rows: BTreeMap<i32, Value>,
     requests: Vec<Value>,
     responses: HashMap<String, Response>,
-    cleaning: bool,
     cancelled: bool,
     long: Option<(String, String)>,
+    spid_reads: usize,
     shutdowns: usize,
 }
 impl State {
     fn new(mode: Mode) -> Self {
         Self {
             mode,
-            rows: BTreeMap::new(),
             requests: Vec::new(),
             responses: HashMap::new(),
-            cleaning: false,
             cancelled: false,
             long: None,
+            spid_reads: 0,
             shutdowns: 0,
         }
     }
@@ -116,29 +102,16 @@ fn ok(result: Value) -> Response {
     Response {
         result,
         error: None,
-        unknown: false,
-        permission_denial: false,
     }
 }
-fn denied(code: &'static str, permission: bool) -> Response {
+fn failed(code: &'static str) -> Response {
     Response {
         result: Value::Null,
         error: Some(code),
-        unknown: code == "OUTCOME_UNKNOWN",
-        permission_denial: permission,
     }
 }
 fn rows(columns: Value, rows: Value) -> Value {
     json!({"columns":columns,"rows":rows,"truncated":false,"affected_rows":null,"warnings":["affected_rows_unavailable"],"column_metadata":[{"column_index":0},{"column_index":1}]})
-}
-fn metadata() -> Value {
-    json!({"columns":[
-        {"name":"run_id","data_type":"nvarchar","max_length":72,"precision":0,"scale":0,"is_nullable":false,"is_identity":false,"is_pk":true,"primary_key_position":1},
-        {"name":"id","data_type":"int","max_length":4,"precision":10,"scale":0,"is_nullable":false,"is_identity":false,"is_pk":true,"primary_key_position":2},
-        {"name":"value","data_type":"nvarchar","max_length":200,"precision":0,"scale":0,"is_nullable":true,"is_identity":false,"is_pk":false,"primary_key_position":null},
-        {"name":"measure","data_type":"decimal","max_length":17,"precision":38,"scale":18,"is_nullable":true,"is_identity":false,"is_pk":false,"primary_key_position":null},
-        {"name":"observed_at","data_type":"datetimeoffset","max_length":10,"precision":34,"scale":7,"is_nullable":true,"is_identity":false,"is_pk":false,"primary_key_position":null}
-    ]})
 }
 impl Fake {
     fn respond(&self, request: &Value) -> Result<Response> {
@@ -146,8 +119,6 @@ impl Fake {
         let method = request["method"].as_str().unwrap_or("");
         let input = &request["params"]["input"];
         let context = &request["params"]["driver_context"];
-        let is_reader = context["auth"]["identity"] == "reader-revision";
-        let read_only = context["read_only"] == true;
         let parameter = |name: &str| {
             input["parameters"]
                 .as_array()
@@ -157,87 +128,14 @@ impl Fake {
         };
         match method {
             "initialize" => Ok(ok(
-                json!({"service_capabilities":{"service_protocol":1,"exact_query":true,"sessions":true,"cancel":true,"catalog":true,"rows":true,"entra_token":true,"exact_affected_rows":false,"readonly_guarantee":"restricted_database_principal"}}),
+                json!({"service_capabilities":{"service_protocol":1,"exact_query":true,"sessions":true,"cancel":true,"catalog":true,"rows":true,"entra_token":state.mode==Mode::HostTokenCapability,"exact_affected_rows":false,"readonly_guarantee":"restricted_database_principal"}}),
             )),
-            "service_test" => {
-                if state.cancelled {
-                    state.cleaning = true;
-                }
-                Ok(ok(json!({"success":true})))
-            }
+            "service_test" => Ok(ok(json!({"success":true}))),
             "service_catalog" => match input["operation"].as_str() {
                 Some("catalog.databases") => Ok(ok(json!({"databases":["synthetic_db"]}))),
-                Some("catalog.schemas") => Ok(ok(json!({"schemas":["tabularis_test_schema"]}))),
-                Some("catalog.objects") => Ok(ok(
-                    json!({"objects":[{"schema_name":"tabularis_test_schema","name":"tabularis_test_rows","kind":"table"}]}),
-                )),
-                Some("catalog.describe") => {
-                    let mut value = metadata();
-                    if state.mode == Mode::BadMetadata {
-                        value["columns"][1]["primary_key_position"] = json!(1);
-                    }
-                    Ok(ok(value))
-                }
+                Some("catalog.schemas") => Ok(ok(json!({"schemas":["dbo"]}))),
                 _ => Err(Error("SYNTHETIC_UNEXPECTED_OPERATION")),
             },
-            "service_row" => {
-                let operation = input["operation"].as_str().unwrap_or("");
-                let id = if operation == "row.insert" {
-                    input["values"]["id"].as_i64()
-                } else {
-                    input["identity"]["values"][1].as_i64()
-                }
-                .unwrap_or(0) as i32;
-                if read_only {
-                    return Ok(denied("WRITE_NOT_ALLOWED", false));
-                }
-                if is_reader && state.mode != Mode::ReaderAllowed {
-                    return Ok(denied(
-                        "OUTCOME_UNKNOWN",
-                        state.mode != Mode::WrongPermissionError,
-                    ));
-                }
-                if operation != "row.insert"
-                    && input["identity"]["columns"] != json!(["run_id", "id"])
-                {
-                    return Ok(denied("INVALID_ARGUMENT", false));
-                }
-                if operation == "row.insert" {
-                    if state.rows.contains_key(&id) {
-                        return Ok(denied("OUTCOME_UNKNOWN", false));
-                    }
-                    if id == 2
-                        && matches!(
-                            state.mode,
-                            Mode::UnknownInsert | Mode::UnknownAppliedInsert | Mode::Timeout
-                        )
-                    {
-                        if state.mode == Mode::UnknownAppliedInsert {
-                            state.rows.insert(id, input["values"].clone());
-                        }
-                        state.cleaning = true;
-                        if state.mode == Mode::Timeout {
-                            return Err(Error("RPC_TIMEOUT"));
-                        }
-                        return Ok(denied("OUTCOME_UNKNOWN", false));
-                    }
-                    state.rows.insert(id, input["values"].clone());
-                } else if operation == "row.update" {
-                    if let Some(row) = state.rows.get_mut(&id) {
-                        row["value"] = input["changes"]["value"].clone();
-                    }
-                } else if operation == "row.delete" {
-                    if state.cleaning && id == 1 && state.mode == Mode::CleanupFailure {
-                        return Ok(denied("OUTCOME_UNKNOWN", false));
-                    }
-                    state.rows.remove(&id);
-                } else {
-                    return Err(Error("SYNTHETIC_UNEXPECTED_OPERATION"));
-                }
-                Ok(ok(
-                    json!({"affected_rows":if state.mode==Mode::WrongCount {0}else{1},"truncated":false}),
-                ))
-            }
             "execute_query_exact" => {
                 let text = input["text"].as_str().unwrap_or("");
                 if text.starts_with("WAITFOR") {
@@ -245,14 +143,11 @@ impl Fake {
                         context["connection_id"].as_str().unwrap_or("").into(),
                         context["request_id"].as_str().unwrap_or("").into(),
                     ));
-                    return Ok(denied(
-                        if state.mode == Mode::CancelQueued {
-                            "CANCELLED"
-                        } else {
-                            "OUTCOME_UNKNOWN"
-                        },
-                        false,
-                    ));
+                    return Ok(failed(if state.mode == Mode::CancelUnknown {
+                        "OUTCOME_UNKNOWN"
+                    } else {
+                        "CANCELLED"
+                    }));
                 }
                 if text.contains("SERVERPROPERTY") {
                     return Ok(ok(rows(
@@ -261,7 +156,13 @@ impl Fake {
                     )));
                 }
                 if text == "SELECT @@SPID" {
-                    return Ok(ok(rows(json!(["spid"]), json!([[77]]))));
+                    state.spid_reads += 1;
+                    let spid = if state.mode == Mode::ChangingSpid {
+                        76 + state.spid_reads
+                    } else {
+                        77
+                    };
+                    return Ok(ok(rows(json!(["spid"]), json!([[spid]]))));
                 }
                 if text.contains("AS duplicate") {
                     let mut value = rows(
@@ -274,54 +175,19 @@ impl Fake {
                     )]);
                     return Ok(ok(value));
                 }
-                if text.contains("blocked") || text.starts_with("EXEC sys.sp_executesql") {
-                    return Ok(denied("WRITE_NOT_ALLOWED", true));
-                }
                 if text.starts_with("SELECT CAST(@decimal") {
                     return Ok(ok(rows(json!(["measure"]), json!([[fixture::DECIMAL]]))));
                 }
-                if text.starts_with("SELECT id,value") {
-                    if state.mode == Mode::MissingRow {
-                        state.rows.remove(&2);
-                        state.cleaning = true;
-                    }
-                    let values = state
-                        .rows
-                        .values()
-                        .map(|row| {
-                            json!([row["id"], row["value"], row["measure"], row["observed_at"]])
-                        })
-                        .collect::<Vec<_>>();
-                    return Ok(ok(rows(
-                        json!(["id", "value", "measure", "observed_at"]),
-                        json!(values),
-                    )));
-                }
-                if text.starts_with("SELECT run_id,id,value") {
-                    let id = parameter("@id").as_i64().unwrap_or(0) as i32;
-                    let values = state
-                        .rows
-                        .get(&id)
-                        .map(|row| {
-                            json!([
-                                if state.cleaning && state.mode == Mode::CleanupForeign && id == 1 {
-                                    json!("foreign-run-private-canary")
-                                } else {
-                                    row["run_id"].clone()
-                                },
-                                row["id"],
-                                row["value"]
-                            ])
-                        })
-                        .into_iter()
-                        .collect::<Vec<_>>();
-                    return Ok(ok(rows(json!(["run_id", "id", "value"]), json!(values))));
-                }
                 Err(Error("SYNTHETIC_UNEXPECTED_SQL"))
             }
-            "service_session_open" => Ok(ok(
-                json!({"session_handle":"synthetic-session","in_transaction":true,"rollback_confirmed":false}),
-            )),
+            "service_session_open" => {
+                if state.mode == Mode::Timeout {
+                    return Err(Error("RPC_TIMEOUT"));
+                }
+                Ok(ok(
+                    json!({"session_handle":"synthetic-session","in_transaction":true,"rollback_confirmed":false}),
+                ))
+            }
             "service_session_finish" => Ok(ok(
                 json!({"session_handle":"synthetic-session","in_transaction":false,"rollback_confirmed":true}),
             )),
@@ -369,20 +235,19 @@ impl Rpc for Fake {
         "synthetic_harness"
     }
 }
-fn execute(mode: Mode, auth_mode: &str) -> (Report, Rc<RefCell<State>>) {
-    let config = config(auth_mode);
+fn execute_config(mode: Mode, config: Config, auth_mode: &str) -> (Report, Rc<RefCell<State>>) {
     let state = Rc::new(RefCell::new(State::new(mode)));
     let rpc_state = state.clone();
     let report = harness::run::authorized(
         &config,
-        Flags {
-            live: true,
-            fixture_writes: true,
-        },
+        Flags { live: true },
         &mut reader(auth_mode),
         move |_| Ok(Box::new(Fake { state: rpc_state })),
     );
     (report, state)
+}
+fn execute(mode: Mode, auth_mode: &str) -> (Report, Rc<RefCell<State>>) {
+    execute_config(mode, config(auth_mode), auth_mode)
 }
 fn has(report: &Report, name: &str, status: &str) -> bool {
     report
@@ -390,75 +255,146 @@ fn has(report: &Report, name: &str, status: &str) -> bool {
         .iter()
         .any(|check| check.name == name && check.status == status)
 }
+fn methods(state: &Rc<RefCell<State>>, method: &str) -> usize {
+    state
+        .borrow()
+        .requests
+        .iter()
+        .filter(|request| request["method"] == method)
+        .count()
+}
 
 #[test]
-fn sql_인증_전체_주입검사는_동일_실행함수와_정확한_정리_결과를_사용한다() {
+fn sql_인증_전체_주입검사는_동일_실행함수와_select만_사용한다() {
     // given
     let mode = Mode::Normal;
     // when
     let (actual, state) = execute(mode, "sql_password");
     // then
     assert!(actual.success);
-    assert_eq!(actual.cleanup_remaining, 0);
+    assert_eq!(actual.writes_dispatched, 0);
     assert_eq!(actual.evidence_kind, "synthetic_harness");
     assert!(!actual.integration_complete);
-    assert!(state.borrow().rows.is_empty());
-    assert!(has(&actual, "supplied_token_rotation", "not_applicable"));
-    assert!(has(&actual, "exact_affected_rows_unavailable", "pass"));
-    assert!(has(&actual, "reader_database_permission_denial", "pass"));
-    assert!(has(&actual, "reader_probe_absent", "pass"));
+    assert!(has(&actual, "driver_owned_entra_login", "not_applicable"));
+    assert!(has(&actual, "reserved_session_identity", "pass"));
+    assert!(has(&actual, "fresh_login_after_invalidation", "pass"));
     assert_eq!(state.borrow().shutdowns, 1);
+    assert_eq!(methods(&state, "service_row"), 0);
+    assert!(state.borrow().requests.iter().all(|request| {
+        request["method"] == "initialize"
+            || request["method"] == "cancel_request"
+            || request["params"]["driver_context"]["read_only"] == true
+    }));
 }
 
 #[test]
-fn entra_주입검사는_공급된_토큰_교체와_같은_예약_session을_확인한다() {
+fn sql_인증은_sqlserver_plus_driver와_일회성_password_context만_보낸다() {
     // given
-    let modes = ["entra_user", "entra_service_principal"];
+    let mode = Mode::Normal;
     // when
-    let actual = modes.map(|mode| execute(Mode::Normal, mode));
+    let (actual, state) = execute(mode, "sql_password");
     // then
-    assert!(actual.iter().all(|(report, _)| report.success));
-    assert!(actual
+    assert!(actual.success);
+    let state = state.borrow();
+    let connected = state
+        .requests
         .iter()
-        .all(|(report, _)| has(report, "supplied_token_rotation", "pass")));
-    assert!(actual.iter().all(|(report, _)| has(
-        report,
-        "reserved_session_token_identity",
-        "pass"
-    )));
-    assert!(actual.iter().all(|(report, _)| has(
-        report,
-        "token_local_contract_rejections",
-        "pass"
-    )));
-    assert!(actual
-        .iter()
-        .all(|(report, _)| has(report, "refresh_provider", "deferred")));
-    assert!(actual
-        .iter()
-        .all(|(_, state)| state.borrow().rows.is_empty()));
+        .filter(|request| request["params"]["params"].is_object())
+        .collect::<Vec<_>>();
+    assert!(!connected.is_empty());
+    assert!(connected.iter().all(|request| {
+        let params = &request["params"]["params"];
+        params["driver"] == "sqlserver-plus"
+            && params["auth_mode"] == "sql_password"
+            && params["extra"] == json!({})
+            && params.get("password").is_none()
+            && request["params"]["driver_context"]["auth"]["kind"] == "db_password"
+    }));
 }
 
 #[test]
-fn 두_live_동의가_없으면_보호된_stdin과_spawn에_접근하지_않는다() {
+fn entra_주입검사는_host_token_없이_azure_cli_계약_필드만_보낸다() {
+    // given
+    let mode = Mode::Normal;
+    // when
+    let (actual, state) = execute(mode, "entra_user");
+    // then
+    assert!(actual.success);
+    assert!(has(&actual, "driver_owned_entra_login", "pass"));
+    assert!(has(&actual, "reserved_session_identity", "pass"));
+    assert!(has(&actual, "fresh_login_after_invalidation", "pass"));
+    assert!(has(&actual, "auth_invalidation", "pass"));
+    let state = state.borrow();
+    let connected = state
+        .requests
+        .iter()
+        .filter(|request| request["params"]["params"].is_object())
+        .collect::<Vec<_>>();
+    assert!(!connected.is_empty());
+    assert!(connected.iter().all(|request| {
+        let params = &request["params"]["params"];
+        params["driver"] == "sqlserver-plus"
+            && params["auth_mode"] == "entra_user"
+            && params["username"] == USERNAME
+            && params["ssl_mode"] == "verify-full"
+            && params["extra"]
+                == json!({"auth_source":"azure_cli","tenant_id":TENANT,"entra_object_id":OBJECT})
+            && params.get("password").is_none()
+            && request["params"]["driver_context"]["auth"].is_null()
+    }));
+    let wire = serde_json::to_string(&state.requests).unwrap();
+    assert!(!wire.contains("client_id"));
+    assert!(!wire.contains("entra_token"));
+    assert!(!wire.contains("access_token"));
+    assert!(!wire.contains("entra_service_principal"));
+}
+
+#[test]
+fn entra_azure_cli_path가_지정되면_extra로만_전달된다() {
+    // given
+    let mut value = config_value("entra_user");
+    value["principal"]["azure_cli_path"] = json!("/opt/synthetic/bin/az");
+    let config = Config::parse(&serde_json::to_vec(&value).unwrap()).unwrap();
+    // when
+    let (actual, state) = execute_config(Mode::Normal, config, "entra_user");
+    // then
+    assert!(actual.success);
+    assert!(state
+        .borrow()
+        .requests
+        .iter()
+        .filter(|request| request["params"]["params"].is_object())
+        .all(
+            |request| request["params"]["params"]["extra"]["azure_cli_path"]
+                == "/opt/synthetic/bin/az"
+        ));
+}
+
+#[test]
+fn initialize가_entra_token_true를_알리면_검사는_실패한다() {
+    // given
+    let mode = Mode::HostTokenCapability;
+    // when
+    let (actual, state) = execute(mode, "entra_user");
+    // then
+    assert!(!actual.success);
+    assert_eq!(actual.error, Some("REQUIRED_CHECK_UNOBSERVED"));
+    assert!(has(&actual, "initialize_protocol", "fail"));
+    assert_eq!(methods(&state, "service_test"), 0);
+}
+
+#[test]
+fn live_동의가_없으면_보호된_stdin과_spawn에_접근하지_않는다() {
     // given
     let config = config("sql_password");
     let mut reader = reader("sql_password");
     let spawned = Rc::new(Cell::new(0));
     let observed = spawned.clone();
     // when
-    let actual = harness::run::authorized(
-        &config,
-        Flags {
-            live: true,
-            fixture_writes: false,
-        },
-        &mut reader,
-        move |_| {
-            observed.set(1);
-            Err(Error("UNEXPECTED_SPAWN"))
-        },
-    );
+    let actual = harness::run::authorized(&config, Flags { live: false }, &mut reader, move |_| {
+        observed.set(1);
+        Err(Error("UNEXPECTED_SPAWN"))
+    });
     // then
     assert!(!actual.success);
     assert_eq!(actual.error, Some("LIVE_OPT_IN_REQUIRED"));
@@ -476,18 +412,10 @@ fn config가_잘못되면_stdin과_spawn_이전에_거부된다() {
     let spawned = Rc::new(Cell::new(0));
     let observed = spawned.clone();
     // when
-    let actual = harness::run::authorized(
-        &config,
-        Flags {
-            live: true,
-            fixture_writes: true,
-        },
-        &mut reader,
-        move |_| {
-            observed.set(1);
-            Err(Error("UNEXPECTED_SPAWN"))
-        },
-    );
+    let actual = harness::run::authorized(&config, Flags { live: true }, &mut reader, move |_| {
+        observed.set(1);
+        Err(Error("UNEXPECTED_SPAWN"))
+    });
     // then
     assert_eq!(actual.error, Some("INVALID_HOST"));
     assert_eq!(reader.reads.get(), 0);
@@ -495,13 +423,19 @@ fn config가_잘못되면_stdin과_spawn_이전에_거부된다() {
 }
 
 #[test]
-fn 폐쇄된_config는_비밀과_endpoint_별칭과_수정된_tls를_거부한다() {
+fn 폐쇄된_config는_비밀과_endpoint_별칭과_수정된_tls와_이전_fixture_필드를_거부한다() {
     // given
     let invalid = [
         ("credential_ref", json!("secret")),
         ("password", json!(CANARY)),
         ("ssl_override", json!(false)),
         ("unknown", json!(1)),
+        ("schema", json!("tabularis_test_schema")),
+        ("table", json!("tabularis_test_rows")),
+        ("writer", principal_value("sql_password")),
+        ("reader", principal_value("sql_password")),
+        ("dedicated_test_resource", json!(true)),
+        ("version", json!(1)),
     ];
     let endpoints = [
         "https://server.database.windows.net",
@@ -531,31 +465,53 @@ fn 폐쇄된_config는_비밀과_endpoint_별칭과_수정된_tls를_거부한�
 }
 
 #[test]
-fn config의_시스템_database와_fixture_밖_식별자는_거부된다() {
+fn config의_시스템_database는_거부된다() {
     // given
-    let invalid = [
-        ("database", "master"),
-        ("database", "MSDB"),
-        ("database", "bad[db]"),
-        ("schema", "dbo"),
-        ("table", "normal_table"),
-        ("table", "tabularis_test_bad-name"),
-    ];
+    let invalid = ["master", "MSDB", "bad[db]", "tempdb", ""];
     // when
-    let actual = invalid.map(|(key, value)| {
+    let actual = invalid.map(|value| {
         let mut config = config_value("sql_password");
-        config[key] = json!(value);
+        config["database"] = json!(value);
         Config::parse(&serde_json::to_vec(&config).unwrap()).is_err()
     });
     // then
     assert!(actual.iter().all(|rejected| *rejected));
 }
 
+#[test]
+fn entra_principal은_계약_필드만_받고_service_principal과_client_id를_거부한다() {
+    // given
+    let mutations: [(&str, Value); 9] = [
+        ("tenant_id", json!("not-uuid")),
+        ("entra_object_id", json!("not-uuid")),
+        ("tenant_id", Value::Null),
+        ("entra_object_id", Value::Null),
+        ("username", Value::Null),
+        ("client_id", json!(OBJECT)),
+        ("auth_mode", json!("entra_service_principal")),
+        ("azure_cli_path", json!("relative/az")),
+        ("azure_cli_path", json!(" /opt/az")),
+    ];
+    // when
+    let rejected = mutations.map(|(key, value)| {
+        let mut config = config_value("entra_user");
+        config["principal"][key] = value;
+        Config::parse(&serde_json::to_vec(&config).unwrap()).is_err()
+    });
+    let mut sql = config_value("sql_password");
+    sql["principal"]["tenant_id"] = json!(TENANT);
+    let mut accepted = config_value("entra_user");
+    accepted["principal"]["azure_cli_path"] = json!("/opt/homebrew/bin/az");
+    // then
+    assert!(rejected.iter().all(|rejected| *rejected));
+    assert!(Config::parse(&serde_json::to_vec(&sql).unwrap()).is_err());
+    assert!(Config::parse(&serde_json::to_vec(&accepted).unwrap()).is_ok());
+}
+
 fn validate_payload(mode: &str, value: Value) -> Option<&'static str> {
     Credentials::read(
         &mut Reader::new(serde_json::to_vec(&value).unwrap()),
         &config(mode),
-        harness::now_ms(),
     )
     .err()
     .map(|error| error.0)
@@ -567,7 +523,7 @@ fn secret_json의_알수없는_필드와_authmode_불일치는_거부된다() {
     let mut outer = secrets("sql_password");
     outer["secret_extra"] = json!(CANARY);
     let mut inner = secrets("sql_password");
-    inner["writer"]["token"] = json!(CANARY);
+    inner["principal"]["token"] = json!(CANARY);
     let wrong = secrets("entra_user");
     // when
     let actual = [outer, inner, wrong].map(|value| validate_payload("sql_password", value));
@@ -581,7 +537,7 @@ fn utf8과_stdin_128kib와_secret_64kib_상한은_spawn_전에_검증된다() {
     let invalid_utf8 = vec![255, 254];
     let oversized = vec![b'a'; 128 * 1024 + 1];
     let mut big_secret = secrets("sql_password");
-    big_secret["writer"]["password"] = json!("a".repeat(64 * 1024 + 1));
+    big_secret["principal"]["password"] = json!("a".repeat(64 * 1024 + 1));
     // when
     let actual = [
         invalid_utf8,
@@ -589,13 +545,9 @@ fn utf8과_stdin_128kib와_secret_64kib_상한은_spawn_전에_검증된다() {
         serde_json::to_vec(&big_secret).unwrap(),
     ]
     .map(|bytes| {
-        Credentials::read(
-            &mut Reader::new(bytes),
-            &config("sql_password"),
-            harness::now_ms(),
-        )
-        .err()
-        .map(|e| e.0)
+        Credentials::read(&mut Reader::new(bytes), &config("sql_password"))
+            .err()
+            .map(|e| e.0)
     });
     // then
     assert_eq!(
@@ -609,226 +561,94 @@ fn utf8과_stdin_128kib와_secret_64kib_상한은_spawn_전에_검증된다() {
 }
 
 #[test]
-fn entra_만료_scope_uuid와_refresh_identity_변경은_계약에서_거부된다() {
+fn entra는_빈_stdin과_빈_json만_받고_공급된_비밀은_거부한다() {
     // given
-    let mutations = [
-        ("expires_at_ms", json!(0)),
-        ("scope", json!("wrong")),
-        ("tenant_id", json!("not-uuid")),
-        (
-            "principal_id",
-            json!("44444444-4444-4444-8444-444444444444"),
-        ),
-        ("identity", json!("changed")),
-        ("access_token", json!(CANARY)),
-    ];
+    let empty = Reader::new(Vec::new());
+    let blank = Reader::new(b" \n".to_vec());
+    let object = Reader::new(b"{}".to_vec());
+    let injected = secrets("sql_password");
     // when
-    let actual = mutations.map(|(key, value)| {
-        let mut payload = secrets("entra_user");
-        payload["refresh"][key] = value;
-        validate_payload("entra_user", payload)
-    });
+    let actual = (
+        [empty, blank, object].map(|mut reader| {
+            Credentials::read(&mut reader, &config("entra_user"))
+                .map(|credentials| credentials.principal.is_none())
+        }),
+        validate_payload("entra_user", injected),
+        validate_payload("entra_user", json!({"entra_token": CANARY})),
+    );
     // then
-    assert!(actual.iter().all(Option::is_some));
+    assert!(actual.0.iter().all(|read| matches!(read, Ok(true))));
+    assert_eq!(actual.1, Some("AUTH_MODE_MISMATCH"));
+    assert_eq!(actual.2, Some("INVALID_SECRET_INPUT"));
 }
 
 #[test]
-fn entra_refresh가_누락되면_토큰_acquisition을_추정하지_않는다() {
+fn sql_인증에_비밀이_없으면_spawn_전에_거부된다() {
     // given
-    let mut payload = secrets("entra_user");
-    payload.as_object_mut().unwrap().remove("refresh");
+    let payloads = [json!({}), json!({"principal":null})];
     // when
-    let actual = validate_payload("entra_user", payload);
+    let actual = payloads.map(|value| validate_payload("sql_password", value));
     // then
-    assert_eq!(actual, Some("REFRESH_REQUIRED"));
-}
-
-#[test]
-fn pk_metadata가_틀리면_첫_write_이전에_실패한다() {
-    // given
-    let mode = Mode::BadMetadata;
-    // when
-    let (actual, state) = execute(mode, "sql_password");
-    // then
-    assert_eq!(actual.error, Some("FIXTURE_METADATA_MISMATCH"));
-    assert_eq!(actual.writes_dispatched, 0);
-    assert!(state.borrow().rows.is_empty());
     assert_eq!(
-        state
-            .borrow()
-            .requests
-            .iter()
-            .filter(|request| request["method"] == "service_row")
-            .count(),
-        0
+        actual,
+        [Some("AUTH_MODE_MISMATCH"), Some("AUTH_MODE_MISMATCH")]
     );
 }
 
 #[test]
-fn reader_probe가_예상과_달리_성공하면_검사는_실패하고_자기행을_정리한다() {
+fn 예약_session의_spid가_바뀌면_검사는_실패하고_열린_session을_rollback한다() {
     // given
-    let mode = Mode::ReaderAllowed;
+    let mode = Mode::ChangingSpid;
+    // when
+    let (actual, state) = execute(mode, "entra_user");
+    // then
+    assert!(!actual.success);
+    assert_eq!(actual.error, Some("REQUIRED_CHECK_UNOBSERVED"));
+    assert!(has(&actual, "reserved_session_identity", "fail"));
+    assert_eq!(methods(&state, "service_session_finish"), 1);
+    assert_eq!(state.borrow().shutdowns, 1);
+}
+
+#[test]
+fn session을_열다_시간초과가_나면_실패로_남고_shutdown은_한번_호출된다() {
+    // given
+    let mode = Mode::Timeout;
     // when
     let (actual, state) = execute(mode, "sql_password");
     // then
     assert!(!actual.success);
-    assert!(has(&actual, "reader_database_permission_denial", "fail"));
-    assert!(state.borrow().rows.is_empty());
-    assert_eq!(actual.cleanup_remaining, 0);
+    assert_eq!(actual.error, Some("RPC_TIMEOUT"));
+    assert_eq!(state.borrow().shutdowns, 1);
+    assert_eq!(methods(&state, "service_session_finish"), 0);
 }
 
 #[test]
-fn unknown_오류만으로는_실제_db_permission_denial을_주장하지_않는다() {
-    // given
-    let mode = Mode::WrongPermissionError;
-    // when
-    let (actual, _) = execute(mode, "sql_password");
-    // then
-    assert!(!actual.success);
-    assert!(has(&actual, "reader_database_permission_denial", "fail"));
-    assert!(actual.unknown_write_outcomes > 0);
-}
-
-#[test]
-fn 불명확한_write는_재전송하지_않고_조회된_자기행만_정리한다() {
-    // given
-    let modes = [
-        Mode::UnknownInsert,
-        Mode::UnknownAppliedInsert,
-        Mode::Timeout,
-    ];
-    // when
-    let actual = modes.map(|mode| execute(mode, "sql_password"));
-    // then
-    assert!(actual
-        .iter()
-        .all(|(report, _)| !report.success && report.unknown_write_outcomes > 0));
-    assert!(actual
-        .iter()
-        .all(|(_, state)| state.borrow().rows.is_empty()));
-    assert!(actual.iter().all(|(_, state)| state
-        .borrow()
-        .requests
-        .iter()
-        .filter(|request| request["method"] == "service_row"
-            && request["params"]["input"]["operation"] == "row.insert"
-            && request["params"]["input"]["values"]["id"] == 2)
-        .count()
-        == 1));
-}
-
-#[test]
-fn cleanup의_다른_run_id는_삭제하지_않고_남은_id_sha만_보고한다() {
-    // given
-    let mode = Mode::CleanupForeign;
-    // when
-    let (actual, state) = execute(mode, "sql_password");
-    // then
-    assert_eq!(actual.error, Some("CLEANUP_FOREIGN_RUN"));
-    assert_eq!(actual.cleanup_remaining, 1);
-    assert!(actual
-        .remaining_id_sha256
-        .as_ref()
-        .is_some_and(|hash| hash.len() == 64));
-    assert!(state.borrow().rows.contains_key(&1));
-    assert_eq!(
-        state
-            .borrow()
-            .requests
-            .iter()
-            .filter(|request| request["method"] == "service_row"
-                && request["params"]["input"]["operation"] == "row.delete"
-                && request["params"]["input"]["identity"]["values"][1] == 1)
-            .count(),
-        0
-    );
-    assert!(!String::from_utf8(actual.bytes().unwrap())
-        .unwrap()
-        .contains("foreign-run-private-canary"));
-}
-
-#[test]
-fn cleanup_삭제가_불명확하면_한번만_시도하고_남은_행을_유지한다() {
-    // given
-    let mode = Mode::CleanupFailure;
-    // when
-    let (actual, state) = execute(mode, "sql_password");
-    // then
-    assert!(!actual.success);
-    assert_eq!(actual.cleanup_remaining, 1);
-    assert_eq!(
-        state
-            .borrow()
-            .requests
-            .iter()
-            .filter(|request| request["method"] == "service_row"
-                && request["params"]["input"]["operation"] == "row.delete"
-                && request["params"]["input"]["identity"]["values"][1] == 1)
-            .count(),
-        1
-    );
-}
-
-#[test]
-fn 이미_없는_행은_cleanup에서_삭제를_재전송하지_않는다() {
-    // given
-    let mode = Mode::MissingRow;
-    // when
-    let (actual, state) = execute(mode, "sql_password");
-    // then
-    assert!(!actual.success);
-    assert_eq!(actual.cleanup_remaining, 0);
-    assert!(state.borrow().rows.is_empty());
-    assert_eq!(
-        state
-            .borrow()
-            .requests
-            .iter()
-            .filter(|request| request["method"] == "service_row"
-                && request["params"]["input"]["operation"] == "row.delete"
-                && request["params"]["input"]["identity"]["values"][1] == 2)
-            .count(),
-        0
-    );
-}
-
-#[test]
-fn affected_rows가_실제_한행을_확인하지_못하면_성공을_만들지_않는다() {
-    // given
-    let mode = Mode::WrongCount;
-    // when
-    let (actual, _) = execute(mode, "sql_password");
-    // then
-    assert!(!actual.success);
-    assert!(has(&actual, "insert_affected_rows", "fail"));
-}
-
-#[test]
-fn scoped_취소는_자기_요청만_지정하고_다른_연결과_unknown을_보존한다() {
+fn scoped_취소는_자기_요청만_지정하고_다른_연결을_유지한다() {
     // given
     let mode = Mode::Normal;
     // when
-    let (actual, state) = execute(mode, "sql_password");
+    let (actual, state) = execute(mode, "entra_user");
     // then
     assert!(actual.success);
     assert!(state.borrow().cancelled);
     assert_eq!(actual.cancellation_phase, "native_request");
-    assert_eq!(actual.cancellation_write_outcome, "unknown");
-    assert!(has(&actual, "parallel_reader_connection", "pass"));
-    assert!(has(&actual, "reader_after_cancel", "pass"));
+    assert_eq!(actual.cancellation_outcome, "cancelled");
+    assert!(has(&actual, "parallel_connection", "pass"));
+    assert!(has(&actual, "connection_after_cancel", "pass"));
     assert!(has(&actual, "server_execution_cancel_phase", "deferred"));
 }
 
 #[test]
-fn dispatch_이전_cancelled도_서버_취소라고_주장하지_않는다() {
+fn 결과가_불명확한_취소는_unknown으로_보존하고_서버_취소라고_주장하지_않는다() {
     // given
-    let mode = Mode::CancelQueued;
+    let mode = Mode::CancelUnknown;
     // when
     let (actual, _) = execute(mode, "sql_password");
     // then
     assert!(actual.success);
-    assert_eq!(actual.cancellation_write_outcome, "not_applied");
+    assert_eq!(actual.cancellation_outcome, "unknown");
     assert_eq!(actual.cancellation_phase, "native_request");
+    assert!(has(&actual, "server_execution_cancel_phase", "deferred"));
 }
 
 #[test]
@@ -859,7 +679,7 @@ fn frame_상한과_utf8과_eof는_동일_실제_parser에서_거부된다() {
 }
 
 #[test]
-fn 실제_wire_permission_고정문구만_인식하고_오류원문을_노출하지_않는다() {
+fn 실제_wire_오류는_고정_code만_인식하고_오류원문을_노출하지_않는다() {
     // given
     let wire = json!({"jsonrpc":"2.0","id":"id","error":{"code":-32000,"message":"SQL Server denied the requested database permission","data":{"code":"OUTCOME_UNKNOWN","outcome":"unknown"}}});
     let unsafe_wire = json!({"jsonrpc":"2.0","id":"id","error":{"code":-32000,"message":CANARY,"data":{"code":CANARY,"outcome":"unknown"}}});
@@ -869,42 +689,41 @@ fn 실제_wire_permission_고정문구만_인식하고_오류원문을_노출하
         Response::parse(unsafe_wire).unwrap(),
     );
     // then
-    assert!(actual.0.permission_denial && actual.0.unknown);
-    assert!(!actual.1.permission_denial);
+    assert_eq!(actual.0.error, Some("OUTCOME_UNKNOWN"));
     assert_eq!(actual.1.error, Some("UNEXPECTED_NATIVE_ERROR"));
 }
 
 #[test]
-fn report는_비밀_endpoint_principal_sql을_포함하지_않고_deferred를_유지한다() {
+fn report는_비밀_endpoint_identity_sql을_포함하지_않고_deferred를_유지한다() {
     // given
     let mode = Mode::Normal;
     // when
-    let (actual, _) = execute(mode, "entra_service_principal");
+    let (actual, _) = execute(mode, "entra_user");
     // then
     assert!(actual.success);
     assert!(!actual.integration_complete);
+    let report = String::from_utf8(actual.bytes().unwrap()).unwrap();
     assert!(![
         CANARY,
-        "synthetic-reader-secret",
-        "synthetic-refreshed-secret",
-        "synthetic-server.database.windows.net",
+        SYNTHETIC_HOST,
+        USERNAME,
         TENANT,
-        CLIENT,
-        PRINCIPAL,
+        OBJECT,
         "WAITFOR",
-        "SELECT"
+        "SELECT",
+        "eyJ"
     ]
     .iter()
-    .any(|value| String::from_utf8(actual.bytes().unwrap())
-        .unwrap()
-        .contains(value)));
+    .any(|value| report.contains(value)));
     assert!(has(&actual, "mfa", "deferred"));
+    assert!(has(&actual, "azure_cli_account_change", "deferred"));
     assert!(has(&actual, "host_gui_mcp_cli_parity", "deferred"));
     assert!(has(&actual, "windows_manual_harness_owner_acl", "deferred"));
+    assert!(!has(&actual, "refresh_provider", "deferred"));
 }
 
 #[test]
-fn driver_shutdown_실패는_fixture가_정리되어도_실패로_남는다() {
+fn driver_shutdown_실패는_검사가_끝나도_실패로_남는다() {
     // given
     let mode = Mode::ShutdownFailure;
     // when
@@ -912,7 +731,58 @@ fn driver_shutdown_실패는_fixture가_정리되어도_실패로_남는다() {
     // then
     assert!(!actual.success);
     assert_eq!(actual.error, Some("DRIVER_SHUTDOWN_FAILED"));
-    assert!(state.borrow().rows.is_empty());
+    assert_eq!(state.borrow().shutdowns, 1);
+}
+
+#[test]
+fn jwt_모양의_driver_출력만_비밀노출로_판정한다() {
+    // given
+    let token = b"{\"jsonrpc\":\"2.0\",\"result\":\"eyJ0eXAiOiJKV1QiLCJhbGciOiJSUzI1NiJ9.eyJhdWQiOiJodHRwczovL2RhdGFiYXNlLndpbmRvd3MubmV0LyJ9.c2ln\"}";
+    let short = b"eyJhYmM.eyJkZWY";
+    let plain = br#"{"rows":[["eyJ"],["a.b.c"],["Entra user"]]}"#;
+    // when
+    let actual = (
+        harness::rpc::token_shaped(token),
+        harness::rpc::token_shaped(short),
+        harness::rpc::token_shaped(plain),
+    );
+    // then
+    assert_eq!(actual, (true, false, false));
+}
+
+#[test]
+fn azure_cli_환경은_절대_config_dir과_home_기본값만_사용한다() {
+    // given
+    let vars = |entries: Vec<(&'static str, &'static str)>| {
+        move |key: &str| {
+            entries
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| OsString::from(*value))
+        }
+    };
+    // when
+    let explicit = AzureEnv::resolve(vars(vec![
+        ("AZURE_CONFIG_DIR", "/work/azure"),
+        ("HOME", "/Users/synthetic"),
+        ("PATH", "/opt/homebrew/bin:/usr/bin"),
+    ]));
+    let fallback = AzureEnv::resolve(vars(vec![("HOME", "/Users/synthetic")]));
+    let relative = AzureEnv::resolve(vars(vec![
+        ("AZURE_CONFIG_DIR", "relative/azure"),
+        ("HOME", "relative-home"),
+    ]));
+    // then
+    let explicit = explicit.unwrap();
+    assert_eq!(explicit.config_dir, std::path::PathBuf::from("/work/azure"));
+    assert_eq!(explicit.path, OsString::from("/opt/homebrew/bin:/usr/bin"));
+    let fallback = fallback.unwrap();
+    assert_eq!(
+        fallback.config_dir,
+        std::path::PathBuf::from("/Users/synthetic/.azure")
+    );
+    assert_eq!(fallback.path, OsString::from("/usr/bin:/bin"));
+    assert!(relative.is_none());
 }
 
 struct InjectedClock {
@@ -1073,12 +943,8 @@ fn synthetic_shutdown(
         .unwrap();
     file.write_all(script.as_bytes()).unwrap();
     drop(file);
-    let credentials = Credentials::read(
-        &mut reader("sql_password"),
-        &config("sql_password"),
-        harness::now_ms(),
-    )
-    .unwrap();
+    let credentials =
+        Credentials::read(&mut reader("sql_password"), &config("sql_password")).unwrap();
     let mut rpc = harness::rpc::LiveRpc::spawn_process(
         std::path::Path::new("/usr/bin/python3"),
         &[
@@ -1087,6 +953,7 @@ fn synthetic_shutdown(
             entry.as_os_str(),
         ],
         &credentials,
+        None,
         clock,
         "synthetic_harness",
     )

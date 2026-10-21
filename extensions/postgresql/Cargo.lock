@@ -751,7 +751,7 @@ dependencies = [
 
 [[package]]
 name = "postgresql-plugin"
-version = "1.0.0-rc.6"
+version = "1.0.0-rc.6+plus.1"
 dependencies = [
  "async-trait",
  "base64 0.23.1",

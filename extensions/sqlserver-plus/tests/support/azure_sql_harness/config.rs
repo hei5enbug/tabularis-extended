@@ -8,29 +8,26 @@ pub struct Principal {
     pub auth_mode: String,
     pub username: Option<String>,
     pub tenant_id: Option<String>,
-    pub client_id: Option<String>,
+    pub entra_object_id: Option<String>,
+    pub azure_cli_path: Option<String>,
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub version: u32,
-    pub dedicated_test_resource: bool,
+    pub nonproduction_resource: bool,
     pub host: String,
     pub database: String,
-    pub schema: String,
-    pub table: String,
-    pub writer: Principal,
-    pub reader: Principal,
+    pub principal: Principal,
     pub report: Option<String>,
 }
 #[derive(Clone, Copy)]
 pub struct Flags {
     pub live: bool,
-    pub fixture_writes: bool,
 }
 impl Flags {
     pub fn validate(self) -> Result<()> {
-        if self.live && self.fixture_writes {
+        if self.live {
             Ok(())
         } else {
             Err(Error("LIVE_OPT_IN_REQUIRED"))
@@ -43,29 +40,29 @@ fn text(value: &str, max: usize) -> bool {
 pub fn uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok()
 }
-fn fixture_name(value: &str) -> bool {
-    value.strip_prefix("tabularis_test_").is_some_and(|suffix| {
-        !suffix.is_empty()
-            && suffix.len() <= 96
-            && suffix
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-    })
+fn cli_path(value: &str) -> bool {
+    text(value, 1024) && value.trim() == value && Path::new(value).is_absolute()
 }
 impl Principal {
+    pub fn is_entra(&self) -> bool {
+        self.auth_mode == "entra_user"
+    }
     fn validate(&self) -> Result<()> {
+        let username = self.username.as_ref().is_some_and(|v| text(v, 128));
         match self.auth_mode.as_str() {
             "sql_password"
-                if self.username.as_ref().is_some_and(|v| text(v, 128))
+                if username
                     && self.tenant_id.is_none()
-                    && self.client_id.is_none() =>
+                    && self.entra_object_id.is_none()
+                    && self.azure_cli_path.is_none() =>
             {
                 Ok(())
             }
-            "entra_user" | "entra_service_principal"
-                if self.username.is_none()
+            "entra_user"
+                if username
                     && self.tenant_id.as_ref().is_some_and(|v| uuid(v))
-                    && self.client_id.as_ref().is_some_and(|v| uuid(v)) =>
+                    && self.entra_object_id.as_ref().is_some_and(|v| uuid(v))
+                    && self.azure_cli_path.as_ref().is_none_or(|v| cli_path(v)) =>
             {
                 Ok(())
             }
@@ -89,23 +86,17 @@ impl Config {
         {
             return Err(Error("INVALID_HOST"));
         }
-        if self.version != 1
-            || !self.dedicated_test_resource
+        if self.version != 2
+            || !self.nonproduction_resource
             || !text(&self.database, 128)
             || self.database.contains(['[', ']'])
             || ["master", "tempdb", "model", "msdb"]
                 .iter()
                 .any(|name| self.database.eq_ignore_ascii_case(name))
-            || !fixture_name(&self.schema)
-            || !fixture_name(&self.table)
         {
             return Err(Error("INVALID_CONFIG"));
         }
-        self.writer.validate()?;
-        self.reader.validate()?;
-        if self.writer.auth_mode != self.reader.auth_mode {
-            return Err(Error("AUTH_MODE_MISMATCH"));
-        }
+        self.principal.validate()?;
         if self
             .report
             .as_ref()

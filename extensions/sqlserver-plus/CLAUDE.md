@@ -13,13 +13,15 @@ Full plugin contract (required RPC methods, manifest schema) lives in the upstre
 All common tasks are `just` recipes (see `justfile`); most just wrap `cargo`.
 
 ```bash
-just build           # cargo build (debug)
-just release         # cargo build --release
-just test            # cargo test (no database required)
-just lint            # cargo clippy --all-targets -- -D warnings
+just build           # cargo build --locked (debug) + UI and EXPLAIN bundles
+just release         # cargo build --locked --release + bundles
+just test            # cargo test --locked --bins --test conformance (no database required)
+just lint            # cargo clippy --locked --all-targets -- -D warnings
 just fmt             # cargo fmt --all
 just repl            # cargo run --bin test_plugin — local JSON-RPC sandbox
-just dev-install     # build + copy binary/manifest into the local Tabularis plugins dir
+just preflight       # manifest identity (sqlserver-plus), aligned versions, plugin settings
+just package [out]   # release package sqlserver-plus-<os>-<arch>.zip + .sha256
+just dev-install     # build + copy into <tabularis-extended app dir>/plugins/drivers/sqlserver-plus
 just uninstall       # remove the installed plugin
 just run-sqlserver   # SQL Server 2022 in Docker (sa / Str0ng!Passw0rd)
 just seed-sqlserver  # create and seed the tabularis_test database

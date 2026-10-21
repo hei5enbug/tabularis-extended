@@ -1,7 +1,8 @@
 {
   "$schema": "https://registry.tabularis.dev/manifest.schema.json?kind=driver",
-  "name": "sqlserver",
-  "version": "1.0.0-beta.3",
+  "id": "sqlserver-plus",
+  "name": "SQL Server Plus",
+  "version": "1.0.0-beta.3+plus.1",
   "description": "Full-featured Microsoft SQL Server driver for Tabularis with schema browsing, query execution, visual plans, type-aware row editing, DDL, routines, triggers, BLOBs, and database-user management.",
   "category": "database",
   "tags": ["driver", "sqlserver", "mssql", "sql", "relational", "database-driver"],
@@ -53,7 +54,7 @@
   "readme": "README.md",
   "homepage": "https://github.com/TabularisDB/tabularis-sqlserver-plugin",
   "documentation_url": "https://github.com/TabularisDB/tabularis-sqlserver-plugin#readme",
-  "min_runtime_version": "0.26.1-spatial.1",
+  "min_runtime_version": "0.27.0",
   "service_protocol": 1,
   "support": {
     "issues_url": "https://github.com/TabularisDB/tabularis-sqlserver-plugin/issues"
@@ -102,7 +103,7 @@
     {
       "slot": "connection-modal.extra_fields",
       "module": "ui/dist/index.js",
-      "driver": "sqlserver"
+      "driver": "sqlserver-plus"
     }
   ],
   "type_mappings": {
@@ -115,41 +116,6 @@
     "JSON": "NVARCHAR(MAX)"
   },
   "settings": [
-    {
-      "key": "auth_mode",
-      "label": "Authentication",
-      "type": "select",
-      "options": ["sql_password", "integrated", "entra_user"],
-      "default": "sql_password"
-    },
-    {
-      "key": "auth_source",
-      "label": "Entra Login Source",
-      "type": "select",
-      "options": ["azure_cli"]
-    },
-    {
-      "key": "tenant_id",
-      "label": "Tenant ID",
-      "type": "string"
-    },
-    {
-      "key": "entra_object_id",
-      "label": "Entra Object ID",
-      "type": "string"
-    },
-    {
-      "key": "azure_cli_path",
-      "label": "Azure CLI Path",
-      "type": "string",
-      "description": "Optional absolute path to the Azure CLI executable; leave empty to resolve az through PATH."
-    },
-    {
-      "key": "integrated_auth",
-      "label": "Windows Authentication",
-      "type": "string",
-      "default": ""
-    },
     {
       "key": "max_pool_size",
       "label": "Maximum Pool Size",

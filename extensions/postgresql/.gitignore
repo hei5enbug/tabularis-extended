@@ -10,3 +10,6 @@ debug/
 *.swp
 *.swo
 .DS_Store
+dist/
+*.zip
+*.sha256

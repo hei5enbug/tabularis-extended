@@ -1,20 +1,33 @@
 set shell := ["bash", "-cu"]
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
+# Package identity the Tabularis Extended host verifies before it remaps connections.
+plugin_id := "postgresql-plus"
+binary := "postgresql-plugin"
+
+# Destination profile. The default is the Extended fork's app directory, never
+# the official `tabularis` profile; set TABULARIS_APP_DIR to choose another one
+# on purpose. TABULARIS_PLUGIN_DIR (absolute) replaces the whole plugins root,
+# exactly as in the host (src-tauri/src/paths.rs).
+app_dir := env("TABULARIS_APP_DIR", "tabularis-extended")
+plugins_root := env("TABULARIS_PLUGIN_DIR", if os() == "macos" { env("HOME") + "/Library/Application Support/" + app_dir + "/plugins" } else if os() == "windows" { env("APPDATA") + "/" + app_dir + "/plugins" } else { env("XDG_DATA_HOME", env("HOME") + "/.local/share") + "/" + app_dir + "/plugins" })
+dest := plugins_root + "/drivers/" + plugin_id
+
 # Build the plugin binary in debug mode.
 build:
-    cargo build
+    cargo build --locked
 
-# Build for release (what the GitHub Actions workflow ships).
+# Build for release (what a package contains).
 release:
-    cargo build --release
+    cargo build --locked --release
 
-# Run unit tests. Excludes tests/live_db.rs (a live-database integration
-# test requiring POSTGRES_PLUGIN_BIN and a running PostgreSQL instance —
-# see the "Live PostgreSQL integration" CI job, or run it directly per
-# tests/live_db.rs's own doc comment).
+# Excludes tests/live_db.rs (a live-database integration test requiring
+# POSTGRES_PLUGIN_BIN and a running PostgreSQL instance; see the "Live
+# PostgreSQL integration" CI job, or run it directly per tests/live_db.rs).
+#
+# Run unit tests.
 test:
-    cargo test --lib --bins
+    cargo test --locked --lib --bins
 
 # Launch the local REPL that simulates Tabularis JSON-RPC calls over stdio.
 repl:
@@ -22,7 +35,7 @@ repl:
 
 # Run clippy with warnings denied.
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
 
 # Format the codebase.
 fmt:
@@ -37,46 +50,146 @@ demo-db-stop:
     docker rm -f tabularis-postgres-demo
 
 # ---------------------------------------------------------------------------
-# Platform-specific install recipes (plugin-dir conventions per OS).
+# Package identity, packaging and installation.
+#
+# Host source: src-tauri/src/paths.rs resolves the plugins root as
+# <app data dir of "tabularis-extended">/plugins (or TABULARIS_PLUGIN_DIR), and
+# src-tauri/src/driver_remap.rs::verified_driver_package accepts a package
+# under plugins/drivers/<id> only when the manifest id equals the requested id,
+# min_runtime_version fits the host, and the executable is a regular file
+# inside the package. The default roots are
+# ${XDG_DATA_HOME:-$HOME/.local/share}/tabularis-extended/plugins on Linux,
+# $HOME/Library/Application Support/tabularis-extended/plugins on macOS, and
+# %APPDATA%\tabularis-extended\plugins on Windows.
+#
+# No recipe edits connection files or renames a directory in use. Quit
+# Tabularis Extended before installing over an existing package.
 # ---------------------------------------------------------------------------
 
-[linux]
-dev-install: build
-    mkdir -p ~/.local/share/tabularis/plugins/drivers/postgresql-plus
-    cp target/debug/postgresql-plugin ~/.local/share/tabularis/plugins/drivers/postgresql-plus/
-    cp .tabularium ~/.local/share/tabularis/plugins/drivers/postgresql-plus/
-    @echo "Installed to ~/.local/share/tabularis/plugins/drivers/postgresql-plus"
-    @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+# Manifest-only preflight (no build, no writes): package identity and aligned versions.
+#
+# Verify package identity and aligned versions without building.
+[unix]
+preflight:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+    jq -e --arg id "{{ plugin_id }}" --arg bin "{{ binary }}" --arg version "$cargo_version" '
+        .id == $id and .name == "PostgreSQL Plus" and .version == $version
+        and .kind == "driver" and .executable == $bin
+        and (.min_runtime_version | type == "string")
+    ' .tabularium >/dev/null || { echo ".tabularium identity check failed" >&2; exit 1; }
+    jq -r '"preflight ok: \(.id) \(.version), runtime >= \(.min_runtime_version), executable \(.executable)"' .tabularium
 
-[macos]
-dev-install: build
-    mkdir -p "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus"
-    cp target/debug/postgresql-plugin "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus/"
-    cp .tabularium "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus/"
-    @echo "Installed to ~/Library/Application Support/tabularis/plugins/drivers/postgresql-plus"
-    @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+[windows]
+preflight:
+    $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value; \
+    $m = Get-Content .tabularium -Raw | ConvertFrom-Json; \
+    if ($m.id -ne '{{ plugin_id }}' -or $m.name -ne 'PostgreSQL Plus' -or $m.version -ne $cargo -or $m.executable -ne '{{ binary }}') { throw '.tabularium identity check failed' }; \
+    Write-Host "preflight ok: $($m.id) $($m.version), runtime >= $($m.min_runtime_version), executable $($m.executable)"
+
+# The archive root holds exactly what the host loads: the executable and .tabularium.
+#
+# Build the release package for this host into OUT and write its SHA-256 file.
+[unix]
+package out="dist": release preflight
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ out }}"
+    out=$(cd "{{ out }}" && pwd)
+    case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) echo "unsupported host" >&2; exit 1 ;; esac
+    case "$(uname -m)" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) echo "unsupported architecture" >&2; exit 1 ;; esac
+    stage=$(mktemp -d)
+    trap 'rm -rf "$stage"' EXIT
+    cp "target/release/{{ binary }}" "$stage/"
+    cp .tabularium "$stage/"
+    rel=$(jq -r .executable "$stage/.tabularium")
+    case "$rel" in /*|*..*) echo "unsafe manifest path: $rel" >&2; exit 1 ;; esac
+    if [ ! -f "$stage/$rel" ] || [ -L "$stage/$rel" ]; then echo "package lacks regular file $rel" >&2; exit 1; fi
+    archive="$out/{{ plugin_id }}-$os-$arch.zip"
+    rm -f "$archive" "$archive.sha256"
+    (cd "$stage" && zip -qrX "$archive" .)
+    (cd "$out" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+    echo "Packaged $archive"
+
+[windows]
+package out="dist": release preflight
+    New-Item -ItemType Directory -Force -Path "{{ out }}" | Out-Null; \
+    $out = (Resolve-Path "{{ out }}").Path; \
+    $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString()); \
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null; \
+    try { \
+        Copy-Item "target\release\{{ binary }}.exe" $stage; \
+        Copy-Item ".tabularium" $stage; \
+        $archive = Join-Path $out "{{ plugin_id }}-win-x64.zip"; \
+        if (Test-Path $archive) { Remove-Item -Force $archive }; \
+        Compress-Archive -Path "$stage\*" -DestinationPath $archive; \
+        $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower(); \
+        Set-Content -NoNewline -Path "$archive.sha256" -Value "$hash  $(Split-Path $archive -Leaf)`n"; \
+        Write-Host "Packaged $archive" \
+    } finally { Remove-Item -Recurse -Force $stage }
+
+# Check a packaged archive against its SHA-256 file and its embedded manifest.
+[unix]
+verify-package archive:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    archive="{{ archive }}"
+    (cd "$(dirname "$archive")" && shasum -a 256 -c "$(basename "$archive").sha256")
+    unzip -p "$archive" .tabularium | jq -e --arg id "{{ plugin_id }}" --arg bin "{{ binary }}" \
+        '.id == $id and .name == "PostgreSQL Plus" and .executable == $bin' >/dev/null
+    unzip -Z1 "$archive" | grep -qx "{{ binary }}"
+    echo "verified $archive"
+
+[windows]
+verify-package archive:
+    $expected = ((Get-Content "{{ archive }}.sha256" -Raw).Trim() -split '\s+')[0]; \
+    if ((Get-FileHash -Algorithm SHA256 "{{ archive }}").Hash.ToLower() -ne $expected) { throw 'SHA-256 mismatch' }; \
+    Write-Host "verified {{ archive }}"
+
+# Show the destination and run the manifest preflight without touching the plugins directory.
+install-dry-run: preflight
+    @echo "Would install {{ plugin_id }} into {{ dest }}"
+    @echo "Profile directory: {{ app_dir }}"
+
+# Verify a packaged archive, then extract it into the fork's plugin directory.
+[unix]
+install-package archive: (verify-package archive)
+    mkdir -p "{{ dest }}"
+    unzip -oq "{{ archive }}" -d "{{ dest }}"
+    @echo "Installed to {{ dest }}"
+    @echo "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
+
+[windows]
+install-package archive: (verify-package archive)
+    New-Item -ItemType Directory -Force -Path "{{ dest }}" | Out-Null; \
+    Expand-Archive -Force -Path "{{ archive }}" -DestinationPath "{{ dest }}"; \
+    Write-Host "Installed to {{ dest }}"
+
+# Build a debug binary and copy it and the manifest into the fork's plugin folder.
+[unix]
+dev-install: build preflight
+    mkdir -p "{{ dest }}"
+    cp "target/debug/{{ binary }}" "{{ dest }}/"
+    cp .tabularium "{{ dest }}/"
+    @echo "Installed to {{ dest }}"
+    @echo "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
 
 # Each recipe line runs in a fresh shell, so this must be one logical command.
-# Tabularis resolves its plugin dir via the `directories` crate
-# (ProjectDirs "", "", "tabularis"), which on Windows is %APPDATA%\tabularis.
 [windows]
-dev-install: build
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\drivers\postgresql-plus"; \
+dev-install: build preflight
+    $dest = "{{ dest }}"; \
     New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
-    Copy-Item "target\debug\postgresql-plugin.exe" $dest; \
+    Copy-Item "target\debug\{{ binary }}.exe" $dest; \
     Copy-Item ".tabularium" $dest; \
     Write-Host "Installed to $dest"; \
-    Write-Host "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+    Write-Host "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
 
-[linux]
+# Remove the installed package from the same host-defined directory.
+[unix]
 uninstall:
-    rm -rf ~/.local/share/tabularis/plugins/drivers/postgresql-plus
-
-[macos]
-uninstall:
-    rm -rf "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus"
+    rm -rf "{{ dest }}"
 
 [windows]
 uninstall:
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\drivers\postgresql-plus"; \
-    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    if (Test-Path "{{ dest }}") { Remove-Item -Recurse -Force "{{ dest }}" }

@@ -22,11 +22,3 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub const REQUEST_MS: u64 = 120_000;
 pub const FRAME_BYTES: usize = 16 * 1024 * 1024;
 pub const LOG_BYTES: usize = 8 * 1024 * 1024;
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}

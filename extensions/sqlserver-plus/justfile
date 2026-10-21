@@ -1,6 +1,18 @@
 set shell := ["bash", "-cu"]
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
+# Package identity the Tabularis Extended host verifies before it remaps connections.
+plugin_id := "sqlserver-plus"
+binary := "sqlserver-plugin"
+
+# Destination profile. The default is the Extended fork's app directory, never
+# the official `tabularis` profile; set TABULARIS_APP_DIR to choose another one
+# on purpose. TABULARIS_PLUGIN_DIR (absolute) replaces the whole plugins root,
+# exactly as in the host (src-tauri/src/paths.rs).
+app_dir := env("TABULARIS_APP_DIR", "tabularis-extended")
+plugins_root := env("TABULARIS_PLUGIN_DIR", if os() == "macos" { env("HOME") + "/Library/Application Support/" + app_dir + "/plugins" } else if os() == "windows" { env("APPDATA") + "/" + app_dir + "/plugins" } else { env("XDG_DATA_HOME", env("HOME") + "/.local/share") + "/" + app_dir + "/plugins" })
+dest := plugins_root + "/drivers/" + plugin_id
+
 # Run SQL Server 2022 via Docker (accept the EULA, set a strong SA password).
 run-sqlserver:
     docker run -d --name sqlserver-dev -p 1433:1433 \
@@ -25,32 +37,50 @@ seed-sqlserver:
          END"
 
 # ---------------------------------------------------------------------------
-# Cross-platform recipes (only shell-agnostic tooling — cargo, npm, pnpm).
+# Cross-platform recipes (only shell-agnostic tooling: cargo and pnpm).
 # ---------------------------------------------------------------------------
 
-# Build the plugin binary and its optional JavaScript artifacts.
+# Build the plugin binary and its JavaScript artifacts.
 build: build-ui build-explain
-    cargo build
+    cargo build --locked
 
-# Build for release (what the GitHub Actions workflow ships).
+# Build for release (what a package contains).
 release: build-ui build-explain
-    cargo build --release
+    cargo build --locked --release
 
-# Build and test the browser-safe SQL Server SHOWPLAN parser package.
+# Each package manager version comes from the nearest package.json, so these
+# recipes run inside the package directory rather than using `pnpm --dir`.
+
+# Install the connection-modal UI from its frozen lockfile and bundle it.
+[working-directory: 'ui']
+build-ui:
+    pnpm install --frozen-lockfile
+    pnpm build
+
+[working-directory: 'ui']
+test-ui:
+    pnpm install --frozen-lockfile
+    pnpm typecheck
+    pnpm test
+
+# Build the browser-safe SQL Server SHOWPLAN parser bundle.
+[working-directory: 'explain']
 build-explain:
-    pnpm --dir explain install --frozen-lockfile
-    pnpm --dir explain build
+    pnpm install --frozen-lockfile
+    pnpm build
 
+[working-directory: 'explain']
 test-explain:
-    pnpm --dir explain install --frozen-lockfile
-    pnpm --dir explain typecheck
-    pnpm --dir explain test
+    pnpm install --frozen-lockfile
+    pnpm typecheck
+    pnpm test
 
-# Run unit tests and recorded host-model conformance. This crate is binary-only,
-# so --lib would fail; selecting conformance explicitly keeps tests/live_db.rs
-# out of the default run.
+# This crate is binary-only, so --lib would fail; selecting conformance
+# explicitly keeps tests/live_db.rs out of the default run.
+#
+# Run unit tests and recorded host-model conformance.
 test:
-    cargo test --bins --test conformance
+    cargo test --locked --bins --test conformance
 
 # Launch the local REPL that simulates Tabularis JSON-RPC calls over stdio.
 repl:
@@ -58,109 +88,183 @@ repl:
 
 # Run clippy on the workspace.
 lint:
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --locked --all-targets -- -D warnings
 
 # Format the codebase.
 fmt:
     cargo fmt --all
 
 # ---------------------------------------------------------------------------
-# Platform-specific recipes (file operations + plugin-dir conventions).
+# Package identity, packaging and installation.
 #
-# Host source: tabularis/src-tauri/src/plugins/manager.rs loads the directory
-# returned by tabularis/src-tauri/src/plugins/installer.rs::get_plugins_dir,
-# which appends `plugins` to tabularis/src-tauri/src/paths.rs::get_app_data_dir.
-# paths.rs uses ProjectDirs("", "", "tabularis") and removes the directories
-# crate's Windows `data` leaf. The resulting roots are
-# ${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins on Linux,
-# $HOME/Library/Application Support/tabularis/plugins on macOS, and
-# %APPDATA%\tabularis\plugins on Windows.
+# Host source: src-tauri/src/paths.rs resolves the plugins root as
+# <app data dir of "tabularis-extended">/plugins (or TABULARIS_PLUGIN_DIR), and
+# src-tauri/src/driver_remap.rs::verified_driver_package accepts a package
+# under plugins/drivers/<id> only when the manifest id equals the requested id,
+# min_runtime_version fits the host, and the executable is a regular file
+# inside the package. The default roots are
+# ${XDG_DATA_HOME:-$HOME/.local/share}/tabularis-extended/plugins on Linux,
+# $HOME/Library/Application Support/tabularis-extended/plugins on macOS, and
+# %APPDATA%\tabularis-extended\plugins on Windows.
+#
+# No recipe edits connection files or renames a directory in use. Quit
+# Tabularis Extended before installing over an existing package.
 # ---------------------------------------------------------------------------
 
-# Build the UI extension if present (no-op otherwise).
+# Manifest-only preflight (no build, no writes): package identity, aligned
+# versions and the plugin-level settings contract.
+#
+# Verify package identity, aligned versions and plugin settings without building.
 [unix]
-build-ui:
-    @if [ -f ui/package.json ]; then \
-        echo "Building UI extension..."; \
-        (cd ui && npm install --no-audit --no-fund && npm run build); \
-    fi
+preflight:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+    for file in explain/package.json ui/package.json; do
+        if [ "$(jq -r .version "$file")" != "$cargo_version" ]; then
+            echo "$file version differs from Cargo.toml ($cargo_version)" >&2
+            exit 1
+        fi
+    done
+    jq -e --arg id "{{ plugin_id }}" --arg bin "{{ binary }}" --arg version "$cargo_version" '
+        .id == $id and .name == "SQL Server Plus" and .version == $version
+        and .kind == "driver" and .executable == $bin
+        and (.min_runtime_version | type == "string")
+        and ([.ui_extensions[].driver] | all(. == $id))
+        and (.settings | all(.key as $k | (["auth_mode","auth_source","tenant_id","entra_object_id","azure_cli_path","integrated_auth"] | index($k)) == null))
+    ' .tabularium >/dev/null || { echo ".tabularium identity check failed" >&2; exit 1; }
+    jq -r '"preflight ok: \(.id) \(.version), runtime >= \(.min_runtime_version), executable \(.executable)"' .tabularium
 
 [windows]
-build-ui:
-    if (Test-Path "ui\package.json") { \
-        Write-Host "Building UI extension..."; \
-        Push-Location ui; \
-        try { \
-            npm install --no-audit --no-fund; \
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; \
-            npm run build; \
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; \
-        } finally { \
-            Pop-Location; \
+preflight:
+    $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value; \
+    $m = Get-Content .tabularium -Raw | ConvertFrom-Json; \
+    foreach ($f in 'explain/package.json','ui/package.json') { if ((Get-Content $f -Raw | ConvertFrom-Json).version -ne $cargo) { throw "$f version differs from Cargo.toml ($cargo)" } }; \
+    if ($m.id -ne '{{ plugin_id }}' -or $m.name -ne 'SQL Server Plus' -or $m.version -ne $cargo -or $m.executable -ne '{{ binary }}') { throw '.tabularium identity check failed' }; \
+    if ($m.ui_extensions | Where-Object { $_.driver -ne '{{ plugin_id }}' }) { throw 'ui_extensions driver is not {{ plugin_id }}' }; \
+    if ($m.settings | Where-Object { @('auth_mode','auth_source','tenant_id','entra_object_id','azure_cli_path','integrated_auth') -contains $_.key }) { throw 'authentication fields belong to per-connection params, not plugin settings' }; \
+    Write-Host "preflight ok: $($m.id) $($m.version), runtime >= $($m.min_runtime_version), executable $($m.executable)"
+
+# The archive root holds exactly what the host loads: the executable,
+# .tabularium, assets, ui/dist/index.js and explain/dist/index.iife.js.
+#
+# Build the release package for this host into OUT and write its SHA-256 file.
+[unix]
+package out="dist": release preflight
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p "{{ out }}"
+    out=$(cd "{{ out }}" && pwd)
+    case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) echo "unsupported host" >&2; exit 1 ;; esac
+    case "$(uname -m)" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) echo "unsupported architecture" >&2; exit 1 ;; esac
+    stage=$(mktemp -d)
+    trap 'rm -rf "$stage"' EXIT
+    cp "target/release/{{ binary }}" "$stage/"
+    cp .tabularium "$stage/"
+    if [ -d assets ]; then cp -R assets "$stage/assets"; fi
+    for bundle in ui/dist/index.js explain/dist/index.iife.js; do
+        [ -f "$bundle" ] || { echo "missing $bundle" >&2; exit 1; }
+        mkdir -p "$stage/$(dirname "$bundle")"
+        cp "$bundle" "$stage/$bundle"
+    done
+    jq -r '.executable, (.ui_extensions[].module), (.explain_parsers[].module)' "$stage/.tabularium" | while read -r rel; do
+        case "$rel" in /*|*..*) echo "unsafe manifest path: $rel" >&2; exit 1 ;; esac
+        if [ ! -f "$stage/$rel" ] || [ -L "$stage/$rel" ]; then echo "package lacks regular file $rel" >&2; exit 1; fi
+    done
+    archive="$out/{{ plugin_id }}-$os-$arch.zip"
+    rm -f "$archive" "$archive.sha256"
+    (cd "$stage" && zip -qrX "$archive" .)
+    (cd "$out" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
+    echo "Packaged $archive"
+
+[windows]
+package out="dist": release preflight
+    New-Item -ItemType Directory -Force -Path "{{ out }}" | Out-Null; \
+    $out = (Resolve-Path "{{ out }}").Path; \
+    $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString()); \
+    New-Item -ItemType Directory -Force -Path $stage | Out-Null; \
+    try { \
+        Copy-Item "target\release\{{ binary }}.exe" $stage; \
+        Copy-Item ".tabularium" $stage; \
+        if (Test-Path "assets") { Copy-Item -Recurse "assets" (Join-Path $stage "assets") }; \
+        foreach ($bundle in "ui\dist\index.js", "explain\dist\index.iife.js") { \
+            if (-not (Test-Path $bundle -PathType Leaf)) { throw "missing $bundle" }; \
+            New-Item -ItemType Directory -Force -Path (Join-Path $stage (Split-Path $bundle)) | Out-Null; \
+            Copy-Item $bundle (Join-Path $stage $bundle) \
         }; \
-    }
+        $archive = Join-Path $out "{{ plugin_id }}-win-x64.zip"; \
+        if (Test-Path $archive) { Remove-Item -Force $archive }; \
+        Compress-Archive -Path "$stage\*" -DestinationPath $archive; \
+        $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower(); \
+        Set-Content -NoNewline -Path "$archive.sha256" -Value "$hash  $(Split-Path $archive -Leaf)`n"; \
+        Write-Host "Packaged $archive" \
+    } finally { Remove-Item -Recurse -Force $stage }
 
-# Build + copy binary, manifest and optional bundles into Tabularis's plugin folder.
-[linux]
-dev-install: build
-    mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver"
-    cp target/debug/sqlserver-plugin "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver/"
-    cp .tabularium "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver/"
-    @if [ -f ui/dist/index.js ]; then \
-        mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver/ui/dist"; \
-        cp ui/dist/index.js "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver/ui/dist/"; \
-    fi
-    @if [ -f explain/dist/index.iife.js ]; then \
-        mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver/explain/dist"; \
-        cp explain/dist/index.iife.js "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver/explain/dist/"; \
-    fi
-    @echo "Installed to ${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver"
-    @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+# Check a packaged archive against its SHA-256 file and its embedded manifest.
+[unix]
+verify-package archive:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    archive="{{ archive }}"
+    (cd "$(dirname "$archive")" && shasum -a 256 -c "$(basename "$archive").sha256")
+    unzip -p "$archive" .tabularium | jq -e --arg id "{{ plugin_id }}" --arg bin "{{ binary }}" \
+        '.id == $id and .name == "SQL Server Plus" and .executable == $bin' >/dev/null
+    unzip -Z1 "$archive" | grep -qx "{{ binary }}"
+    echo "verified $archive"
 
-[macos]
-dev-install: build
-    mkdir -p "$HOME/Library/Application Support/tabularis/plugins/sqlserver"
-    cp target/debug/sqlserver-plugin "$HOME/Library/Application Support/tabularis/plugins/sqlserver/"
-    cp .tabularium "$HOME/Library/Application Support/tabularis/plugins/sqlserver/"
-    @if [ -f ui/dist/index.js ]; then \
-        mkdir -p "$HOME/Library/Application Support/tabularis/plugins/sqlserver/ui/dist"; \
-        cp ui/dist/index.js "$HOME/Library/Application Support/tabularis/plugins/sqlserver/ui/dist/"; \
-    fi
-    @if [ -f explain/dist/index.iife.js ]; then \
-        mkdir -p "$HOME/Library/Application Support/tabularis/plugins/sqlserver/explain/dist"; \
-        cp explain/dist/index.iife.js "$HOME/Library/Application Support/tabularis/plugins/sqlserver/explain/dist/"; \
-    fi
-    @echo "Installed to ~/Library/Application Support/tabularis/plugins/sqlserver"
-    @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+[windows]
+verify-package archive:
+    $expected = ((Get-Content "{{ archive }}.sha256" -Raw).Trim() -split '\s+')[0]; \
+    if ((Get-FileHash -Algorithm SHA256 "{{ archive }}").Hash.ToLower() -ne $expected) { throw 'SHA-256 mismatch' }; \
+    Write-Host "verified {{ archive }}"
+
+# Show the destination and run the manifest preflight without touching the plugins directory.
+install-dry-run: preflight
+    @echo "Would install {{ plugin_id }} into {{ dest }}"
+    @echo "Profile directory: {{ app_dir }}"
+
+# Verify a packaged archive, then extract it into the fork's plugin directory.
+[unix]
+install-package archive: (verify-package archive)
+    mkdir -p "{{ dest }}"
+    unzip -oq "{{ archive }}" -d "{{ dest }}"
+    @echo "Installed to {{ dest }}"
+    @echo "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
+
+[windows]
+install-package archive: (verify-package archive)
+    New-Item -ItemType Directory -Force -Path "{{ dest }}" | Out-Null; \
+    Expand-Archive -Force -Path "{{ archive }}" -DestinationPath "{{ dest }}"; \
+    Write-Host "Installed to {{ dest }}"
+
+# Build a debug binary and copy it, the manifest and the bundles into the fork's plugin folder.
+[unix]
+dev-install: build preflight
+    mkdir -p "{{ dest }}/ui/dist" "{{ dest }}/explain/dist"
+    cp "target/debug/{{ binary }}" "{{ dest }}/"
+    cp .tabularium "{{ dest }}/"
+    cp ui/dist/index.js "{{ dest }}/ui/dist/"
+    cp explain/dist/index.iife.js "{{ dest }}/explain/dist/"
+    @echo "Installed to {{ dest }}"
+    @echo "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
 
 # Each recipe line runs in a fresh shell, so this must be one logical command.
 [windows]
-dev-install: build
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\sqlserver"; \
-    New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
-    Copy-Item "target\debug\sqlserver-plugin.exe" $dest; \
+dev-install: build preflight
+    $dest = "{{ dest }}"; \
+    New-Item -ItemType Directory -Force -Path (Join-Path $dest "ui\dist"), (Join-Path $dest "explain\dist") | Out-Null; \
+    Copy-Item "target\debug\{{ binary }}.exe" $dest; \
     Copy-Item ".tabularium" $dest; \
-    if (Test-Path "ui\dist\index.js") { \
-        New-Item -ItemType Directory -Force -Path (Join-Path $dest "ui\dist") | Out-Null; \
-        Copy-Item "ui\dist\index.js" (Join-Path $dest "ui\dist"); \
-    }; \
-    if (Test-Path "explain\dist\index.iife.js") { \
-        New-Item -ItemType Directory -Force -Path (Join-Path $dest "explain\dist") | Out-Null; \
-        Copy-Item "explain\dist\index.iife.js" (Join-Path $dest "explain\dist"); \
-    }; \
+    Copy-Item "ui\dist\index.js" (Join-Path $dest "ui\dist"); \
+    Copy-Item "explain\dist\index.iife.js" (Join-Path $dest "explain\dist"); \
     Write-Host "Installed to $dest"; \
-    Write-Host "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
+    Write-Host "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
 
-# Remove the installed plugin from the same host-defined directory.
-[linux]
+# Remove the installed package from the same host-defined directory.
+[unix]
 uninstall:
-    rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/tabularis/plugins/sqlserver"
-
-[macos]
-uninstall:
-    rm -rf "$HOME/Library/Application Support/tabularis/plugins/sqlserver"
+    rm -rf "{{ dest }}"
 
 [windows]
 uninstall:
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\sqlserver"; \
-    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    if (Test-Path "{{ dest }}") { Remove-Item -Recurse -Force "{{ dest }}" }

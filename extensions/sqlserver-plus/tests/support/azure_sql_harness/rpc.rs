@@ -1,8 +1,10 @@
-use super::{credentials::Credentials, Error, Result, FRAME_BYTES, LOG_BYTES, REQUEST_MS};
+use super::{
+    config::Config, credentials::Credentials, Error, Result, FRAME_BYTES, LOG_BYTES, REQUEST_MS,
+};
 use serde_json::{json, Value};
 use std::{
     collections::HashMap,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
@@ -17,8 +19,6 @@ use std::{
 pub struct Response {
     pub result: Value,
     pub error: Option<&'static str>,
-    pub unknown: bool,
-    pub permission_denial: bool,
 }
 impl Response {
     pub fn parse(value: Value) -> Result<Self> {
@@ -41,21 +41,14 @@ impl Response {
                 Some("DRIVER_EXITED") => "DRIVER_EXITED",
                 _ => "UNEXPECTED_NATIVE_ERROR",
             };
-            let expected = "SQL Server denied the requested database permission";
             Ok(Self {
                 result: Value::Null,
                 error: Some(code),
-                unknown: code == "OUTCOME_UNKNOWN"
-                    || value["error"]["data"]["outcome"] == "unknown",
-                permission_denial: value["error"]["message"] == expected
-                    || value["error"]["data"]["message"] == expected,
             })
         } else {
             Ok(Self {
                 result: value["result"].clone(),
                 error: None,
-                unknown: false,
-                permission_denial: false,
             })
         }
     }
@@ -115,12 +108,32 @@ fn clear(value: &mut Value) {
         _ => {}
     }
 }
+fn base64url_run(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || **byte == b'-' || **byte == b'_')
+        .count()
+}
+/// A driver-acquired Entra token is unknown to the harness, so its output is
+/// also screened for JWT-shaped values (`eyJ...` header, dot, payload).
+pub fn token_shaped(bytes: &[u8]) -> bool {
+    bytes
+        .windows(3)
+        .enumerate()
+        .filter(|(_, window)| *window == b"eyJ")
+        .any(|(start, _)| {
+            let header = base64url_run(&bytes[start..]);
+            let rest = &bytes[start + header..];
+            header >= 16 && rest.first() == Some(&b'.') && base64url_run(&rest[1..]) >= 16
+        })
+}
 struct Canaries(Vec<Vec<u8>>);
 impl Canaries {
     fn found(&self, bytes: &[u8]) -> bool {
-        self.0.iter().any(|secret| {
-            !secret.is_empty() && bytes.windows(secret.len()).any(|window| window == secret)
-        })
+        token_shaped(bytes)
+            || self.0.iter().any(|secret| {
+                !secret.is_empty() && bytes.windows(secret.len()).any(|window| window == secret)
+            })
     }
 }
 impl Drop for Canaries {
@@ -195,6 +208,24 @@ impl Deadlines {
         self.inflight.remove(id);
     }
 }
+/// Azure CLI state a live Entra run needs. The driver runs `az` itself, so the
+/// sanitized child environment must still reach the signed-in CLI profile.
+pub struct AzureEnv {
+    pub config_dir: PathBuf,
+    pub path: OsString,
+}
+impl AzureEnv {
+    pub fn resolve(var: impl Fn(&str) -> Option<OsString>) -> Option<Self> {
+        let absolute =
+            |value: Option<OsString>| value.map(PathBuf::from).filter(|path| path.is_absolute());
+        let config_dir = absolute(var("AZURE_CONFIG_DIR"))
+            .or_else(|| absolute(var("HOME")).map(|home| home.join(".azure")))?;
+        let path = var("PATH")
+            .filter(|path| !path.is_empty())
+            .unwrap_or_else(|| OsString::from("/usr/bin:/bin"));
+        Some(Self { config_dir, path })
+    }
+}
 pub struct LiveRpc {
     child: Child,
     writer: Option<mpsc::SyncSender<WriteJob>>,
@@ -208,12 +239,21 @@ pub struct LiveRpc {
     root: PathBuf,
 }
 impl LiveRpc {
-    pub fn spawn(credentials: &Credentials) -> Result<Self> {
+    pub fn spawn(config: &Config, credentials: &Credentials) -> Result<Self> {
         let binary = std::path::Path::new(env!("CARGO_BIN_EXE_sqlserver-plugin"));
+        let azure = if config.principal.is_entra() {
+            Some(
+                AzureEnv::resolve(|key| std::env::var_os(key))
+                    .ok_or(Error("AZURE_CONFIG_REQUIRED"))?,
+            )
+        } else {
+            None
+        };
         Self::spawn_process(
             binary,
             &[],
             credentials,
+            azure,
             Arc::new(SystemClock),
             "actual_azure",
         )
@@ -222,6 +262,7 @@ impl LiveRpc {
         binary: &Path,
         args: &[&OsStr],
         credentials: &Credentials,
+        azure: Option<AzureEnv>,
         clock: Arc<dyn Clock>,
         evidence: &'static str,
     ) -> Result<Self> {
@@ -253,6 +294,11 @@ impl LiveRpc {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(azure) = &azure {
+            command
+                .env("AZURE_CONFIG_DIR", &azure.config_dir)
+                .env("PATH", &azure.path);
+        }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(_) => {
