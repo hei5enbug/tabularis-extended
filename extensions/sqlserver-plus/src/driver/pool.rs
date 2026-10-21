@@ -215,6 +215,16 @@ pub fn build_config(
     settings: &PluginSettings,
 ) -> Result<Config, String> {
     let params = resolve_connection_params(params)?;
+    if crate::connection::is_azure_sql(&params) && settings.trust_server_certificate {
+        return Err("Azure SQL cannot trust an unverified server certificate".into());
+    }
+    if params
+        .auth_mode
+        .as_deref()
+        .is_some_and(|mode| mode.starts_with("entra_"))
+    {
+        return Err("Entra authentication requires a transient service driver context".into());
+    }
     let mut cfg = Config::new();
     cfg.host(params.host.as_deref().unwrap_or("localhost"));
     cfg.port(params.port.unwrap_or(1433));

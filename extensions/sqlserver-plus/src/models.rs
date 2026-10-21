@@ -56,6 +56,8 @@ pub struct ConnectionParams {
     /// Windows/Kerberos auth (SSPI/GSSAPI). Set via `extra["integrated_auth"]`
     /// or `Integrated Security=True` in `connection_string`; excludes username/password.
     pub integrated_auth: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<String>,
     /// Opaque plugin-specific fields forwarded verbatim by the host.
     pub extra: HashMap<String, String>,
     /// URL or ADO.NET/ODBC keyword connection string. It is parsed and

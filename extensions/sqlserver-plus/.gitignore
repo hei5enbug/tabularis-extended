@@ -5,3 +5,17 @@ ui/node_modules/
 ui/dist/
 explain/node_modules/
 .DS_Store
+
+.azure/
+azure-local/
+*.azure.local.json
+*.token
+*.kubeconfig
+.env
+.env.*
+credentials.json
+secrets.json
+*.pem
+*.key
+*.pfx
+*.p12

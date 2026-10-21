@@ -41,6 +41,13 @@ const NOT_IMPLEMENTED: &[(&str, &str)] = &[
 /// downstream by `main.rs`). Never panics — parse errors and method
 /// failures are surfaced as JSON-RPC error responses.
 pub async fn handle_line(line: &str) -> Value {
+    handle_line_with_scope(line, None).await
+}
+
+pub async fn handle_line_with_scope(
+    line: &str,
+    scope: Option<crate::driver::service::registry::Scope>,
+) -> Value {
     let request: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(err) => return error_response(Value::Null, -32700, &format!("parse error: {err}")),
@@ -53,17 +60,35 @@ pub async fn handle_line(line: &str) -> Value {
         .unwrap_or("")
         .to_string();
     let params = request.get("params").cloned().unwrap_or(Value::Null);
+    if crate::handlers::service::is_method(&method) {
+        return crate::handlers::service::dispatch(id, &params, &method, scope).await;
+    }
 
     match method.as_str() {
         "initialize" => {
             // Initialization is intentionally infallible: malformed known
             // values warn and fall back, while unknown keys are ignored.
             settings::initialize(&params);
+            if params.get("service_protocol").is_some() {
+                if params["service_protocol"] != 1 {
+                    return crate::driver::service::ServiceError::new(
+                        "PROTOCOL_MISMATCH",
+                        "Unsupported service protocol",
+                    )
+                    .response(id);
+                }
+                return ok_response(
+                    id,
+                    json!({"service_capabilities":crate::handlers::service::capabilities()}),
+                );
+            }
             ok_response(id, Value::Null)
         }
         "ping" => query::ping(id, &params).await,
         "test_connection" => query::test_connection(id, &params).await,
         "shutdown" => {
+            crate::driver::service::registry::cancel_all();
+            crate::driver::service::sessions::shutdown().await;
             pool_manager::shutdown().await;
             ok_response(id, Value::Null)
         }

@@ -5,11 +5,12 @@
 //! are funneled through a single writer task so concurrent handlers never
 //! interleave bytes on stdout.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    sync::{mpsc, watch, Mutex},
+    sync::{mpsc, watch, Semaphore},
+    task::JoinSet,
     time::sleep,
 };
 
@@ -24,12 +25,10 @@ mod settings;
 
 // This controls JSON-RPC dispatch concurrency rather than database
 // connection concurrency, which is configured separately by max_pool_size.
-const WORKER_POOL_SIZE: usize = 4;
+const WORKER_POOL_SIZE: usize = 8;
 
-// Both sides are bounded so backpressure reaches stdin even when the host is
-// slow to consume responses. With four in-flight handlers this caps a burst at
-// 134 queued or active payloads instead of moving it into an unbounded output
-// queue (64 requests + 64 responses + 4 workers + reader + writer).
+// Queued and active requests are separately bounded. Control requests bypass
+// admission so cancellation remains available while the database queue is full.
 const REQUEST_QUEUE_CAPACITY: usize = 64;
 const RESPONSE_QUEUE_CAPACITY: usize = 64;
 
@@ -42,46 +41,47 @@ const RESPONSE_QUEUE_CAPACITY: usize = 64;
 const WORKER_STACK_SIZE: usize = 16 * 1024 * 1024;
 
 fn main() {
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(WORKER_STACK_SIZE)
         .build()
-        .expect("failed to build tokio runtime")
-        .block_on(run());
+        .expect("failed to build tokio runtime");
+    runtime.block_on(run());
+    runtime.shutdown_timeout(Duration::from_secs(1));
 }
 
 async fn run() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let cleanup_handle = tokio::spawn(run_pool_cleanup(shutdown_rx));
-
-    let (req_tx, req_rx) = mpsc::channel::<String>(REQUEST_QUEUE_CAPACITY);
-    let req_rx = Arc::new(Mutex::new(req_rx));
+    let cleanup_handle = tokio::spawn(run_pool_cleanup(shutdown_rx.clone()));
 
     let (resp_tx, resp_rx) = mpsc::channel::<String>(RESPONSE_QUEUE_CAPACITY);
-    let writer_handle = tokio::spawn(run_writer(resp_rx));
-
-    let worker_handles: Vec<_> = (0..WORKER_POOL_SIZE)
-        .map(|_| tokio::spawn(run_worker(req_rx.clone(), resp_tx.clone())))
-        .collect();
-    drop(resp_tx);
-
-    run_reader(req_tx).await;
+    let writer_handle = tokio::spawn(run_writer(resp_rx, shutdown_tx.clone()));
+    let mut tasks = JoinSet::new();
+    run_reader(resp_tx.clone(), &mut tasks, shutdown_rx).await;
+    driver::service::registry::cancel_all();
 
     let _ = shutdown_tx.send(true);
 
-    for handle in worker_handles {
-        let _ = handle.await;
-    }
+    while tasks.join_next().await.is_some() {}
+    driver::service::sessions::shutdown().await;
+    pool_manager::shutdown().await;
+    drop(resp_tx);
     let _ = writer_handle.await;
     let _ = cleanup_handle.await;
 }
 
 async fn run_pool_cleanup(mut shutdown_rx: watch::Receiver<bool>) {
     let mut settings_rx = settings::subscribe();
+    let mut service_cleanup = tokio::time::interval(Duration::from_secs(10));
     loop {
         let cleanup_interval = settings::current().pool_idle_eviction_interval();
         tokio::select! {
+            _ = service_cleanup.tick() => {
+                driver::service::sessions::cleanup().await;
+                driver::service::registry::cleanup();
+                driver::service::pool::cleanup().await;
+            },
             _ = sleep(cleanup_interval) => pool_manager::cleanup_idle_pools().await,
             // Reset the timer immediately when initialize supplies an override.
             result = settings_rx.changed() => {
@@ -94,16 +94,70 @@ async fn run_pool_cleanup(mut shutdown_rx: watch::Receiver<bool>) {
     }
 }
 
-async fn run_reader(req_tx: mpsc::Sender<String>) {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+) -> std::io::Result<Option<Result<String, ()>>> {
+    let mut frame = Vec::new();
+    let mut oversized = false;
+    loop {
+        let buffer = reader.fill_buf().await?;
+        if buffer.is_empty() {
+            return Ok(if frame.is_empty() && !oversized {
+                None
+            } else {
+                Some(Err(()))
+            });
+        }
+        let newline = buffer.iter().position(|byte| *byte == b'\n');
+        let length = newline.map_or(buffer.len(), |index| index + 1);
+        if !oversized {
+            if frame.len() + length > 16 * 1024 * 1024 {
+                oversized = true;
+                frame.clear();
+            } else {
+                frame.extend_from_slice(&buffer[..length]);
+            }
+        }
+        reader.consume(length);
+        if newline.is_some() {
+            return Ok(Some(if oversized {
+                Err(())
+            } else {
+                String::from_utf8(frame).map_err(|_| ())
+            }));
+        }
+    }
+}
+async fn run_reader(
+    resp_tx: mpsc::Sender<String>,
+    tasks: &mut JoinSet<()>,
+    mut shutdown_rx: watch::Receiver<bool>,
+) {
+    let mut reader = BufReader::new(tokio::io::stdin());
+    let queued = Arc::new(Semaphore::new(REQUEST_QUEUE_CAPACITY));
+    let active = Arc::new(Semaphore::new(WORKER_POOL_SIZE));
 
     loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(err) => {
-                eprintln!("stdin read error, exiting: {err}");
-                break;
+        while tasks.try_join_next().is_some() {}
+        let frame = tokio::select! { frame = read_frame(&mut reader) => frame, _ = shutdown_rx.changed() => break };
+        let line = match frame {
+            Ok(Some(Ok(line))) => line,
+            Ok(None) | Err(_) => break,
+            Ok(Some(Err(()))) => {
+                if send_response(
+                    &resp_tx,
+                    rpc::error_response(
+                        serde_json::Value::Null,
+                        -32700,
+                        "The driver frame is oversized or is not valid newline-delimited UTF-8",
+                    ),
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+                continue;
             }
         };
 
@@ -112,45 +166,208 @@ async fn run_reader(req_tx: mpsc::Sender<String>) {
             continue;
         }
 
-        // Blocks when the queue is full, applying backpressure to reading.
-        if req_tx.send(trimmed.to_string()).await.is_err() {
-            break;
+        let request: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(value) => value,
+            Err(_) => {
+                if send_response(
+                    &resp_tx,
+                    rpc::error_response(serde_json::Value::Null, -32700, "Invalid JSON-RPC frame"),
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+                continue;
+            }
+        };
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let method = request["method"].as_str().unwrap_or("");
+        if handlers::service::is_method(method) && !driver::service::types::valid_rpc_id(&id) {
+            if send_response(
+                &resp_tx,
+                driver::service::ServiceError::argument(
+                    "Service RPC id must be null, a bounded string, or a safe integer",
+                )
+                .response(serde_json::Value::Null),
+            )
+            .await
+            .is_err()
+            {
+                break;
+            }
+            continue;
         }
+        if matches!(
+            method,
+            "cancel_request"
+                | "service_session_discard"
+                | "service_invalidate_auth"
+                | "shutdown"
+                | "initialize"
+        ) {
+            let response = Box::pin(rpc::handle_line(trimmed)).await;
+            if send_response(&resp_tx, response).await.is_err() {
+                break;
+            }
+            continue;
+        }
+        let scope = if handlers::service::is_method(method) {
+            match handlers::service::prepare(&request["params"]) {
+                Ok(scope) => Some(scope),
+                Err(error) => {
+                    if send_response(&resp_tx, error.response(id)).await.is_err() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            None
+        };
+        let queue_permit = if scope.is_some() {
+            match queued.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    if send_response(
+                        &resp_tx,
+                        driver::service::ServiceError::new(
+                            "RESOURCE_LIMIT",
+                            "The driver request queue is full",
+                        )
+                        .response(id),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        break;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            tokio::select! { permit = queued.clone().acquire_owned() => match permit { Ok(permit) => permit, Err(_) => break }, _ = shutdown_rx.changed() => break }
+        };
+        let connection = scope
+            .as_ref()
+            .map(|scope| scope.connection_id().to_owned())
+            .unwrap_or_else(|| {
+                request["params"]["params"]["connection_id"]
+                    .as_str()
+                    .unwrap_or("legacy")
+                    .to_owned()
+            });
+        let connection_limit = driver::service::registry::connection_limit(&connection);
+        let active = active.clone();
+        let resp_tx = resp_tx.clone();
+        let line = trimmed.to_owned();
+        tasks.spawn(async move {
+            let permits = async { let connection = connection_limit.acquire_owned().await.unwrap(); let active = active.acquire_owned().await.unwrap(); (connection, active) };
+            tokio::pin!(permits);
+            let admission = if let Some(scope) = &scope {
+                tokio::select! {
+                    permits = &mut permits => Ok(permits),
+                    _ = tokio::time::sleep_until(scope.state.deadline) => Err(driver::service::ServiceError::new("DEADLINE_EXCEEDED", "The queued request deadline was exceeded")),
+                    _ = scope.wait_cancelled() => Err(driver::service::ServiceError::new("CANCELLED", "The queued request was cancelled")),
+                }
+            } else { Ok(permits.await) };
+            drop(queue_permit);
+            let response = match admission {
+                Ok(_permits) => Box::pin(rpc::handle_line_with_scope(&line, scope)).await,
+                Err(error) => error.response(id),
+            };
+            let _ = send_response(&resp_tx, response).await;
+        });
     }
 }
-
-async fn run_worker(req_rx: Arc<Mutex<mpsc::Receiver<String>>>, resp_tx: mpsc::Sender<String>) {
-    loop {
-        let line = {
-            let mut rx = req_rx.lock().await;
-            rx.recv().await
-        };
-        let Some(line) = line else { break };
-
-        // Box the dispatch future itself: it embeds every handler's state
-        // machine, so constructing only a boxed handler result later would
-        // still leave the large dispatch enum on the worker stack.
-        let response = Box::pin(rpc::handle_line(&line)).await;
-        let body = match serde_json::to_string(&response) {
-            Ok(s) => s,
-            Err(err) => format!(
-                "{{\"jsonrpc\":\"2.0\",\"error\":{{\"code\":-32603,\"message\":\"serialization failed: {err}\"}},\"id\":null}}",
-            ),
-        };
-
-        if resp_tx.send(body).await.is_err() {
-            break;
-        }
+async fn send_response(
+    sender: &mpsc::Sender<String>,
+    response: serde_json::Value,
+) -> Result<(), ()> {
+    let body = bounded_response(response)?;
+    sender.send(body).await.map_err(|_| ())
+}
+fn bounded_response(response: serde_json::Value) -> Result<String, ()> {
+    let body = serde_json::to_string(&response).map_err(|_| ())?;
+    if body.len() <= driver::service::types::FRAME_LIMIT {
+        return Ok(body);
     }
+    let mut error = driver::service::ServiceError::new(
+        "RESOURCE_LIMIT",
+        "The driver response exceeds its byte limit",
+    );
+    if response["error"]["data"]["outcome"] == "unknown"
+        || response["error"]["data"]["code"] == "OUTCOME_UNKNOWN"
+    {
+        error.code = "OUTCOME_UNKNOWN";
+        error.unknown = true;
+    }
+    let id = if error.unknown && !driver::service::types::valid_rpc_id(&response["id"]) {
+        serde_json::Value::Null
+    } else {
+        response["id"].clone()
+    };
+    let mut body = serde_json::to_string(&error.clone().response(id)).map_err(|_| ())?;
+    if body.len() > driver::service::types::FRAME_LIMIT {
+        body = serde_json::to_string(&error.response(serde_json::Value::Null)).map_err(|_| ())?;
+    }
+    if body.len() > driver::service::types::FRAME_LIMIT {
+        return Err(());
+    }
+    Ok(body)
 }
 
-async fn run_writer(mut resp_rx: mpsc::Receiver<String>) {
+async fn run_writer(mut resp_rx: mpsc::Receiver<String>, shutdown_tx: watch::Sender<bool>) {
     let mut stdout = tokio::io::stdout();
     while let Some(mut body) = resp_rx.recv().await {
         body.push('\n');
         if stdout.write_all(body.as_bytes()).await.is_err() {
+            driver::service::registry::cancel_all();
+            let _ = shutdown_tx.send(true);
             break;
         }
-        let _ = stdout.flush().await;
+        if stdout.flush().await.is_err() {
+            driver::service::registry::cancel_all();
+            let _ = shutdown_tx.send(true);
+            break;
+        }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+    #[test]
+    fn 큰_unknown_오류도_최종_frame_한계와_쓰기_결과를_보존한다() {
+        // given
+        let response = json!({"jsonrpc":"2.0","id":"x".repeat(16*1024*1024),"error":{"data":{"code":"OUTCOME_UNKNOWN","outcome":"unknown","details":{"large":"x".repeat(1024)}}}});
+        // when
+        let actual = bounded_response(response)
+            .map(|text| (text.len(), serde_json::from_str::<Value>(&text).unwrap()))
+            .unwrap();
+        // then
+        assert!(actual.0 <= driver::service::types::FRAME_LIMIT);
+        assert_eq!(actual.1["id"], Value::Null);
+        assert_eq!(actual.1["error"]["data"]["code"], "OUTCOME_UNKNOWN");
+        assert_eq!(actual.1["error"]["data"]["outcome"], "unknown");
+        assert_eq!(actual.1["error"]["data"]["details"], Value::Null);
+    }
+    #[test]
+    fn legacy_큰_id의_최종_fallback도_실제_frame_한계를_지킨다() {
+        // given
+        let response =
+            json!({"jsonrpc":"2.0","id":"x".repeat(16*1024*1024),"result":"x".repeat(1024)});
+        // when
+        let actual = bounded_response(response)
+            .map(|text| (text.len(), serde_json::from_str::<Value>(&text).unwrap()))
+            .unwrap();
+        // then
+        assert!(actual.0 <= driver::service::types::FRAME_LIMIT);
+        assert_eq!(actual.1["id"], Value::Null);
+        assert_eq!(actual.1["error"]["data"]["code"], "RESOURCE_LIMIT");
+        assert_eq!(actual.1["error"]["data"]["outcome"], "not_applied");
     }
 }

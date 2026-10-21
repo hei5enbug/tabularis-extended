@@ -21,6 +21,10 @@ type SqlServerPoolMap = Arc<RwLock<HashMap<String, SqlServerPool>>>;
 static SQLSERVER_POOLS: Lazy<SqlServerPoolMap> =
     Lazy::new(|| Arc::new(RwLock::new(HashMap::new())));
 
+pub(crate) static SERVICE_POOLS: Lazy<
+    RwLock<HashMap<String, (String, crate::driver::service::pool::NativePool)>>,
+> = Lazy::new(|| RwLock::new(HashMap::new()));
+
 /// Stable cache key. Prefers `connection_id`; else host:port:database.
 /// Folds in username (bastions route by it), ssl_mode, and auth mode, so
 /// none of those can silently reuse a pool built under different ones.
@@ -111,6 +115,7 @@ pub async fn cleanup_idle_pools() {
 
 /// Close every cached pool and remove it from the process-wide registry.
 pub async fn shutdown() {
+    crate::driver::service::pool::shutdown().await;
     let pools: Vec<_> = SQLSERVER_POOLS
         .write()
         .await

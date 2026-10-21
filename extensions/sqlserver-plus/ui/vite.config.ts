@@ -6,7 +6,7 @@ export default defineConfig({
   test: { environment: "jsdom" },
   build: {
     lib: {
-      entry: "src/IntegratedAuthToggle.tsx",
+      entry: "src/index.tsx",
       formats: ["iife"],
       name: "__tabularis_plugin__",
       fileName: () => "index.js",

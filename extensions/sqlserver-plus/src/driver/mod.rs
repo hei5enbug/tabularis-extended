@@ -15,6 +15,7 @@ pub mod ops;
 pub mod pool;
 pub mod query_templates;
 pub mod routines;
+pub mod service;
 pub mod triggers;
 pub mod types;
 pub mod users;

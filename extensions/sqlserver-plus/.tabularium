@@ -53,7 +53,8 @@
   "readme": "README.md",
   "homepage": "https://github.com/TabularisDB/tabularis-sqlserver-plugin",
   "documentation_url": "https://github.com/TabularisDB/tabularis-sqlserver-plugin#readme",
-  "min_runtime_version": "0.25.1-5",
+  "min_runtime_version": "0.26.1-spatial.1",
+  "service_protocol": 1,
   "support": {
     "issues_url": "https://github.com/TabularisDB/tabularis-sqlserver-plugin/issues"
   },
@@ -114,6 +115,29 @@
     "JSON": "NVARCHAR(MAX)"
   },
   "settings": [
+    {
+      "key": "auth_mode",
+      "label": "Authentication",
+      "type": "select",
+      "options": ["sql_password", "integrated", "entra_user", "entra_service_principal"],
+      "default": "sql_password"
+    },
+    {
+      "key": "tenant_id",
+      "label": "Tenant ID",
+      "type": "string"
+    },
+    {
+      "key": "client_id",
+      "label": "Client ID",
+      "type": "string"
+    },
+    {
+      "key": "integrated_auth",
+      "label": "Windows Authentication",
+      "type": "string",
+      "default": ""
+    },
     {
       "key": "max_pool_size",
       "label": "Maximum Pool Size",

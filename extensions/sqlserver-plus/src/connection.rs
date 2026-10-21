@@ -44,7 +44,11 @@ pub fn resolve_connection_params(params: &ConnectionParams) -> Result<Connection
         .map(|mode| normalize_ssl_mode(&mode))
         .transpose()?;
     if let Some(value) = resolved.extra.get("integrated_auth") {
-        if parse_bool("integrated_auth", value)? {
+        let value = parse_bool("integrated_auth", value)?;
+        if resolved.integrated_auth && !value {
+            return Err("Conflicting integrated authentication settings".into());
+        }
+        if value {
             resolved.integrated_auth = true;
         }
     }
@@ -118,6 +122,15 @@ pub fn resolve_connection_params(params: &ConnectionParams) -> Result<Connection
         )?;
 
         if let Some(integrated_auth) = parsed.integrated_auth {
+            if !integrated_auth
+                && (resolved.auth_mode.as_deref() == Some("integrated")
+                    || resolved
+                        .extra
+                        .get("auth_mode")
+                        .is_some_and(|v| v == "integrated"))
+            {
+                return Err("Conflicting integrated authentication settings".into());
+            }
             if resolved.integrated_auth && !integrated_auth {
                 return Err(contradiction("integrated_auth", "true", "false", false));
             }
@@ -135,7 +148,76 @@ pub fn resolve_connection_params(params: &ConnectionParams) -> Result<Connection
         );
     }
 
+    let mode = resolved
+        .auth_mode
+        .as_deref()
+        .or_else(|| resolved.extra.get("auth_mode").map(String::as_str))
+        .unwrap_or(if resolved.integrated_auth {
+            "integrated"
+        } else {
+            "sql_password"
+        })
+        .to_owned();
+    if !matches!(
+        mode.as_str(),
+        "sql_password" | "integrated" | "entra_user" | "entra_service_principal"
+    ) {
+        return Err("Unsupported SQL Server authentication mode".into());
+    }
+    if resolved.auth_mode.as_ref().is_some_and(|mode| {
+        resolved
+            .extra
+            .get("auth_mode")
+            .is_some_and(|extra| extra != mode)
+    }) {
+        return Err("Conflicting SQL Server authentication modes".into());
+    }
+    if (mode == "integrated"
+        && (resolved.username.as_ref().is_some_and(|v| !v.is_empty())
+            || resolved.password.as_ref().is_some_and(|v| !v.is_empty())))
+        || (mode != "integrated" && resolved.integrated_auth)
+        || (mode.starts_with("entra_")
+            && (resolved.username.as_ref().is_some_and(|v| !v.is_empty())
+                || resolved.password.as_ref().is_some_and(|v| !v.is_empty())))
+    {
+        return Err("SQL Server authentication settings conflict".into());
+    }
+    if mode == "integrated" {
+        resolved.integrated_auth = true;
+    }
+    resolved.auth_mode = Some(mode);
+    for key in resolved.extra.keys() {
+        if matches!(
+            canonical_key(key).as_str(),
+            "accesstoken" | "token" | "expiresatms" | "refreshtoken"
+        ) {
+            return Err("Transient authentication cannot be stored in connection settings".into());
+        }
+    }
+    if is_azure_sql(&resolved) {
+        if resolved.database.primary().trim().is_empty() {
+            return Err("Azure SQL requires an explicit database".into());
+        }
+        if resolved
+            .ssl_mode
+            .as_deref()
+            .is_some_and(|mode| mode != "verify-full")
+        {
+            return Err("Azure SQL requires verify-full TLS".into());
+        }
+        resolved.ssl_mode = Some("verify-full".into());
+    }
+
     Ok(resolved)
+}
+
+pub fn is_azure_sql(params: &ConnectionParams) -> bool {
+    params.host.as_deref().is_some_and(|host| {
+        host.trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase()
+            .ends_with(".database.windows.net")
+    })
 }
 
 impl ParsedConnectionString {
