@@ -230,6 +230,41 @@ fn 앞의_중첩_주석으로_transaction_control_검사를_우회하지_못한�
     assert_eq!(actual.unwrap_err().code, "UNSUPPORTED_OPERATION");
 }
 #[test]
+fn 비어_있지_않은_schema는_실행_전에_지원하지_않는_작업_오류로_거부한다() {
+    // given
+    let input: exact::ExactInput =
+        serde_json::from_value(json!({"text":"SELECT 1","schema":"sales"})).unwrap();
+    // when
+    let actual = exact::validate(&input);
+    // then
+    let error = actual.unwrap_err();
+    assert_eq!(error.code, "UNSUPPORTED_OPERATION");
+    assert_eq!(
+        error.message,
+        "SQL Server has no per-session default schema; names must be schema-qualified"
+    );
+}
+#[test]
+fn schema가_없거나_비어_있으면_기존처럼_통과한다() {
+    // given
+    let absent: exact::ExactInput = serde_json::from_value(json!({"text":"SELECT 1"})).unwrap();
+    let empty: exact::ExactInput =
+        serde_json::from_value(json!({"text":"SELECT 1","schema":""})).unwrap();
+    // when
+    let actual = [exact::validate(&absent), exact::validate(&empty)];
+    // then
+    assert!(actual.iter().all(|result| result.is_ok()));
+}
+#[test]
+fn 정확_쿼리_입력은_알_수_없는_필드를_계속_거부한다() {
+    // given
+    let value = json!({"text":"SELECT 1","schema":"sales","search_path":"x"});
+    // when
+    let actual = serde_json::from_value::<exact::ExactInput>(value);
+    // then
+    assert!(actual.is_err());
+}
+#[test]
 fn 예약한_physical_session이_64개면_다음_예약을_거부한다() {
     // given
     let _permits = (0..64)

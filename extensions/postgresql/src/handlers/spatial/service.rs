@@ -138,6 +138,7 @@ fn exact_input(text: String, values: Vec<Value>) -> ExactInput {
             .collect(),
         max_rows: 10_000,
         max_bytes: 32 * 1024 * 1024,
+        schema: None,
     }
 }
 fn row_objects(result: &Value) -> Result<Vec<Value>, SpatialError> {

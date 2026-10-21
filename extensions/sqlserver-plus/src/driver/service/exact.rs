@@ -20,6 +20,8 @@ pub struct ExactInput {
     pub max_rows: usize,
     #[serde(default = "max_bytes")]
     pub max_bytes: usize,
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -160,6 +162,16 @@ pub fn value_type(value: &Value) -> Result<SqlType, ServiceError> {
     })
 }
 pub fn validate(input: &ExactInput) -> Result<Vec<RpcParameter>, ServiceError> {
+    if input
+        .schema
+        .as_deref()
+        .is_some_and(|schema| !schema.is_empty())
+    {
+        return Err(ServiceError::new(
+            "UNSUPPORTED_OPERATION",
+            "SQL Server has no per-session default schema; names must be schema-qualified",
+        ));
+    }
     validate_text(&input.text)?;
     if input.max_rows == 0
         || input.max_rows > max_rows()

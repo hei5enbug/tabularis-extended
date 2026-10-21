@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 use tokio_postgres::{types::Type, Client};
 
 use super::{catalog::Catalog, SpatialError};
-use crate::binding::PgParam;
+use crate::{binding::PgParam, utils::identifiers::quote_identifier};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +16,8 @@ pub struct ExactInput {
     pub max_rows: usize,
     #[serde(default = "max_bytes")]
     pub max_bytes: usize,
+    #[serde(default)]
+    pub schema: Option<String>,
 }
 fn max_rows() -> usize {
     10_000
@@ -28,6 +30,21 @@ fn max_bytes() -> usize {
 pub struct Parameter {
     pub name: String,
     pub value: Value,
+}
+
+pub fn search_path_statement(schema: Option<&str>) -> Result<Option<String>, SpatialError> {
+    let Some(schema) = schema else {
+        return Ok(None);
+    };
+    if schema.is_empty() || schema.contains('\0') {
+        return Err(SpatialError::argument(
+            "Schema must be a nonempty name without NUL characters",
+        ));
+    }
+    Ok(Some(format!(
+        "SET LOCAL search_path TO {}",
+        quote_identifier(schema)
+    )))
 }
 
 pub fn validate_text(text: &str) -> Result<(), SpatialError> {
@@ -191,6 +208,7 @@ pub async fn execute(
     reserved: bool,
 ) -> Result<Value, SpatialError> {
     validate_text(&input.text)?;
+    let search_path = search_path_statement(input.schema.as_deref())?;
     if input.max_rows == 0
         || input.max_rows > max_rows()
         || input.max_bytes == 0
@@ -207,6 +225,28 @@ pub async fn execute(
             ));
         }
     }
+    let previous_search_path = match &search_path {
+        Some(set_local) if reserved => {
+            let row = client
+                .query_one("SELECT pg_catalog.current_setting('search_path')", &[])
+                .await
+                .map_err(SpatialError::database)?;
+            let previous: String = row.get(0);
+            client
+                .batch_execute(set_local)
+                .await
+                .map_err(SpatialError::database)?;
+            Some(previous)
+        }
+        Some(set_local) => {
+            client
+                .batch_execute(set_local)
+                .await
+                .map_err(SpatialError::database)?;
+            None
+        }
+        None => None,
+    };
     let statement = client
         .prepare(&input.text)
         .await
@@ -329,9 +369,22 @@ pub async fn execute(
             .await
             .map_err(SpatialError::database)?;
     }
+    if let Some(previous) = previous_search_path {
+        client
+            .query_one(
+                "SELECT pg_catalog.set_config('search_path',$1,true)",
+                &[&previous],
+            )
+            .await
+            .map_err(SpatialError::database)?;
+    }
     Ok(
         json!({"columns":columns,"column_metadata":column_metadata,"rows":rows,"affected_rows":affected,
         "truncated":!reasons.is_empty(),"pagination":null,"limits":{"truncated":!reasons.is_empty(),"reasons":reasons},
         "page":{"next_token":null,"has_more":false,"resume_mode":"none"}}),
     )
 }
+
+#[cfg(test)]
+#[path = "exact_tests.rs"]
+mod exact_tests;
