@@ -1,7 +1,5 @@
-use super::{
-    exact, pool, registry,
-    types::{self, DriverContext},
-};
+use super::{exact, pool, registry, types::DriverContext};
+use crate::driver::azure_cli_auth::fake_cli::{HOST, OBJECT, TENANT, USER};
 use crate::{
     connection::resolve_connection_params,
     models::{ConnectionParams, DatabaseSelection},
@@ -10,19 +8,24 @@ use crate::{
 use serde_json::json;
 fn entra() -> (ConnectionParams, DriverContext) {
     let params = ConnectionParams {
-        host: Some("synthetic.database.windows.net".into()),
+        host: Some(HOST.into()),
+        username: Some(USER.into()),
         database: DatabaseSelection::Single("fixture".into()),
         auth_mode: Some("entra_user".into()),
         extra: [
-            ("tenant_id".into(), "tenant".into()),
-            ("client_id".into(), "client".into()),
+            ("auth_source".into(), "azure_cli".into()),
+            ("tenant_id".into(), TENANT.into()),
+            ("entra_object_id".into(), OBJECT.into()),
         ]
         .into_iter()
         .collect(),
         ..Default::default()
     };
-    let context = serde_json::from_value(json!({"protocol_version":1,"connection_id":uuid::Uuid::new_v4().to_string(),"request_id":"request","auth":{"kind":"entra_token","access_token":"synthetic-token","expires_at_ms":types::unix_ms()+1_000_000,"identity":"principal","tenant_id":"tenant","client_id":"client","principal_id":"principal","scope":types::SQL_SCOPE}})).unwrap();
+    let context = serde_json::from_value(json!({"protocol_version":1,"connection_id":uuid::Uuid::new_v4().to_string(),"request_id":"request"})).unwrap();
     (params, context)
+}
+fn request(params: &ConnectionParams, auth: serde_json::Value) -> serde_json::Value {
+    json!({"params":params,"driver_context":{"protocol_version":1,"connection_id":"fixture","request_id":"request","auth":auth},"input":{}})
 }
 #[test]
 fn azure_sql은_database와_검증하는_tls를_강제한다() {
@@ -74,37 +77,103 @@ fn azure_sql에서_명시하지_않은_database를_거부한다() {
 fn entra와_다른_인증_정보가_충돌하면_거부한다() {
     // given
     let (mut params, _) = entra();
-    params.username = Some("sql-user".into());
+    params.password = Some("sql-secret".into());
     // when
     let actual = resolve_connection_params(&params);
     // then
     assert!(actual.is_err());
 }
 #[test]
-fn entra_token은_공개_aad_token과_검증하는_tls로_전달한다() {
+fn entra_user는_빈_token_자리표시자와_검증하는_tls로_설정한다() {
     // given
     let (params, context) = entra();
     let params = resolve_connection_params(&params).unwrap();
+
     // when
-    let actual = pool::config(&params, &PluginSettings::default(), &context, 1000)
+    let actual = pool::config(&params, &PluginSettings::default(), &context)
         .unwrap()
         .to_client_context();
+
     // then
-    assert_eq!(actual.access_token.as_deref(), Some("synthetic-token"));
+    assert_eq!(actual.access_token.as_deref(), Some(""));
     assert!(!actual.encryption_options.trust_server_certificate);
     assert!(actual.password.is_empty());
+    assert!(actual.user_name.is_empty());
 }
 #[test]
-fn deadline과_여유_시간보다_짧은_token을_거부한다() {
+fn host가_보낸_entra_token은_사용하지_않고_형식화된_오류로_거부한다() {
     // given
-    let (params, mut context) = entra();
-    if let Some(types::TransientAuth::EntraToken { expires_at_ms, .. }) = &mut context.auth {
-        *expires_at_ms = types::unix_ms() + 300_000;
-    }
+    let (params, _) = entra();
+    let auth = json!({"kind":"entra_token","access_token":"synthetic-host-token-canary","expires_at_ms":4_102_444_800_000_u64,"identity":"principal","tenant_id":TENANT,"client_id":"client","principal_id":OBJECT,"scope":"https://database.windows.net/.default"});
+    let variants = [
+        request(&params, auth.clone()),
+        request(&params, json!({"kind":"entra_user"})),
+    ];
+
     // when
-    let actual = context.validate_auth(&params, 1000);
+    let parsed = variants.clone().map(|value| DriverContext::parse(&value));
+    let control = variants.map(|value| DriverContext::parse_control(&value));
+
     // then
-    assert_eq!(actual.unwrap_err().code, "AUTH_EXPIRED");
+    for error in parsed
+        .into_iter()
+        .map(|result| result.err().unwrap())
+        .chain(control.into_iter().map(|result| result.err().unwrap()))
+    {
+        assert_eq!(error.code, "INVALID_ARGUMENT");
+        assert!(!error.message.contains("canary"));
+        assert!(!format!("{:?}", error).contains("canary"));
+    }
+}
+#[test]
+fn entra_user는_driver_자체_인증이라_transient_auth_없이만_통과한다() {
+    // given
+    let (params, context) = entra();
+    let with_password: DriverContext = serde_json::from_value(json!({"protocol_version":1,"connection_id":"fixture","request_id":"request","auth":{"kind":"db_password","password":"synthetic-secret","identity":"principal"}})).unwrap();
+    let mut other = params.clone();
+    other.auth_mode = Some("sql_password".into());
+    other.username = Some("sql-user".into());
+
+    // when
+    let accepted = context.validate_auth(&params);
+    let carrying_password = with_password.validate_auth(&params);
+    let sql_without_password = context.validate_auth(&other);
+
+    // then
+    assert!(accepted.is_ok());
+    assert_eq!(carrying_password.unwrap_err().code, "INVALID_ARGUMENT");
+    assert_eq!(sql_without_password.unwrap_err().code, "AUTH_REQUIRED");
+}
+#[test]
+fn 불완전하거나_안전하지_않은_entra_설정은_인증_검증에서_거부한다() {
+    // given
+    let (params, context) = entra();
+    let mut missing_object = params.clone();
+    missing_object.extra.remove("entra_object_id");
+    let mut private_host = params.clone();
+    private_host.host = Some("sql.example.com".into());
+    let mut password = params.clone();
+    password.password = Some("synthetic-secret".into());
+
+    // when
+    let actual = [missing_object, private_host, password].map(|p| context.validate_auth(&p));
+
+    // then
+    assert!(actual
+        .iter()
+        .all(|result| result.as_ref().unwrap_err().code == "INVALID_ARGUMENT"));
+}
+#[test]
+fn service_capabilities는_host_token을_광고하지_않는다() {
+    // given
+    let capabilities = crate::handlers::service::capabilities();
+
+    // when
+    let actual = &capabilities["entra_token"];
+
+    // then
+    assert_eq!(actual, &json!(false));
+    assert_eq!(capabilities["service_protocol"], json!(1));
 }
 #[test]
 fn 다른_연결의_같은_request_id는_별도로_취소한다() {

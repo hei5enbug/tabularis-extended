@@ -119,8 +119,14 @@
       "key": "auth_mode",
       "label": "Authentication",
       "type": "select",
-      "options": ["sql_password", "integrated", "entra_user", "entra_service_principal"],
+      "options": ["sql_password", "integrated", "entra_user"],
       "default": "sql_password"
+    },
+    {
+      "key": "auth_source",
+      "label": "Entra Login Source",
+      "type": "select",
+      "options": ["azure_cli"]
     },
     {
       "key": "tenant_id",
@@ -128,9 +134,15 @@
       "type": "string"
     },
     {
-      "key": "client_id",
-      "label": "Client ID",
+      "key": "entra_object_id",
+      "label": "Entra Object ID",
       "type": "string"
+    },
+    {
+      "key": "azure_cli_path",
+      "label": "Azure CLI Path",
+      "type": "string",
+      "description": "Optional absolute path to the Azure CLI executable; leave empty to resolve az through PATH."
     },
     {
       "key": "integrated_auth",

@@ -33,6 +33,17 @@ impl State {
     pub fn mark_write(&self) {
         self.write_dispatched.store(true, Ordering::Release);
     }
+    pub async fn wait_cancelled(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.cancelled.load(Ordering::Acquire) {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 impl Scope {
     pub fn reserve(context: &DriverContext) -> Result<Self, ServiceError> {
@@ -118,15 +129,7 @@ impl Scope {
         &self.key.0
     }
     pub async fn wait_cancelled(&self) {
-        loop {
-            let notified = self.state.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.cancelled() {
-                return;
-            }
-            notified.await;
-        }
+        self.state.wait_cancelled().await;
     }
 }
 impl Drop for Scope {

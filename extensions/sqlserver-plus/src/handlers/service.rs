@@ -27,7 +27,7 @@ pub fn is_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 pub fn capabilities() -> Value {
-    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel":true,"entra_token":true,"readonly_guarantee":"restricted_database_principal","catalog":true,"rows":true})
+    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel":true,"entra_token":false,"readonly_guarantee":"restricted_database_principal","catalog":true,"rows":true})
 }
 pub fn prepare(params: &Value) -> Result<Scope, ServiceError> {
     let (context, _) = DriverContext::parse(params)?;
@@ -73,7 +73,7 @@ async fn acquire(
     scope: &Scope,
 ) -> Result<Lease, ServiceError> {
     scope.remaining()?;
-    context.validate_auth(params, scope.remaining()?)?;
+    context.validate_auth(params)?;
     if let Some(handle) = &context.session_handle {
         let slot = sessions::lock(handle, params, context, scope).await?;
         scope.touch_session();

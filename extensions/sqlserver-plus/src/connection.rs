@@ -7,6 +7,14 @@
 
 use crate::models::{ConnectionParams, DatabaseSelection};
 
+/// Connection fields that only apply to `auth_mode=entra_user`.
+const ENTRA_EXTRA_KEYS: [&str; 4] = [
+    "auth_source",
+    "tenant_id",
+    "entra_object_id",
+    "azure_cli_path",
+];
+
 const CUSTOM_CA_ERROR: &str =
     "SQL Server custom CA files are not supported; use verify-full with the system trust store";
 
@@ -158,10 +166,7 @@ pub fn resolve_connection_params(params: &ConnectionParams) -> Result<Connection
             "sql_password"
         })
         .to_owned();
-    if !matches!(
-        mode.as_str(),
-        "sql_password" | "integrated" | "entra_user" | "entra_service_principal"
-    ) {
+    if !matches!(mode.as_str(), "sql_password" | "integrated" | "entra_user") {
         return Err("Unsupported SQL Server authentication mode".into());
     }
     if resolved.auth_mode.as_ref().is_some_and(|mode| {
@@ -172,15 +177,21 @@ pub fn resolve_connection_params(params: &ConnectionParams) -> Result<Connection
     }) {
         return Err("Conflicting SQL Server authentication modes".into());
     }
+    let entra = mode == "entra_user";
     if (mode == "integrated"
         && (resolved.username.as_ref().is_some_and(|v| !v.is_empty())
             || resolved.password.as_ref().is_some_and(|v| !v.is_empty())))
         || (mode != "integrated" && resolved.integrated_auth)
-        || (mode.starts_with("entra_")
-            && (resolved.username.as_ref().is_some_and(|v| !v.is_empty())
-                || resolved.password.as_ref().is_some_and(|v| !v.is_empty())))
+        || (entra && resolved.password.as_ref().is_some_and(|v| !v.is_empty()))
     {
         return Err("SQL Server authentication settings conflict".into());
+    }
+    if !entra
+        && ENTRA_EXTRA_KEYS
+            .iter()
+            .any(|key| resolved.extra.contains_key(*key))
+    {
+        return Err("SQL Server Entra settings require auth_mode=entra_user".into());
     }
     if mode == "integrated" {
         resolved.integrated_auth = true;

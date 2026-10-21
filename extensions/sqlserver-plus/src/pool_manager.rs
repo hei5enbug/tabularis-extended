@@ -11,6 +11,7 @@ use once_cell::sync::Lazy;
 use tokio::sync::RwLock;
 
 use crate::connection::resolve_connection_params;
+use crate::driver::azure_cli_auth::AzureCliAuth;
 use crate::driver::pool::{build_config, BridgeManager};
 use crate::models::ConnectionParams;
 use crate::settings;
@@ -28,10 +29,30 @@ pub(crate) static SERVICE_POOLS: Lazy<
 /// Stable cache key. Prefers `connection_id`; else host:port:database.
 /// Folds in username (bastions route by it), ssl_mode, and auth mode, so
 /// none of those can silently reuse a pool built under different ones.
+/// Entra user connections also fold in the auth source, tenant, object ID,
+/// username, Azure CLI path, host, and port; access tokens never appear.
 /// Gap: password isn't in the key, so rotating it still reuses the pool.
 fn build_connection_key(params: &ConnectionParams) -> String {
     let ssl_mode = params.ssl_mode.as_deref().unwrap_or("prefer");
-    let auth = if params.integrated_auth {
+    let entra_user_auth = params
+        .auth_mode
+        .as_deref()
+        .or_else(|| params.extra.get("auth_mode").map(String::as_str))
+        .is_some_and(|mode| mode.trim() == "entra_user");
+    let extra = |key: &str, default: &'static str| {
+        key_part(params.extra.get(key).map(String::as_str).unwrap_or(default))
+    };
+    let auth = if entra_user_auth {
+        format!(
+            "entra{}{}{}{}{}{}",
+            key_part("entra_user"),
+            extra("auth_source", "azure_cli"),
+            extra("tenant_id", ""),
+            extra("entra_object_id", ""),
+            key_part(params.username.as_deref().unwrap_or("")),
+            extra("azure_cli_path", "az")
+        )
+    } else if params.integrated_auth {
         "integrated".to_string()
     } else {
         format!("sql:{}", params.username.as_deref().unwrap_or(""))
@@ -47,7 +68,20 @@ fn build_connection_key(params: &ConnectionParams) -> String {
             params.database
         )
     };
-    format!("{base_key}:auth:{auth}:ssl:{ssl_mode}")
+    let target = if entra_user_auth {
+        format!(
+            ":host{}:port{}",
+            key_part(params.host.as_deref().unwrap_or("localhost")),
+            params.port.unwrap_or(1433)
+        )
+    } else {
+        String::new()
+    };
+    format!("{base_key}:auth:{auth}:ssl:{ssl_mode}{target}")
+}
+
+fn key_part(value: &str) -> String {
+    format!("{}:{value}", value.len())
 }
 
 fn startup_script(params: &ConnectionParams) -> Option<String> {
@@ -70,12 +104,16 @@ pub async fn get_sqlserver_pool(params: &ConnectionParams) -> Result<SqlServerPo
     // A pool snapshots process settings. The host initializes the process
     // before opening connections, and live pools are never mutated in place.
     let settings = settings::current();
-    let manager = BridgeManager::new(
+    let azure_cli_auth = AzureCliAuth::from_connection_params(&params, &settings)?;
+    let mut manager = BridgeManager::new(
         build_config(&params, &settings)?,
         startup_script(&params),
         params.ssl_mode.as_deref().unwrap_or("prefer"),
         &settings,
     );
+    if let Some(auth) = azure_cli_auth {
+        manager = manager.with_azure_cli_auth(auth);
+    }
     let pool = DeadPool::builder(manager)
         .max_size(settings.max_pool_size)
         .build()
@@ -148,6 +186,26 @@ mod tests {
         }
     }
 
+    fn entra_params() -> ConnectionParams {
+        let mut params = params(Some("azure-sql"));
+        params.host = Some("synthetic.database.windows.net".into());
+        params.username = Some("user@example.com".into());
+        params.ssl_mode = Some("verify-full".into());
+        params.extra.insert("auth_mode".into(), "entra_user".into());
+        params
+            .extra
+            .insert("auth_source".into(), "azure_cli".into());
+        params.extra.insert(
+            "tenant_id".into(),
+            "00000000-0000-0000-0000-0000000000a1".into(),
+        );
+        params.extra.insert(
+            "entra_object_id".into(),
+            "00000000-0000-0000-0000-0000000000b2".into(),
+        );
+        params
+    }
+
     #[test]
     fn key_prefers_connection_id() {
         let key = build_connection_key(&params(Some("abc")));
@@ -214,5 +272,104 @@ mod tests {
             build_connection_key(&discrete),
             build_connection_key(&from_string)
         );
+    }
+
+    #[test]
+    fn entra_pool_identity_includes_tenant_object_user_source_and_cli_path() {
+        // given
+        let base = entra_params();
+        let base_key = build_connection_key(&base);
+        let variants = [
+            ("tenant_id", "00000000-0000-0000-0000-0000000000a9"),
+            ("entra_object_id", "00000000-0000-0000-0000-0000000000b9"),
+            ("azure_cli_path", "/opt/azure/az"),
+            ("auth_source", "other_source"),
+        ]
+        .map(|(key, value)| {
+            let mut changed = base.clone();
+            changed.extra.insert(key.into(), value.into());
+            changed
+        });
+        let mut other_user = base.clone();
+        other_user.username = Some("other@example.com".into());
+
+        // when
+        let keys = variants
+            .iter()
+            .map(build_connection_key)
+            .collect::<Vec<_>>();
+        let user_key = build_connection_key(&other_user);
+
+        // then
+        assert!(keys.iter().all(|key| *key != base_key));
+        assert_ne!(user_key, base_key);
+        assert!(base_key.contains("azure_cli"));
+    }
+
+    #[test]
+    fn entra_pool_identity_includes_host_and_port_with_connection_id() {
+        // given
+        let base = entra_params();
+        let base_key = build_connection_key(&base);
+        let mut other_host = base.clone();
+        other_host.host = Some("other.database.windows.net".into());
+        let mut other_port = base.clone();
+        other_port.port = Some(1444);
+
+        // when
+        let host_key = build_connection_key(&other_host);
+        let port_key = build_connection_key(&other_port);
+
+        // then
+        assert_ne!(base_key, host_key);
+        assert_ne!(base_key, port_key);
+    }
+
+    #[test]
+    fn entra_pool_identity_is_unambiguous_across_field_boundaries() {
+        // given
+        let mut first = entra_params();
+        first.username = Some("a".into());
+        first.extra.insert("tenant_id".into(), "bc".into());
+        let mut second = entra_params();
+        second.username = Some("ab".into());
+        second.extra.insert("tenant_id".into(), "c".into());
+
+        // when
+        let first_key = build_connection_key(&first);
+        let second_key = build_connection_key(&second);
+
+        // then
+        assert_ne!(first_key, second_key);
+    }
+
+    #[test]
+    fn entra_pool_identity_keeps_sql_and_integrated_keys_unchanged() {
+        // given
+        let mut sql = params(None);
+        sql.auth_mode = Some("sql_password".into());
+
+        // when
+        let key = build_connection_key(&sql);
+
+        // then
+        assert_eq!(
+            key,
+            "sqlserver:localhost:1433:master:auth:sql:sa:ssl:prefer"
+        );
+    }
+
+    #[tokio::test]
+    async fn entra_pool_creation_rejects_incomplete_identity_settings() {
+        // given
+        let mut invalid = entra_params();
+        invalid.extra.remove("entra_object_id");
+        invalid.connection_id = Some(uuid::Uuid::new_v4().to_string());
+
+        // when
+        let actual = get_sqlserver_pool(&invalid).await;
+
+        // then
+        assert!(actual.is_err());
     }
 }

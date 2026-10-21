@@ -140,7 +140,8 @@ pub async fn lock(
             "The physical session connection or principal does not match",
         ));
     }
-    context.validate_auth(params, scope.remaining()?)?;
+    scope.remaining()?;
+    context.validate_auth(params)?;
     Ok(slot)
 }
 pub async fn forget(handle: &str) {

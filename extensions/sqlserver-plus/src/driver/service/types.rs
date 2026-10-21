@@ -1,11 +1,11 @@
 use super::ServiceError;
+use crate::driver::azure_cli_auth::AzureCliAuth;
 use crate::models::ConnectionParams;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
 pub const FRAME_LIMIT: usize = 16 * 1024 * 1024 - 64 * 1024;
 pub const SESSION_IDLE_MS: u64 = 300_000;
-pub const SQL_SCOPE: &str = "https://database.windows.net/.default";
 pub fn valid_rpc_id(id: &Value) -> bool {
     match id {
         Value::Null => true,
@@ -19,19 +19,7 @@ pub fn valid_rpc_id(id: &Value) -> bool {
 #[derive(Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TransientAuth {
-    DbPassword {
-        password: String,
-        identity: String,
-    },
-    EntraToken {
-        access_token: String,
-        expires_at_ms: u64,
-        identity: String,
-        tenant_id: String,
-        client_id: String,
-        principal_id: String,
-        scope: String,
-    },
+    DbPassword { password: String, identity: String },
 }
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -52,17 +40,17 @@ fn deadline() -> u64 {
 fn read_only() -> bool {
     true
 }
-pub fn unix_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .try_into()
-        .unwrap_or(u64::MAX)
-}
 impl DriverContext {
     fn parse_context(params: &Value) -> Result<Self, ServiceError> {
         only_keys(params, &["params", "driver_context", "input"])?;
+        if params["driver_context"]["auth"]["kind"]
+            .as_str()
+            .is_some_and(|kind| kind.starts_with("entra"))
+        {
+            return Err(ServiceError::argument(
+                "Host-supplied Entra tokens are not accepted; the driver acquires its own",
+            ));
+        }
         let context: Self = serde_json::from_value(params["driver_context"].clone())
             .map_err(|_| ServiceError::argument("A valid driver context is required"))?;
         if context.protocol_version != 1 {
@@ -107,11 +95,7 @@ impl DriverContext {
         }
         Ok((context, connection))
     }
-    pub fn validate_auth(
-        &self,
-        params: &ConnectionParams,
-        remaining_ms: u64,
-    ) -> Result<(), ServiceError> {
+    pub fn validate_auth(&self, params: &ConnectionParams) -> Result<(), ServiceError> {
         match (
             params.auth_mode.as_deref().unwrap_or("sql_password"),
             &self.auth,
@@ -125,67 +109,32 @@ impl DriverContext {
             {
                 Ok(())
             }
-            (
-                "entra_user" | "entra_service_principal",
-                Some(TransientAuth::EntraToken {
-                    access_token,
-                    expires_at_ms,
-                    identity,
-                    tenant_id,
-                    client_id,
-                    principal_id,
-                    scope,
-                }),
-            ) => {
-                if access_token.is_empty()
-                    || [identity, tenant_id, client_id, principal_id]
-                        .iter()
-                        .any(|v| v.is_empty())
-                    || scope != SQL_SCOPE
-                    || params.extra.get("tenant_id").is_none_or(|v| v != tenant_id)
-                    || params.extra.get("client_id").is_none_or(|v| v != client_id)
-                {
-                    return Err(ServiceError::new(
-                        "AUTH_REQUIRED",
-                        "The transient Entra context does not match this connection",
-                    ));
-                }
-                if *expires_at_ms
-                    <= unix_ms()
-                        .saturating_add(remaining_ms)
-                        .saturating_add(300_000)
-                {
-                    return Err(ServiceError::new(
-                        "AUTH_EXPIRED",
-                        "Refresh the Entra token before this request",
-                    ));
-                }
-                Ok(())
-            }
+            ("entra_user", None) => entra_auth(params).map(|_| ()),
+            ("entra_user", Some(_)) => Err(ServiceError::argument(
+                "Entra connections must not carry transient authentication",
+            )),
             _ => Err(ServiceError::new(
                 "AUTH_REQUIRED",
                 "A matching transient authentication context is required",
             )),
         }
     }
-    pub fn identity(&self) -> Value {
+    pub fn identity(&self, params: &ConnectionParams) -> Value {
         match &self.auth {
             Some(TransientAuth::DbPassword { identity, .. }) => {
                 json!({"kind":"db_password","identity":identity})
             }
-            Some(TransientAuth::EntraToken {
-                identity,
-                tenant_id,
-                client_id,
-                principal_id,
-                scope,
-                ..
-            }) => {
-                json!({"kind":"entra_token","identity":identity,"tenant_id":tenant_id,"client_id":client_id,"principal_id":principal_id,"scope":scope})
-            }
-            None => json!({"kind":"integrated"}),
+            None => match entra_auth(params) {
+                Ok(Some(auth)) => json!({"kind":"entra_user","identity":auth.identity_parts()}),
+                _ => json!({"kind":"integrated"}),
+            },
         }
     }
+}
+/// Driver-owned Entra identity for this connection, if it uses `entra_user`.
+pub fn entra_auth(params: &ConnectionParams) -> Result<Option<AzureCliAuth>, ServiceError> {
+    AzureCliAuth::from_connection_params(params, &crate::settings::current())
+        .map_err(|_| ServiceError::argument("Invalid Entra connection settings"))
 }
 pub fn only_keys(value: &Value, keys: &[&str]) -> Result<(), ServiceError> {
     let object = value

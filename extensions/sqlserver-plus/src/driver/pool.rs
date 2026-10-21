@@ -4,7 +4,9 @@
 //! protocol implementation behind a tiberius-compatible API) via a custom
 //! deadpool manager.
 //!
-//! Auth is username/password or Windows/Kerberos (`integrated_auth`). TLS
+//! Auth is username/password, Windows/Kerberos (`integrated_auth`), or
+//! Entra user authentication through Azure CLI (`auth_mode=entra_user`), where
+//! the manager acquires a fresh token for every new physical connection. TLS
 //! uses Tabularis' shared `ssl_mode`: `disable` turns encryption off,
 //! `verify-full` requires the system trust store and hostname verification,
 //! `require` encrypts while accepting the server certificate, and `prefer`
@@ -14,6 +16,7 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::connection::{custom_ca_error, resolve_connection_params};
+use crate::driver::azure_cli_auth::AzureCliAuth;
 use crate::driver::error::{bridge_error_requires_discard, format_bridge_error};
 use crate::models::ConnectionParams;
 use crate::settings::PluginSettings;
@@ -121,6 +124,7 @@ pub struct BridgeManager {
     ssl_mode: String,
     connect_timeout: Duration,
     query_timeout_seconds: Option<u32>,
+    azure_cli_auth: Option<AzureCliAuth>,
 }
 
 impl BridgeManager {
@@ -138,7 +142,30 @@ impl BridgeManager {
             query_timeout_seconds: settings
                 .query_timeout()
                 .map(|_| settings.query_timeout_seconds),
+            azure_cli_auth: None,
         }
+    }
+
+    /// Acquire an Entra token through Azure CLI for each new physical
+    /// connection instead of using the SQL credentials in the base config.
+    pub fn with_azure_cli_auth(mut self, auth: AzureCliAuth) -> Self {
+        self.azure_cli_auth = Some(auth);
+        self
+    }
+
+    /// Config for one new physical connection. The token lives only in the
+    /// returned clone and is never stored in the manager.
+    async fn connection_config(&self) -> Result<Config, Error> {
+        let Some(auth) = &self.azure_cli_auth else {
+            return Ok(self.config.clone());
+        };
+        let token = auth
+            .acquire_access_token()
+            .await
+            .map_err(|message| Error::Conversion(message.into()))?;
+        let mut config = self.config.clone();
+        config.authentication(AuthMethod::aad_token(token.expose()));
+        Ok(config)
     }
 
     async fn apply_startup_script(&self, conn: &mut BridgeConnection) -> Result<(), Error> {
@@ -155,14 +182,22 @@ impl Manager for BridgeManager {
     type Error = Error;
 
     async fn create(&self) -> Result<Self::Type, Self::Error> {
-        let client = timeout(self.connect_timeout, Client::connect(&self.config))
-            .await
-            .map_err(|_| {
-                Error::Conversion(format!(
-                    "Connection timed out after {} seconds",
-                    self.connect_timeout.as_secs()
-                ))
-            })??;
+        let connect = async {
+            let config = self.connection_config().await?;
+            if self.azure_cli_auth.is_some() {
+                Client::connect(&config)
+                    .await
+                    .map_err(|_| Error::Conversion("SQL Server connection failed".into()))
+            } else {
+                Client::connect(&config).await
+            }
+        };
+        let client = timeout(self.connect_timeout, connect).await.map_err(|_| {
+            Error::Conversion(format!(
+                "Connection timed out after {} seconds",
+                self.connect_timeout.as_secs()
+            ))
+        })??;
         let mut connection = BridgeConnection {
             client,
             query_timeout_seconds: self.query_timeout_seconds,
@@ -209,7 +244,10 @@ impl Manager for BridgeManager {
 ///
 /// Consumes the shared connection fields used by current Tabularis drivers.
 /// Uses `AuthMethod::Integrated` when `integrated_auth` is set, else
-/// username/password. TLS maps `ssl_mode` onto the bridge's encryption policy.
+/// username/password. `entra_user` validates its Azure CLI settings and leaves
+/// an empty token placeholder that `BridgeManager` replaces per connection, so
+/// a bypassed manager fails instead of falling back to SQL authentication.
+/// TLS maps `ssl_mode` onto the bridge's encryption policy.
 pub fn build_config(
     params: &ConnectionParams,
     settings: &PluginSettings,
@@ -218,18 +256,14 @@ pub fn build_config(
     if crate::connection::is_azure_sql(&params) && settings.trust_server_certificate {
         return Err("Azure SQL cannot trust an unverified server certificate".into());
     }
-    if params
-        .auth_mode
-        .as_deref()
-        .is_some_and(|mode| mode.starts_with("entra_"))
-    {
-        return Err("Entra authentication requires a transient service driver context".into());
-    }
+    let entra = AzureCliAuth::from_connection_params(&params, settings)?.is_some();
     let mut cfg = Config::new();
     cfg.host(params.host.as_deref().unwrap_or("localhost"));
     cfg.port(params.port.unwrap_or(1433));
     cfg.database(params.database.primary());
-    if params.integrated_auth {
+    if entra {
+        cfg.authentication(AuthMethod::aad_token(""));
+    } else if params.integrated_auth {
         cfg.authentication(AuthMethod::Integrated);
     } else {
         cfg.authentication(AuthMethod::sql_server(

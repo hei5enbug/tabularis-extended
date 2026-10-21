@@ -4,6 +4,7 @@
 //! The driver supports schema introspection, table/view DDL, foreign keys,
 //! triggers, and stored-routine management.
 
+pub mod azure_cli_auth;
 pub mod blob;
 pub mod ddl;
 pub mod error;
