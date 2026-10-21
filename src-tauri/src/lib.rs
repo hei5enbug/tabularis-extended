@@ -47,6 +47,7 @@ pub mod connection_window;
 #[cfg(test)]
 pub mod connection_window_tests;
 pub mod credential_cache;
+pub mod driver_remap;
 pub mod dump_commands; // Added
 #[cfg(test)]
 pub mod dump_commands_tests;
@@ -97,6 +98,7 @@ pub mod pool_manager;
 #[cfg(test)]
 pub mod pool_manager_tests;
 pub mod preferences;
+pub mod profile_import;
 pub mod proxy;
 pub mod query_history;
 #[cfg(test)]
@@ -790,6 +792,9 @@ pub fn run() {
             plugins::commands::fetch_plugin_readme,
             plugins::deep_link::consume_pending_deep_link_install,
             plugins::manager::get_plugin_startup_errors,
+            profile_import::official_profile_import_status,
+            profile_import::import_official_profile,
+            driver_remap::remap_connections_to_plus_drivers,
             plugins::runtime_version::get_plugin_runtime_warnings,
             // JSON Viewer
             json_viewer::open_json_viewer_window,

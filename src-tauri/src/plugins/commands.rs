@@ -283,6 +283,7 @@ pub async fn install_plugin(
         .map_err(|e| format!("Plugin installed but failed to load: {}", e))?;
 
     crate::plugins::connection_metadata::notify_plugin_reload(&app, &plugin_id).await;
+    crate::driver_remap::after_plugin_install(&app, &plugin_id).await;
 
     Ok(())
 }
