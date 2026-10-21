@@ -1,0 +1,721 @@
+//! Value binding for INSERT/UPDATE — converts JSON values into SQL fragments
+//! and typed bind parameters, matching the built-in driver's binding cascade
+//! exactly (`src-tauri/src/drivers/postgres/binding.rs`).
+//!
+//! Why the explicit `Type` matters: `tokio-postgres`'s `prepare_typed` lets
+//! the caller pin a placeholder's wire type instead of letting the server
+//! infer it from query context. When a bound value's natural Rust type
+//! (e.g. `String`) doesn't match what the surrounding SQL implies (e.g.
+//! `CAST($N AS uuid)`), the client-side check rejects the bind before the
+//! value reaches PostgreSQL's own parser. The fix: emit `CAST($N AS <target>)`
+//! in the SQL text and pin the placeholder's `Type` to `TEXT` so tokio-postgres
+//! doesn't fight the CAST.
+
+use rust_decimal::Decimal;
+use serde_json::Value;
+use std::collections::HashMap;
+use tokio_postgres::types::{Kind, ToSql, Type};
+use uuid::Uuid;
+
+pub type PgParam = Box<dyn ToSql + Sync + Send>;
+pub type TypedPgParam = (PgParam, Type);
+
+pub struct BoundValue {
+    pub sql: String,
+    pub param: Option<TypedPgParam>,
+}
+
+impl std::fmt::Debug for BoundValue {
+    // `dyn ToSql + Sync` isn't Debug, so a derive won't work — show just the
+    // SQL fragment and whether a parameter is bound (sufficient for
+    // .unwrap_err() panic messages and test assertion failures).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoundValue")
+            .field("sql", &self.sql)
+            .field("param", &self.param.as_ref().map(|(_, ty)| ty.clone()))
+            .finish()
+    }
+}
+
+#[derive(Default)]
+pub struct BindOptions<'a> {
+    pub column_type: Option<&'a str>,
+    /// Schema-qualified, already-quoted enum type name (e.g. `"public"."mood"`)
+    /// when the target column is a PostgreSQL enum; `None` otherwise. Drives
+    /// the `CAST($N AS <enum>)` coercion in [`bind_pg_enum_string`].
+    pub enum_type: Option<&'a str>,
+    pub allow_default: bool,
+    /// Real OID of the `hstore` type for this database, when `column_type`
+    /// is `"hstore"` — required because hstore has no well-known Postgres
+    /// OID and varies per installation. `None` when the column isn't
+    /// hstore, or resolution failed (surfaced as an error at bind time).
+    pub hstore_oid: Option<u32>,
+}
+
+const USE_DEFAULT_SENTINEL: &str = "__USE_DEFAULT__";
+
+/// Normalize a column type string: strip a trailing `(...)` and uppercase.
+/// e.g. `"varchar(255)"` -> `"VARCHAR"`.
+fn extract_base_type(column_type: &str) -> String {
+    let base = column_type.split('(').next().unwrap_or(column_type);
+    base.trim().to_uppercase()
+}
+
+/// Bind a JSON value to a SQL fragment + optional typed parameter.
+pub fn bind_pg_value(
+    value: Value,
+    placeholder_idx: usize,
+    options: &BindOptions,
+) -> Result<BoundValue, String> {
+    let base_type = options.column_type.map(extract_base_type);
+
+    // hstore column — bind before the JSON/JSONB check below, since a JSON
+    // object destined for hstore must NOT go through the JSON ToSql path.
+    if options.column_type == Some("hstore") {
+        return bind_pg_hstore(value, placeholder_idx, options.hstore_oid);
+    }
+
+    // JSON/JSONB columns receiving a native JSON value (object/array/number/bool)
+    // must bind the value's own ToSql JSON encoding — a text CAST trips an OID
+    // mismatch for json/jsonb columns.
+    if let Some(ref bt) = base_type {
+        if (bt == "JSON" || bt == "JSONB") && !matches!(value, Value::String(_) | Value::Null) {
+            let ty = if bt == "JSONB" {
+                Type::JSONB
+            } else {
+                Type::JSON
+            };
+            return Ok(BoundValue {
+                sql: format!("${}", placeholder_idx),
+                param: Some((Box::new(value), ty)),
+            });
+        }
+    }
+
+    match value {
+        Value::Number(n) => bind_pg_number(n, placeholder_idx),
+        Value::String(s) => bind_pg_string(&s, placeholder_idx, options, base_type.as_deref()),
+        Value::Bool(b) => Ok(BoundValue {
+            sql: format!("${}", placeholder_idx),
+            param: Some((Box::new(b), Type::BOOL)),
+        }),
+        Value::Null => Ok(BoundValue {
+            sql: "NULL".to_string(),
+            param: None,
+        }),
+        Value::Array(arr) => {
+            let literal = json_array_to_pg_literal(&arr)?;
+            Ok(BoundValue {
+                sql: literal,
+                param: None,
+            })
+        }
+        Value::Object(_) => Err("Cannot bind a JSON object to a non-JSON column".to_string()),
+    }
+}
+
+/// Binds a JSON object to an hstore column as `HashMap<String, Option<String>>`,
+/// which `tokio-postgres` encodes natively via its built-in hstore `ToSql` impl.
+/// Requires the real OID of the `hstore` type in this database (extension-defined,
+/// not a well-known Postgres OID) so the placeholder's `Type` pins it correctly.
+/// Ported from `tabularis#427`'s `bind_pg_hstore`.
+fn bind_pg_hstore(
+    value: Value,
+    placeholder_idx: usize,
+    hstore_oid: Option<u32>,
+) -> Result<BoundValue, String> {
+    let map = match value {
+        Value::Null => {
+            return Ok(BoundValue {
+                sql: "NULL".to_string(),
+                param: None,
+            });
+        }
+        Value::Object(map) => map,
+
+        // The grid's plain-text cell editor doesn't yet know about hstore, so it
+        // may round-trip the value as a JSON-encoded string rather than an
+        // object. Accept that shape here so editing still works.
+        Value::String(s) => match serde_json::from_str::<Value>(&s) {
+            Ok(Value::Object(map)) => map,
+            _ => {
+                return Err(format!(
+                    "hstore column requires a JSON object value, got a string that is not valid JSON: {:?}",
+                    s
+                ));
+            }
+        },
+        other => {
+            return Err(format!(
+                "hstore column requires a JSON object value, got {:?}",
+                other
+            ));
+        }
+    };
+
+    let oid = hstore_oid.ok_or_else(|| {
+        "Could not resolve the hstore type OID; is the hstore extension installed?".to_string()
+    })?;
+    let hmap = hstore_map_from_json_object(map)?;
+    let pg_type = Type::new(
+        "hstore".to_string(),
+        oid,
+        Kind::Simple,
+        "public".to_string(),
+    );
+    Ok(BoundValue {
+        sql: format!("${}", placeholder_idx),
+        param: Some((Box::new(hmap), pg_type)),
+    })
+}
+
+/// Converts a JSON object into the `HashMap<String, Option<String>>` shape that
+/// `tokio-postgres` encodes natively as hstore. Every value must be a string or
+/// null — hstore itself only stores text, so numbers/bools/nested objects have no
+/// unambiguous representation and are rejected with a message naming the offending key.
+fn hstore_map_from_json_object(
+    map: serde_json::Map<String, Value>,
+) -> Result<HashMap<String, Option<String>>, String> {
+    let mut hmap = HashMap::with_capacity(map.len());
+    for (k, v) in map {
+        let val = match v {
+            Value::String(s) => Some(s),
+            Value::Null => None,
+            other => {
+                return Err(format!(
+                    "hstore value for key '{}' must be a string or null, got {:?}",
+                    k, other
+                ));
+            }
+        };
+        hmap.insert(k, val);
+    }
+    Ok(hmap)
+}
+
+fn bind_pg_number(n: serde_json::Number, placeholder_idx: usize) -> Result<BoundValue, String> {
+    if let Some(i) = n.as_i64() {
+        Ok(BoundValue {
+            sql: format!("CAST(${} AS bigint)", placeholder_idx),
+            param: Some((Box::new(i), Type::INT8)),
+        })
+    } else if let Some(f) = n.as_f64() {
+        Ok(BoundValue {
+            sql: format!("CAST(${} AS double precision)", placeholder_idx),
+            param: Some((Box::new(f), Type::FLOAT8)),
+        })
+    } else {
+        Err("Unsupported numeric value".to_string())
+    }
+}
+
+fn bind_pg_string(
+    s: &str,
+    placeholder_idx: usize,
+    options: &BindOptions,
+    base_type: Option<&str>,
+) -> Result<BoundValue, String> {
+    // 1. DEFAULT sentinel (update only)
+    if options.allow_default && s == USE_DEFAULT_SENTINEL {
+        return Ok(BoundValue {
+            sql: "DEFAULT".to_string(),
+            param: None,
+        });
+    }
+
+    // 2. pgvector column (`vector`/`halfvec`/`sparsevec`) — must run before
+    // the blob/array heuristics below: "[1,2,3]" would otherwise be turned
+    // into a PostgreSQL ARRAY[...] literal by the array-literal step, and
+    // pgvector has no text->vector cast for a bound parameter.
+    if let Some(bt) = base_type {
+        if let Some(bound) = bind_pg_vector_string(s, bt) {
+            return bound;
+        }
+    }
+
+    // 3. Blob wire format — must run before the boolean/numeric heuristics
+    // below, since a base64 blob string could otherwise look like a
+    // plausible (if garbage) numeric/boolean value for a mistyped column.
+    if let Some(bytes) = decode_blob_wire_format(s) {
+        return Ok(BoundValue {
+            sql: format!("${}", placeholder_idx),
+            param: Some((Box::new(bytes), Type::BYTEA)),
+        });
+    }
+
+    // 4. Enum column — always coerces through its own type. Any of the later
+    // shape-based heuristics (uuid-shaped, array-shaped strings) would
+    // otherwise misinterpret a label that merely looks like one of those.
+    if let Some(enum_type) = options.enum_type {
+        return Ok(bind_pg_enum_string(s, enum_type, placeholder_idx));
+    }
+
+    // 5. Boolean column
+    if matches!(base_type, Some("BOOLEAN") | Some("BOOL")) {
+        let lower = s.trim().to_lowercase();
+        let b = match lower.as_str() {
+            "true" | "t" | "yes" | "y" | "on" | "1" => true,
+            "false" | "f" | "no" | "n" | "off" | "0" => false,
+            _ => {
+                return Err(format!(
+                    "Cannot bind '{}' as boolean for target type BOOLEAN",
+                    s
+                ))
+            }
+        };
+        return Ok(BoundValue {
+            sql: format!("${}", placeholder_idx),
+            param: Some((Box::new(b), Type::BOOL)),
+        });
+    }
+
+    // 6. Numeric column
+    if let Some(bt) = base_type {
+        if let Some(bound) = bind_pg_numeric_string(s, bt, placeholder_idx) {
+            return bound;
+        }
+    }
+
+    // 7. Temporal column
+    if let Some(bt) = base_type {
+        if let Some(bound) = bind_pg_temporal_string(s, bt, placeholder_idx) {
+            return bound;
+        }
+    }
+
+    // 8. Raw SQL function passthrough (e.g. `ST_GeomFromText('POINT(1 2)', 4326)`)
+    // — inlined verbatim, no bound parameter, so the function actually
+    // executes server-side instead of being stored as its literal text.
+    if is_raw_sql_function(s) {
+        return Ok(BoundValue {
+            sql: s.to_string(),
+            param: None,
+        });
+    }
+
+    // 9. WKT geometry literal (e.g. `POINT(1 2)`) — wrapped in
+    // `ST_GeomFromText($N)` so PostGIS parses it into a geometry instead of
+    // storing the raw WKT text.
+    if is_wkt_geometry(s) {
+        return Ok(BoundValue {
+            sql: format!("ST_GeomFromText(${})", placeholder_idx),
+            param: Some((Box::new(s.to_string()), Type::TEXT)),
+        });
+    }
+
+    // 10. UUID shape (value-based fallback, independent of column type)
+    if s.parse::<Uuid>().is_ok() {
+        return Ok(BoundValue {
+            sql: format!("CAST(${} AS uuid)", placeholder_idx),
+            param: Some((Box::new(s.to_string()), Type::TEXT)),
+        });
+    }
+
+    // 11. PG array literal (JSON array embedded in a string, e.g. "[1,2,3]")
+    let trimmed = s.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if let Ok(Value::Array(arr)) = serde_json::from_str::<Value>(trimmed) {
+            let literal = json_array_to_pg_literal(&arr)?;
+            return Ok(BoundValue {
+                sql: literal,
+                param: None,
+            });
+        }
+    }
+
+    // 12. Final fallback: plain TEXT
+    Ok(BoundValue {
+        sql: format!("${}", placeholder_idx),
+        param: Some((Box::new(s.to_string()), Type::TEXT)),
+    })
+}
+
+/// Bind a value into an enum column via `CAST($N AS <qualified_enum>)`.
+/// The placeholder is pinned to `TEXT` so tokio-postgres does not reject the
+/// bound `String` client-side before the CAST resolves it server-side.
+/// `qualified_enum` must already be quoted (see `quote_qualified_type` in
+/// `client.rs`) so it cannot become a SQL-injection vector.
+fn bind_pg_enum_string(s: &str, qualified_enum: &str, placeholder_idx: usize) -> BoundValue {
+    BoundValue {
+        sql: format!("CAST(${} AS {})", placeholder_idx, qualified_enum),
+        param: Some((Box::new(s.to_string()), Type::TEXT)),
+    }
+}
+
+/// Bind a value into a pgvector column (`vector`, `halfvec`, `sparsevec`).
+///
+/// pgvector registers no `text -> vector` cast, so a bound TEXT parameter —
+/// even via `CAST($N AS vector)` — is rejected by PostgreSQL. The literal
+/// only reaches the type's input function when it arrives as an
+/// *unknown*-typed literal, so it's inlined as `'<value>'::<type>`. To keep
+/// that safe, the value is validated against a strict allow-list of
+/// characters that make up a vector literal; a non-pgvector column returns
+/// `None` so the caller falls through to its normal binding logic. Ported
+/// from the builtin driver's `bind_pg_vector_string`.
+fn bind_pg_vector_string(s: &str, base_type: &str) -> Option<Result<BoundValue, String>> {
+    let pg_type = match base_type {
+        "VECTOR" => "vector",
+        "HALFVEC" => "halfvec",
+        "SPARSEVEC" => "sparsevec",
+        _ => return None,
+    };
+
+    let trimmed = s.trim();
+
+    // Characters that can legitimately appear in a vector / halfvec /
+    // sparsevec literal: digits, sign, decimal point, exponent marker, the
+    // bracket/brace delimiters, element separators, the sparsevec index
+    // (':') and dimension ('/') separators, and whitespace. Anything else
+    // cannot be inlined safely.
+    let is_vector_literal = !trimmed.is_empty()
+        && trimmed.chars().all(|c| {
+            c.is_ascii_digit()
+                || matches!(
+                    c,
+                    '+' | '-' | '.' | 'e' | 'E' | '[' | ']' | '{' | '}' | ',' | ':' | '/' | ' '
+                )
+        });
+
+    if !is_vector_literal {
+        return Some(Err(format!(
+            "Invalid {pg_type} value: expected a numeric vector literal such as [1,2,3]"
+        )));
+    }
+
+    Some(Ok(BoundValue {
+        sql: format!("'{trimmed}'::{pg_type}"),
+        param: None,
+    }))
+}
+
+/// Detect a raw SQL function call (e.g. `ST_GeomFromText(...)`) entered as a
+/// cell value — used to insert the call directly into the query text instead
+/// of binding it as a parameter. Ported from the builtin driver's
+/// `is_raw_sql_function`.
+fn is_raw_sql_function(s: &str) -> bool {
+    let trimmed = s.trim().to_uppercase();
+    if trimmed.starts_with("ST_") {
+        return trimmed.contains('(');
+    }
+    trimmed.starts_with("GEOMFROMTEXT(")
+        || trimmed.starts_with("GEOMFROMWKB(")
+        || trimmed.starts_with("POINTFROMTEXT(")
+        || trimmed.starts_with("POINTFROMWKB(")
+}
+
+/// Detect a WKT (Well-Known Text) geometry literal (e.g. `POINT(1 2)`).
+/// Ported from the builtin driver's `is_wkt_geometry`.
+fn is_wkt_geometry(s: &str) -> bool {
+    let s_upper = s.trim().to_uppercase();
+    s_upper.starts_with("POINT(")
+        || s_upper.starts_with("LINESTRING(")
+        || s_upper.starts_with("POLYGON(")
+        || s_upper.starts_with("MULTIPOINT(")
+        || s_upper.starts_with("MULTILINESTRING(")
+        || s_upper.starts_with("MULTIPOLYGON(")
+        || s_upper.starts_with("GEOMETRYCOLLECTION(")
+        || s_upper.starts_with("GEOMETRY(")
+}
+
+/// Decode the canonical BLOB wire format back to raw bytes.
+///
+/// Expected format: `"BLOB:<total_size_bytes>:<mime_type>:<base64_data>"`.
+/// Returns `None` if the string doesn't match, so it falls through to the
+/// rest of the binding cascade as a plain string. Matches
+/// `decode_blob_wire_format` in `src-tauri/src/drivers/common/blob.rs`
+/// (this plugin doesn't yet support the `BLOB_FILE_REF:` variant since
+/// that requires filesystem access outside the scope of value binding).
+fn decode_blob_wire_format(value: &str) -> Option<Vec<u8>> {
+    let rest = value.strip_prefix("BLOB:")?;
+    // Skip the size field, then the mime field.
+    let (_, after_size) = rest.split_once(':')?;
+    let (_, base64_data) = after_size.split_once(':')?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_data).ok()
+}
+
+/// Convert a JSON array to a PostgreSQL `ARRAY[...]` literal string.
+/// Recursively handles nested arrays (multi-dimensional PG arrays).
+fn json_array_to_pg_literal(arr: &[Value]) -> Result<String, String> {
+    // `ARRAY[]` (an ARRAY constructor with no elements) is only accepted
+    // when the target column type is unambiguous — in many contexts
+    // (e.g. INSERT ... VALUES) it's a syntax/type error. `'{}'` is the
+    // canonical PostgreSQL empty-array literal the server always accepts;
+    // it must be quoted — a bare `{}` is itself a syntax error. Matches the
+    // builtin driver's `json_array_to_pg_literal` exactly.
+    if arr.is_empty() {
+        return Ok("'{}'".to_string());
+    }
+
+    let mut parts = Vec::with_capacity(arr.len());
+    for elem in arr {
+        let part = match elem {
+            Value::String(s) => format!("'{}'", s.replace('\'', "''")),
+            Value::Number(n) => n.to_string(),
+            Value::Bool(b) => {
+                if *b {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
+            }
+            Value::Null => "NULL".to_string(),
+            Value::Array(nested) => json_array_to_pg_literal(nested)?,
+            Value::Object(_) => return Err("Unsupported array element type".to_string()),
+        };
+        parts.push(part);
+    }
+    Ok(format!("ARRAY[{}]", parts.join(", ")))
+}
+
+/// Coerce a string value into a numeric PostgreSQL column (`smallint`
+/// through `bigint`, `numeric`/`decimal`, `real`/`double precision`).
+/// Returns `None` if the column is not numeric, so callers can fall through
+/// to the next coercion path. Shared by SET binding (`bind_pg_string`) and
+/// WHERE-predicate binding (`bind_pk_value`) — factored out to match the
+/// builtin driver's `bind_pg_numeric_string`.
+fn bind_pg_numeric_string(
+    s: &str,
+    base_type: &str,
+    placeholder_idx: usize,
+) -> Option<Result<BoundValue, String>> {
+    match base_type {
+        "SMALLINT" | "INTEGER" | "BIGINT" | "INT2" | "INT4" | "INT8" | "SERIAL" | "BIGSERIAL" => {
+            Some(s.parse::<i64>().map_or_else(
+                |_| {
+                    Err(format!(
+                        "Cannot bind '{}' as integer for target type {}",
+                        s, base_type
+                    ))
+                },
+                |i| {
+                    Ok(BoundValue {
+                        sql: format!("CAST(${} AS bigint)", placeholder_idx),
+                        param: Some((Box::new(i), Type::INT8)),
+                    })
+                },
+            ))
+        }
+        "NUMERIC" | "DECIMAL" => Some(s.parse::<Decimal>().map_or_else(
+            |_| {
+                Err(format!(
+                    "Cannot bind '{}' as numeric for target type {}",
+                    s, base_type
+                ))
+            },
+            |d| {
+                Ok(BoundValue {
+                    sql: format!("CAST(${} AS numeric)", placeholder_idx),
+                    param: Some((Box::new(d), Type::NUMERIC)),
+                })
+            },
+        )),
+        "REAL" | "DOUBLE PRECISION" | "FLOAT4" | "FLOAT8" => Some(s.parse::<f64>().map_or_else(
+            |_| {
+                Err(format!(
+                    "Cannot bind '{}' as float for target type {}",
+                    s, base_type
+                ))
+            },
+            |f| {
+                Ok(BoundValue {
+                    sql: format!("CAST(${} AS double precision)", placeholder_idx),
+                    param: Some((Box::new(f), Type::FLOAT8)),
+                })
+            },
+        )),
+        _ => None,
+    }
+}
+
+/// Coerce a string value into a temporal PostgreSQL column (`timestamp`,
+/// `timestamptz`, `date`, `time`, `timetz`, `interval`). Returns `None` if
+/// the column is not temporal. Shared by SET binding and WHERE-predicate
+/// binding — factored out to match the builtin driver's
+/// `bind_pg_temporal_string`.
+fn bind_pg_temporal_string(
+    s: &str,
+    base_type: &str,
+    placeholder_idx: usize,
+) -> Option<Result<BoundValue, String>> {
+    let cast_target = match base_type {
+        "TIMESTAMP" | "TIMESTAMP WITHOUT TIME ZONE" => "timestamp",
+        "TIMESTAMPTZ" | "TIMESTAMP WITH TIME ZONE" => "timestamptz",
+        "DATE" => "date",
+        "TIME" | "TIME WITHOUT TIME ZONE" => "time",
+        "TIMETZ" | "TIME WITH TIME ZONE" => "timetz",
+        "INTERVAL" => "interval",
+        _ => return None,
+    };
+    Some(Ok(BoundValue {
+        sql: format!("CAST(${} AS {})", placeholder_idx, cast_target),
+        param: Some((Box::new(s.to_string()), Type::TEXT)),
+    }))
+}
+
+/// Parse a string back into an `i64` *only* when it represents an integer
+/// outside JavaScript's safe range (`±(2^53 - 1)`, [`crate::extract::JS_MAX_SAFE_INTEGER`]).
+///
+/// The frontend's `JSON.parse` loses precision for integers beyond that
+/// range, so a genuinely large bigint arrives from the UI as a JSON string
+/// rather than a JSON number. This heuristic deliberately ignores small
+/// numeric strings (under 2^53) because those round-trip fine as ordinary
+/// JSON numbers on a genuinely-integer column (handled above by
+/// [`bind_pg_numeric_string`]); treating a small numeric-*shaped* string as
+/// evidence of an integer column on its own — the only signal left once the
+/// column type is unknown — would silently coerce text like `"42"` typed
+/// into a keyless table's `varchar` primary key. Ported from the builtin
+/// driver's `common/safe_int.rs::parse_unsafe_bigint_string`.
+fn parse_unsafe_bigint_string(s: &str) -> Option<i64> {
+    let parsed: i64 = s.parse().ok()?;
+    let safe_range = -crate::extract::JS_MAX_SAFE_INTEGER..=crate::extract::JS_MAX_SAFE_INTEGER;
+    if safe_range.contains(&parsed) {
+        None
+    } else {
+        Some(parsed)
+    }
+}
+
+/// Bind a WHERE-clause value from a PK map entry. Returns the SQL fragment
+/// (may include a CAST) plus the typed parameter — stricter than
+/// `bind_pg_value` for strings: UUID/integer string coercion is only applied
+/// when the column's real type is confirmed (or unknown), matching
+/// `build_pk_predicate` in the built-in driver.
+pub fn bind_pk_value(
+    value: &Value,
+    placeholder_idx: usize,
+    column_type: Option<&str>,
+) -> Result<BoundValue, String> {
+    let base_type = column_type.map(extract_base_type);
+
+    match value {
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(BoundValue {
+                    sql: format!("CAST(${} AS bigint)", placeholder_idx),
+                    param: Some((Box::new(i), Type::INT8)),
+                })
+            } else if let Some(f) = n.as_f64() {
+                Ok(BoundValue {
+                    sql: format!("CAST(${} AS double precision)", placeholder_idx),
+                    param: Some((Box::new(f), Type::FLOAT8)),
+                })
+            } else {
+                Err("Unsupported numeric PK value".to_string())
+            }
+        }
+        Value::String(s) => {
+            let is_uuid_type = base_type.as_deref().is_none_or(|t| t == "UUID");
+            if is_uuid_type {
+                if let Ok(uuid) = s.parse::<Uuid>() {
+                    return Ok(BoundValue {
+                        sql: format!("${}", placeholder_idx),
+                        param: Some((Box::new(uuid), Type::UUID)),
+                    });
+                }
+            }
+
+            // Keyless tables identify rows by every column, so the WHERE
+            // predicate can target numeric/temporal columns whose values
+            // arrive as JSON strings (numeric serializes as string to
+            // preserve arbitrary precision). Route them through the same
+            // coercions as SET binding — a plain TEXT bind trips SQLSTATE
+            // 42883, e.g. "operator does not exist: numeric = text".
+            // Ported from the builtin driver's parity fix
+            // (TabularisDB/tabularis#618).
+            if let Some(bt) = base_type.as_deref() {
+                if let Some(bound) = bind_pg_numeric_string(s, bt, placeholder_idx)
+                    .or_else(|| bind_pg_temporal_string(s, bt, placeholder_idx))
+                {
+                    return bound;
+                }
+            }
+
+            let is_int_type = base_type.as_deref().is_none_or(|t| {
+                matches!(
+                    t,
+                    "SMALLINT" | "INTEGER" | "BIGINT" | "INT2" | "INT4" | "INT8"
+                )
+            });
+            if is_int_type {
+                if let Some(i) = parse_unsafe_bigint_string(s) {
+                    return Ok(BoundValue {
+                        sql: format!("CAST(${} AS bigint)", placeholder_idx),
+                        param: Some((Box::new(i), Type::INT8)),
+                    });
+                }
+            }
+
+            Ok(BoundValue {
+                sql: format!("${}", placeholder_idx),
+                param: Some((Box::new(s.clone()), Type::TEXT)),
+            })
+        }
+        // Keyless tables identify rows by every comparable column, so the map
+        // may legitimately carry NULLs — `= NULL` never matches, so emit
+        // `IS NULL` and bind no parameter (the placeholder index is not
+        // consumed). `build_pk_map_predicate` formats this directly as
+        // `"col" IS NULL` rather than the `"col" = <rhs>` shape, since there is
+        // no valid rhs for a NULL comparison. Mirrors the builtin driver's
+        // `build_pk_predicate` `Null` arm (`TabularisDB/tabularis` `binding.rs`).
+        Value::Null => Ok(BoundValue {
+            sql: "IS NULL".to_string(),
+            param: None,
+        }),
+        // A table keyed by (or including) a boolean column binds natively as
+        // BOOL — unlike Null, this produces a valid `"col" = <rhs>` shape, so
+        // it needs no special handling in `build_pk_map_predicate`. Mirrors
+        // the builtin driver's `build_pk_predicate` `Bool` arm.
+        Value::Bool(b) => Ok(BoundValue {
+            sql: format!("${}", placeholder_idx),
+            param: Some((Box::new(*b), Type::BOOL)),
+        }),
+        _ => Err("Unsupported PK type".to_string()),
+    }
+}
+
+/// Build a compound `WHERE` predicate from every entry of a pk_map, sorted
+/// alphabetically by key for determinism (matches the builtin's composite-PK
+/// ordering). Returns the predicate string (e.g. `"a" = $1 AND "b" = $2`) and
+/// the typed parameters, starting at `placeholder_idx`. Shared by
+/// update_record, delete_record, save_blob_to_file, and fetch_blob_as_data_url
+/// — every method that identifies one row by primary key.
+pub fn build_pk_map_predicate(
+    pk_map: &serde_json::Map<String, Value>,
+    column_types: &std::collections::HashMap<String, String>,
+    placeholder_idx: usize,
+) -> Result<(String, Vec<TypedPgParam>), String> {
+    if pk_map.is_empty() {
+        return Err("pk_map must not be empty".to_string());
+    }
+
+    let mut keys: Vec<&String> = pk_map.keys().collect();
+    keys.sort();
+
+    let mut predicates: Vec<String> = Vec::with_capacity(keys.len());
+    let mut owned_params: Vec<TypedPgParam> = Vec::new();
+    let mut idx = placeholder_idx;
+
+    for key in keys {
+        let val = &pk_map[key];
+
+        // A NULL key value is `IS NULL`, not `"col" = IS NULL` — the `=`
+        // prefix only applies to non-null rhs values. `bind_pk_value` returns
+        // `IS NULL` with no parameter for `Value::Null`; format it directly so
+        // the predicate reads `"col" IS NULL` and consumes no placeholder.
+        // Matches the builtin driver's `build_pk_predicate` `Null` arm.
+        if val.is_null() {
+            predicates.push(format!("\"{}\" IS NULL", key.replace('"', "\"\"")));
+            continue;
+        }
+
+        let pk_type = column_types.get(key).map(String::as_str);
+        let bound = bind_pk_value(val, idx, pk_type)?;
+        predicates.push(format!("\"{}\" = {}", key.replace('"', "\"\""), bound.sql));
+        if let Some(param) = bound.param {
+            owned_params.push(param);
+            idx += 1;
+        }
+    }
+
+    Ok((predicates.join(" AND "), owned_params))
+}

@@ -1,0 +1,1321 @@
+//! Schema discovery and metadata handlers.
+
+use serde_json::{json, Value};
+
+use crate::client;
+use crate::models::{inner_params, ConnectionParams};
+use crate::rpc::{error_response, not_implemented, ok_response};
+
+pub async fn get_databases(id: Value, params: &Value) -> Value {
+    let mut conn_params = ConnectionParams::from_value(inner_params(params));
+    // Must connect to 'postgres' maintenance DB to list all databases.
+    conn_params.database = Some("postgres".to_string());
+
+    match client::query_strings(
+        &conn_params,
+        "SELECT datname::text FROM pg_database WHERE datistemplate = false ORDER BY datname",
+        &[],
+        "datname",
+    )
+    .await
+    {
+        Ok(databases) => ok_response(id, json!(databases)),
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_schemas(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+
+    match client::query_strings(
+        &conn_params,
+        "SELECT schema_name::text FROM information_schema.schemata \
+         WHERE schema_name NOT IN ('pg_catalog', 'information_schema', 'pg_toast') \
+         AND schema_name NOT LIKE 'pg_temp_%' \
+         AND schema_name NOT LIKE 'pg_toast_temp_%' \
+         ORDER BY schema_name",
+        &[],
+        "schema_name",
+    )
+    .await
+    {
+        Ok(schemas) => ok_response(id, json!(schemas)),
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_tables(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    match fetch_tables(&conn_params, schema).await {
+        Ok(tables) => ok_response(id, json!(tables)),
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+/// Shared by `get_tables` and `get_schema_snapshot` — both need the
+/// schema's base tables (name + optional comment).
+async fn fetch_tables(conn_params: &ConnectionParams, schema: &str) -> Result<Vec<Value>, String> {
+    let query = r#"
+        SELECT t.table_name::text AS name, d.description::text AS comment
+        FROM information_schema.tables t
+        JOIN pg_namespace n ON n.nspname = t.table_schema
+        JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = t.table_name
+        LEFT JOIN pg_description d
+            ON d.objoid = c.oid
+            AND d.classoid = 'pg_class'::regclass
+            AND d.objsubid = 0
+        WHERE t.table_schema = $1 AND t.table_type = 'BASE TABLE'
+        ORDER BY t.table_name ASC
+    "#;
+
+    let rows = client::query_rows(conn_params, query, &[&schema]).await?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let name: String = r.try_get("name").unwrap_or_default();
+            let comment: Option<String> = r.try_get("comment").ok().flatten();
+            let mut table = json!({"name": name});
+            if let Some(c) = comment {
+                table
+                    .as_object_mut()
+                    .unwrap()
+                    .insert("comment".to_string(), json!(c));
+            }
+            table
+        })
+        .collect())
+}
+
+pub async fn get_columns(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let table = params.get("table").and_then(Value::as_str).unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    match fetch_table_columns(&conn_params, table, schema).await {
+        Ok(columns) => ok_response(id, json!(columns)),
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+/// Shared by `get_columns` and `get_table_ddl` — both need the same
+/// per-column metadata (name, type, nullability, PK membership, ...).
+async fn fetch_table_columns(
+    conn_params: &ConnectionParams,
+    table: &str,
+    schema: &str,
+) -> Result<Vec<Value>, String> {
+    let query = r#"
+        SELECT
+            c.column_name::text,
+            CASE
+                WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name::text
+                ELSE c.data_type::text
+            END AS data_type,
+            c.is_nullable::text,
+            c.column_default::text,
+            c.is_identity::text,
+            c.character_maximum_length,
+            d.description::text AS comment,
+            (SELECT string_agg('''' || replace(e.enumlabel, '''', '''''') || '''', ',' ORDER BY e.enumsortorder)
+             FROM pg_enum e
+             JOIN pg_type t ON t.oid = e.enumtypid
+             JOIN pg_namespace tn ON tn.oid = t.typnamespace
+             WHERE t.typname = c.udt_name AND tn.nspname = c.udt_schema) AS enum_values,
+            EXISTS (
+                SELECT 1
+                FROM pg_constraint pk_con
+                JOIN pg_class pk_table ON pk_table.oid = pk_con.conrelid
+                JOIN pg_namespace pk_schema ON pk_schema.oid = pk_table.relnamespace
+                JOIN unnest(pk_con.conkey) AS pk_col(attnum) ON true
+                JOIN pg_attribute pk_att
+                    ON pk_att.attrelid = pk_table.oid
+                    AND pk_att.attnum = pk_col.attnum
+                    AND NOT pk_att.attisdropped
+                WHERE pk_con.contype = 'p'
+                    AND pk_schema.nspname = c.table_schema
+                    AND pk_table.relname = c.table_name
+                    AND pk_att.attname = c.column_name
+            ) AS is_pk
+        FROM information_schema.columns c
+        JOIN pg_namespace n ON n.nspname = c.table_schema
+        JOIN pg_class pc ON pc.relnamespace = n.oid AND pc.relname = c.table_name
+        JOIN pg_attribute a ON a.attrelid = pc.oid AND a.attname = c.column_name
+        LEFT JOIN pg_description d
+            ON d.objoid = pc.oid
+            AND d.classoid = 'pg_class'::regclass
+            AND d.objsubid = a.attnum
+        WHERE c.table_schema = $1 AND c.table_name = $2
+        ORDER BY c.ordinal_position
+    "#;
+
+    let rows = client::query_rows(conn_params, query, &[&schema, &table]).await?;
+    Ok(rows.iter().map(row_to_table_column).collect())
+}
+
+/// DDL for an *existing* table, as used by the host's `dump_database` to
+/// write a schema-preserving dump. Mirrors the built-in driver's
+/// `get_table_ddl` byte-for-byte: name/type/`NOT NULL`/`PRIMARY KEY`
+/// reconstructed from column metadata — no defaults, indexes, or FKs.
+pub async fn get_table_ddl(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let table = params.get("table").and_then(Value::as_str).unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    if let Err(e) = ensure_base_table(&conn_params, table, schema).await {
+        return error_response(id, -32603, &e);
+    }
+
+    let columns = match fetch_table_columns(&conn_params, table, schema).await {
+        Ok(columns) => columns,
+        Err(e) => return error_response(id, -32603, &e),
+    };
+
+    match build_table_ddl(schema, table, &columns) {
+        Ok(ddl) => ok_response(id, json!(ddl)),
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+/// `dump_database` normally lists tables via `get_tables` (already
+/// restricted to `BASE TABLE`), but an explicit table selection bypasses
+/// that and can name a view — or a foreign/partitioned table — directly.
+/// Reject anything that isn't an ordinary table instead of silently
+/// reconstructing DDL that doesn't reflect what the object actually is.
+async fn ensure_base_table(
+    conn_params: &ConnectionParams,
+    table: &str,
+    schema: &str,
+) -> Result<(), String> {
+    let rows = client::query_rows(
+        conn_params,
+        "SELECT table_type::text FROM information_schema.tables \
+         WHERE table_schema = $1 AND table_name = $2",
+        &[&schema, &table],
+    )
+    .await?;
+
+    match rows
+        .first()
+        .and_then(|r| r.try_get::<_, String>("table_type").ok())
+    {
+        Some(t) if t == "BASE TABLE" => Ok(()),
+        Some(other) => Err(format!(
+            "{table} is a {other}, not a base table; get_table_ddl only supports base tables"
+        )),
+        None => Err(format!("Table {table} not found or empty")),
+    }
+}
+
+/// Pure DDL-text builder, split out of `get_table_ddl` for unit testing
+/// without a live database. `columns` is the `row_to_table_column`-shaped
+/// JSON produced by `fetch_table_columns`.
+fn build_table_ddl(schema: &str, table: &str, columns: &[Value]) -> Result<String, String> {
+    if columns.is_empty() {
+        return Err(format!("Table {table} not found or empty"));
+    }
+
+    let mut defs = Vec::new();
+    let mut pks = Vec::new();
+
+    for col in columns {
+        let name = col["name"].as_str().unwrap_or_default();
+        let data_type = col["data_type"].as_str().unwrap_or_default();
+        let is_nullable = col["is_nullable"].as_bool().unwrap_or(false);
+        let is_pk = col["is_pk"].as_bool().unwrap_or(false);
+
+        let quoted_name = crate::utils::identifiers::quote_identifier(name);
+        let mut def = format!("{quoted_name} {data_type}");
+        if !is_nullable {
+            def.push_str(" NOT NULL");
+        }
+        if is_pk {
+            pks.push(quoted_name);
+        }
+        defs.push(def);
+    }
+
+    if !pks.is_empty() {
+        defs.push(format!("PRIMARY KEY ({})", pks.join(", ")));
+    }
+
+    Ok(format!(
+        "CREATE TABLE {} (\n  {}\n);",
+        crate::utils::identifiers::qualified(schema, table),
+        defs.join(",\n  ")
+    ))
+}
+
+/// Map one `information_schema.columns`-shaped row (as queried by
+/// `get_columns`/`get_view_columns`) to the host's `TableColumn` JSON shape.
+fn row_to_table_column(r: &tokio_postgres::Row) -> Value {
+    let name: String = r.try_get("column_name").unwrap_or_default();
+    let raw_data_type: String = r.try_get("data_type").unwrap_or_default();
+    let enum_values: Option<String> = r.try_get("enum_values").ok().flatten();
+    let is_nullable_str: String = r.try_get("is_nullable").unwrap_or_default();
+    let column_default: Option<String> = r.try_get("column_default").ok().flatten();
+    let is_identity: String = r.try_get("is_identity").unwrap_or_default();
+    let char_max_len: Option<i64> = r
+        .try_get::<_, Option<i64>>("character_maximum_length")
+        .ok()
+        .flatten();
+    let is_pk: bool = r.try_get("is_pk").unwrap_or(false);
+    let comment: Option<String> = r.try_get("comment").ok().flatten();
+
+    let data_type = match enum_values {
+        Some(ref vals) if !vals.is_empty() => format!("enum({})", vals),
+        _ => raw_data_type,
+    };
+
+    let is_auto_increment = is_identity == "YES"
+        || column_default
+            .as_deref()
+            .is_some_and(|d| d.contains("nextval"));
+
+    let is_nullable = is_nullable_str == "YES";
+
+    let default_value = column_default_value(column_default.as_deref(), is_auto_increment);
+
+    let mut col = json!({
+        "name": name,
+        "data_type": data_type,
+        "is_pk": is_pk,
+        "is_nullable": is_nullable,
+        "is_auto_increment": is_auto_increment,
+    });
+
+    if let Some(dv) = default_value {
+        col.as_object_mut()
+            .unwrap()
+            .insert("default_value".to_string(), json!(dv));
+    }
+    if let Some(len) = char_max_len.and_then(|v| u64::try_from(v).ok()) {
+        col.as_object_mut()
+            .unwrap()
+            .insert("character_maximum_length".to_string(), json!(len));
+    }
+    if let Some(c) = comment {
+        col.as_object_mut()
+            .unwrap()
+            .insert("comment".to_string(), json!(c));
+    }
+
+    col
+}
+
+/// Compute a column's `default_value` wire field from its raw
+/// `information_schema.columns.column_default` and the already-computed
+/// `is_auto_increment`, mirroring the built-in driver's filter exactly.
+/// Returns `None` (omit the field) for auto-increment columns, empty
+/// defaults, and `NULL` defaults of any case (`NULL`, `null`, `Null`, ...),
+/// and for `NULL::<type>` casts; everything else is surfaced verbatim.
+/// Split out of `row_to_table_column` for unit testing without a live
+/// `tokio_postgres::Row` (#122). `is_auto_increment` is computed once in
+/// the caller (matching the builtin's single computation) and passed in
+/// so the field and the filter can't drift apart.
+fn column_default_value(column_default: Option<&str>, is_auto_increment: bool) -> Option<String> {
+    let d = column_default?;
+    // Match the builtin's filter exactly: the bare-`null` check is
+    // case-insensitive (PostgreSQL accepts `DEFAULT null` in any case and
+    // normalizes it to NULL in information_schema.columns.column_default,
+    // so `null`/`Null`/`NULL` all mean "no default"), while the
+    // `NULL::<type>` cast prefix stays case-sensitive — the builtin keeps
+    // that one `starts_with("NULL::")`, not `eq_ignore_ascii_case`. #122.
+    if is_auto_increment
+        || d.is_empty()
+        || d.eq_ignore_ascii_case("null")
+        || d.starts_with("NULL::")
+    {
+        None
+    } else {
+        Some(d.to_string())
+    }
+}
+
+pub async fn get_foreign_keys(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let table = params.get("table").and_then(Value::as_str).unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = r#"
+        SELECT
+            con.conname::text AS constraint_name,
+            src_att.attname::text AS column_name,
+            ref_nsp.nspname::text AS foreign_schema_name,
+            ref_cl.relname::text AS foreign_table_name,
+            ref_att.attname::text AS foreign_column_name,
+            CASE con.confupdtype
+                WHEN 'a' THEN 'NO ACTION'
+                WHEN 'r' THEN 'RESTRICT'
+                WHEN 'c' THEN 'CASCADE'
+                WHEN 'n' THEN 'SET NULL'
+                WHEN 'd' THEN 'SET DEFAULT'
+            END::text AS update_rule,
+            CASE con.confdeltype
+                WHEN 'a' THEN 'NO ACTION'
+                WHEN 'r' THEN 'RESTRICT'
+                WHEN 'c' THEN 'CASCADE'
+                WHEN 'n' THEN 'SET NULL'
+                WHEN 'd' THEN 'SET DEFAULT'
+            END::text AS delete_rule
+        FROM pg_constraint con
+        JOIN pg_class src_cl ON src_cl.oid = con.conrelid
+        JOIN pg_namespace src_nsp ON src_nsp.oid = src_cl.relnamespace
+        JOIN pg_class ref_cl ON ref_cl.oid = con.confrelid
+        JOIN pg_namespace ref_nsp ON ref_nsp.oid = ref_cl.relnamespace
+        JOIN unnest(con.conkey, con.confkey) AS cols(src_attnum, ref_attnum) ON true
+        JOIN pg_attribute src_att
+            ON src_att.attrelid = src_cl.oid
+            AND src_att.attnum = cols.src_attnum
+            AND NOT src_att.attisdropped
+        JOIN pg_attribute ref_att
+            ON ref_att.attrelid = ref_cl.oid
+            AND ref_att.attnum = cols.ref_attnum
+            AND NOT ref_att.attisdropped
+        WHERE con.contype = 'f'
+          AND con.conparentid = 0
+          AND src_nsp.nspname = $1
+          AND src_cl.relname = $2
+        ORDER BY con.conname, cols.src_attnum
+    "#;
+
+    match client::query_rows(&conn_params, query, &[&schema, &table]).await {
+        Ok(rows) => {
+            let fks: Vec<Value> = rows.iter().map(row_to_foreign_key).collect();
+            ok_response(id, json!(fks))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+/// Map one `pg_constraint`-shaped FK row to the host's `ForeignKey` JSON
+/// shape. Shared by `get_foreign_keys` and `get_all_foreign_keys_batch`,
+/// which select the same columns (the batch variant adds `table_name`).
+fn row_to_foreign_key(r: &tokio_postgres::Row) -> Value {
+    let name: String = r.try_get("constraint_name").unwrap_or_default();
+    let column_name: String = r.try_get("column_name").unwrap_or_default();
+    let ref_table: String = r.try_get("foreign_table_name").unwrap_or_default();
+    let ref_column: String = r.try_get("foreign_column_name").unwrap_or_default();
+    let on_update: Option<String> = r.try_get("update_rule").ok().flatten();
+    let on_delete: Option<String> = r.try_get("delete_rule").ok().flatten();
+
+    json!({
+        "name": name,
+        "column_name": column_name,
+        "ref_table": ref_table,
+        "ref_column": ref_column,
+        "on_delete": on_delete,
+        "on_update": on_update,
+    })
+}
+
+pub async fn get_indexes(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let table = params.get("table").and_then(Value::as_str).unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = r#"
+        SELECT
+            i.relname AS index_name,
+            COALESCE(
+                a.attname::text,
+                pg_get_indexdef(ix.indexrelid, k.n::int, true)
+            ) AS column_name,
+            ix.indisunique AS is_unique,
+            ix.indisprimary AS is_primary,
+            k.n::int AS seq_in_index,
+            (k.attnum = 0) AS is_expression
+        FROM
+            pg_class t
+            JOIN pg_namespace n ON t.relnamespace = n.oid
+            JOIN pg_index ix ON t.oid = ix.indrelid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            CROSS JOIN LATERAL unnest(string_to_array(ix.indkey::text, ' ')::int2[])
+                WITH ORDINALITY AS k(attnum, n)
+            LEFT JOIN pg_attribute a
+                ON a.attrelid = t.oid
+                AND a.attnum = k.attnum
+                AND k.attnum <> 0
+        WHERE
+            t.relkind IN ('r', 'm')
+            AND n.nspname = $1
+            AND t.relname = $2
+        ORDER BY
+            i.relname,
+            k.n
+    "#;
+
+    match client::query_rows(&conn_params, query, &[&schema, &table]).await {
+        Ok(rows) => {
+            let indexes: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let name: String = r.try_get("index_name").unwrap_or_default();
+                    let column_name: String = r.try_get("column_name").unwrap_or_default();
+                    let is_unique: bool = r.try_get("is_unique").unwrap_or(false);
+                    let is_primary: bool = r.try_get("is_primary").unwrap_or(false);
+                    let seq_in_index: i32 = r.try_get("seq_in_index").unwrap_or(1);
+                    let is_expression: bool = r.try_get("is_expression").unwrap_or(false);
+
+                    json!({
+                        "name": name,
+                        "column_name": column_name,
+                        "is_unique": is_unique,
+                        "is_primary": is_primary,
+                        "seq_in_index": seq_in_index,
+                        "is_expression": is_expression,
+                    })
+                })
+                .collect();
+            ok_response(id, json!(indexes))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+pub async fn get_views(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    match client::query_strings(
+        &conn_params,
+        "SELECT viewname as name FROM pg_views WHERE schemaname = $1 ORDER BY viewname ASC",
+        &[&schema],
+        "name",
+    )
+    .await
+    {
+        Ok(names) => {
+            let views: Vec<Value> = names
+                .into_iter()
+                .map(|n| json!({"name": n, "definition": null}))
+                .collect();
+            ok_response(id, json!(views))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_view_definition(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let view_name = params
+        .get("view_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let qualified = crate::utils::identifiers::qualified(schema, view_name);
+
+    match client::query_rows(
+        &conn_params,
+        "SELECT pg_get_viewdef(($1::text)::regclass, true) as definition",
+        &[&qualified],
+    )
+    .await
+    {
+        Ok(rows) => {
+            if let Some(row) = rows.first() {
+                let definition: String = row.try_get("definition").unwrap_or_default();
+                let full = format!("CREATE OR REPLACE VIEW {} AS\n{}", qualified, definition);
+                ok_response(id, json!(full))
+            } else {
+                error_response(id, -32603, "View not found")
+            }
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_view_columns(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let view_name = params
+        .get("view_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = r#"
+        SELECT
+            c.column_name::text,
+            CASE
+                WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name::text
+                ELSE c.data_type::text
+            END AS data_type,
+            c.is_nullable::text,
+            c.column_default::text,
+            c.is_identity::text,
+            c.character_maximum_length,
+            (SELECT string_agg('''' || replace(e.enumlabel, '''', '''''') || '''', ',' ORDER BY e.enumsortorder)
+             FROM pg_enum e
+             JOIN pg_type t ON t.oid = e.enumtypid
+             JOIN pg_namespace tn ON tn.oid = t.typnamespace
+             WHERE t.typname = c.udt_name AND tn.nspname = c.udt_schema) AS enum_values,
+            EXISTS (
+                SELECT 1
+                FROM pg_constraint pk_con
+                JOIN pg_class pk_table ON pk_table.oid = pk_con.conrelid
+                JOIN pg_namespace pk_schema ON pk_schema.oid = pk_table.relnamespace
+                JOIN unnest(pk_con.conkey) AS pk_col(attnum) ON true
+                JOIN pg_attribute pk_att
+                    ON pk_att.attrelid = pk_table.oid
+                    AND pk_att.attnum = pk_col.attnum
+                    AND NOT pk_att.attisdropped
+                WHERE pk_con.contype = 'p'
+                    AND pk_schema.nspname = c.table_schema
+                    AND pk_table.relname = c.table_name
+                    AND pk_att.attname = c.column_name
+            ) AS is_pk
+        FROM information_schema.columns c
+        WHERE c.table_schema = $1 AND c.table_name = $2
+        ORDER BY c.ordinal_position
+    "#;
+
+    match client::query_rows(&conn_params, query, &[&schema, &view_name]).await {
+        Ok(rows) => {
+            let columns: Vec<Value> = rows.iter().map(row_to_table_column).collect();
+            ok_response(id, json!(columns))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn create_view(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let view_name = params
+        .get("view_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let definition = params
+        .get("definition")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = format!(
+        "CREATE VIEW {} AS {}",
+        crate::utils::identifiers::qualified(schema, view_name),
+        definition
+    );
+    match client::execute_typed(&conn_params, &query, &[]).await {
+        Ok(_) => ok_response(id, Value::Null),
+        Err(e) => error_response(id, -32603, &format!("Failed to create view: {}", e)),
+    }
+}
+
+pub async fn alter_view(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let view_name = params
+        .get("view_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let definition = params
+        .get("definition")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = format!(
+        "CREATE OR REPLACE VIEW {} AS {}",
+        crate::utils::identifiers::qualified(schema, view_name),
+        definition
+    );
+    match client::execute_typed(&conn_params, &query, &[]).await {
+        Ok(_) => ok_response(id, Value::Null),
+        Err(e) => error_response(id, -32603, &format!("Failed to alter view: {}", e)),
+    }
+}
+
+pub async fn drop_view(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let view_name = params
+        .get("view_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = format!(
+        "DROP VIEW IF EXISTS {}",
+        crate::utils::identifiers::qualified(schema, view_name)
+    );
+    match client::execute_typed(&conn_params, &query, &[]).await {
+        Ok(_) => ok_response(id, Value::Null),
+        Err(e) => error_response(id, -32603, &format!("Failed to drop view: {}", e)),
+    }
+}
+
+pub async fn get_materialized_views(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    match client::query_strings(
+        &conn_params,
+        "SELECT matviewname as name FROM pg_matviews WHERE schemaname = $1 ORDER BY matviewname ASC",
+        &[&schema],
+        "name",
+    )
+    .await
+    {
+        Ok(names) => {
+            let views: Vec<Value> = names
+                .into_iter()
+                .map(|n| json!({"name": n, "definition": null}))
+                .collect();
+            ok_response(id, json!(views))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_materialized_view_columns(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let view_name = params
+        .get("view_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    // Materialized views are not exposed via information_schema.columns, so
+    // their columns must be read from the system catalog.
+    let query = r#"
+        SELECT
+            a.attname AS column_name,
+            format_type(a.atttypid, a.atttypmod) AS data_type,
+            a.attnotnull AS not_null
+        FROM pg_attribute a
+        JOIN pg_class c ON c.oid = a.attrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = $1 AND c.relname = $2 AND c.relkind = 'm'
+          AND a.attnum > 0 AND NOT a.attisdropped
+        ORDER BY a.attnum
+    "#;
+
+    match client::query_rows(&conn_params, query, &[&schema, &view_name]).await {
+        Ok(rows) => {
+            let columns: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let name: String = r.try_get("column_name").unwrap_or_default();
+                    let data_type: String = r.try_get("data_type").unwrap_or_default();
+                    let not_null: bool = r.try_get("not_null").unwrap_or(false);
+                    json!({
+                        "name": name,
+                        "data_type": data_type,
+                        "is_pk": false,
+                        "is_nullable": !not_null,
+                        "is_auto_increment": false,
+                    })
+                })
+                .collect();
+            ok_response(id, json!(columns))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_materialized_view_definition(id: Value, _params: &Value) -> Value {
+    not_implemented(id, "get_materialized_view_definition")
+}
+
+pub async fn refresh_materialized_view(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let view_name = params
+        .get("view_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = format!(
+        "REFRESH MATERIALIZED VIEW {}",
+        crate::utils::identifiers::qualified(schema, view_name)
+    );
+    match client::execute_typed(&conn_params, &query, &[]).await {
+        Ok(_) => ok_response(id, Value::Null),
+        Err(e) => error_response(
+            id,
+            -32603,
+            &format!("Failed to refresh materialized view: {}", e),
+        ),
+    }
+}
+
+pub async fn get_routines(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let server_version_num: i32 = match client::query_rows(
+        &conn_params,
+        "SELECT current_setting('server_version_num')::int4 AS v",
+        &[],
+    )
+    .await
+    {
+        Ok(rows) => rows
+            .first()
+            .and_then(|r| r.try_get::<_, i32>("v").ok())
+            .unwrap_or(0),
+        Err(e) => return error_response(id, -32603, &e),
+    };
+
+    let query = routine_query_for_version(server_version_num);
+
+    match client::query_rows(&conn_params, query, &[&schema]).await {
+        Ok(rows) => {
+            let routines: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let name: String = r.try_get("proname").unwrap_or_default();
+                    let prokind: i8 = r.try_get("prokind").unwrap_or(b'f' as i8);
+                    let routine_type = if prokind as u8 as char == 'p' {
+                        "PROCEDURE"
+                    } else {
+                        "FUNCTION"
+                    };
+                    json!({
+                        "name": name,
+                        "routine_type": routine_type,
+                        "definition": null,
+                    })
+                })
+                .collect();
+            ok_response(id, json!(routines))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+/// Pick the `get_routines` query by server version. `pg_proc.prokind` was
+/// introduced in PostgreSQL 11, replacing the boolean columns `proisagg` /
+/// `proiswindow`. On 9.x/10 the column does not exist, so referencing it
+/// fails at parse time (SQLSTATE 42703). Matches the builtin driver's
+/// `get_routines` version branch exactly (`src-tauri/src/drivers/postgres/mod.rs`).
+fn routine_query_for_version(server_version_num: i32) -> &'static str {
+    if server_version_num >= 110_000 {
+        r#"
+            SELECT proname, prokind
+            FROM pg_proc
+            WHERE pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)
+            AND prokind IN ('f', 'p')
+            ORDER BY proname
+        "#
+    } else {
+        // Pre-11: procedures don't exist; exclude aggregates and window
+        // functions and report everything else as a plain function ('f').
+        // Cast to the internal "char" type so it maps to i8 like prokind.
+        r#"
+            SELECT proname, 'f'::"char" AS prokind
+            FROM pg_proc
+            WHERE pronamespace = (SELECT oid FROM pg_namespace WHERE nspname = $1)
+            AND NOT proisagg
+            AND NOT proiswindow
+            ORDER BY proname
+        "#
+    }
+}
+
+pub async fn get_routine_parameters(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let routine_name = params
+        .get("routine_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let return_type_query = r#"
+        SELECT data_type, routine_type
+        FROM information_schema.routines
+        WHERE routine_schema = $1 AND routine_name = $2
+        LIMIT 1
+    "#;
+    let routine_info = match client::query_rows(
+        &conn_params,
+        return_type_query,
+        &[&schema, &routine_name],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => return error_response(id, -32603, &e),
+    };
+
+    let mut parameters: Vec<Value> = Vec::new();
+
+    if let Some(info) = routine_info.first() {
+        let routine_type: String = info.try_get("routine_type").unwrap_or_default();
+        if routine_type == "FUNCTION" {
+            let data_type: String = info.try_get("data_type").unwrap_or_default();
+            if !data_type.eq_ignore_ascii_case("void") && !data_type.eq_ignore_ascii_case("trigger")
+            {
+                parameters.push(json!({
+                    "name": "",
+                    "data_type": data_type,
+                    "mode": "OUT",
+                    "ordinal_position": 0,
+                }));
+            }
+        }
+    }
+
+    let query = r#"
+        SELECT p.parameter_name, p.data_type, p.parameter_mode, p.ordinal_position
+        FROM information_schema.parameters p
+        JOIN information_schema.routines r ON p.specific_name = r.specific_name
+        WHERE r.routine_schema = $1 AND r.routine_name = $2
+        ORDER BY p.ordinal_position
+    "#;
+    match client::query_rows(&conn_params, query, &[&schema, &routine_name]).await {
+        Ok(rows) => {
+            parameters.extend(rows.iter().map(|r| {
+                let name: Option<String> = r.try_get("parameter_name").ok().flatten();
+                let data_type: String = r.try_get("data_type").unwrap_or_default();
+                let mode: String = r.try_get("parameter_mode").unwrap_or_default();
+                let ordinal_position: i32 = r.try_get("ordinal_position").unwrap_or(0);
+                json!({
+                    "name": name.unwrap_or_default(),
+                    "data_type": data_type,
+                    "mode": mode,
+                    "ordinal_position": ordinal_position,
+                })
+            }));
+            ok_response(id, json!(parameters))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_routine_definition(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let routine_name = params
+        .get("routine_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = r#"
+        SELECT pg_get_functiondef(p.oid) as definition
+        FROM pg_proc p
+        JOIN pg_namespace n ON p.pronamespace = n.oid
+        WHERE n.nspname = $1 AND p.proname = $2
+        LIMIT 1
+    "#;
+
+    match client::query_rows(&conn_params, query, &[&schema, &routine_name]).await {
+        Ok(rows) => match rows.first() {
+            Some(row) => {
+                let definition: String = row.try_get("definition").unwrap_or_default();
+                ok_response(id, json!(definition))
+            }
+            None => error_response(id, -32603, &format!("Routine '{}' not found", routine_name)),
+        },
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_triggers(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = r#"
+        SELECT
+            t.trigger_name AS name,
+            t.event_object_table AS table_name,
+            string_agg(t.event_manipulation, ' OR ' ORDER BY t.event_manipulation) AS event,
+            t.action_timing AS timing
+        FROM information_schema.triggers t
+        WHERE t.trigger_schema = $1
+        GROUP BY t.trigger_name, t.event_object_table, t.action_timing
+        ORDER BY t.trigger_name
+    "#;
+
+    match client::query_rows(&conn_params, query, &[&schema]).await {
+        Ok(rows) => {
+            let triggers: Vec<Value> = rows
+                .iter()
+                .map(|r| {
+                    let name: String = r.try_get("name").unwrap_or_default();
+                    let table_name: String = r.try_get("table_name").unwrap_or_default();
+                    let event: String = r.try_get("event").unwrap_or_default();
+                    let timing: String = r.try_get("timing").unwrap_or_default();
+                    json!({
+                        "name": name,
+                        "table_name": table_name,
+                        "event": event,
+                        "timing": timing,
+                        "definition": null,
+                    })
+                })
+                .collect();
+            ok_response(id, json!(triggers))
+        }
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn get_trigger_definition(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let trigger_name = params
+        .get("trigger_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let table_name = params
+        .get("table_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = r#"
+        SELECT pg_get_triggerdef(t.oid, true) AS definition
+        FROM pg_trigger t
+        JOIN pg_class c ON t.tgrelid = c.oid
+        JOIN pg_namespace n ON c.relnamespace = n.oid
+        WHERE t.tgname = $1
+          AND c.relname = $2
+          AND n.nspname = $3
+          AND NOT t.tgisinternal
+        LIMIT 1
+    "#;
+
+    match client::query_rows(&conn_params, query, &[&trigger_name, &table_name, &schema]).await {
+        Ok(rows) => match rows.first() {
+            Some(row) => {
+                let definition: String = row.try_get("definition").unwrap_or_default();
+                ok_response(id, json!(definition))
+            }
+            None => error_response(id, -32603, &format!("Trigger '{}' not found", trigger_name)),
+        },
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+pub async fn create_trigger(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let trigger_sql = params
+        .get("trigger_sql")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+
+    match client::execute_typed(&conn_params, trigger_sql, &[]).await {
+        Ok(_) => ok_response(id, Value::Null),
+        Err(e) => error_response(id, -32603, &format!("Failed to create trigger: {}", e)),
+    }
+}
+
+pub async fn drop_trigger(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let trigger_name = params
+        .get("trigger_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let table_name = params
+        .get("table_name")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let query = format!(
+        "DROP TRIGGER IF EXISTS {} ON {}",
+        crate::utils::identifiers::quote_identifier(trigger_name),
+        crate::utils::identifiers::qualified(schema, table_name),
+    );
+    match client::execute_typed(&conn_params, &query, &[]).await {
+        Ok(_) => ok_response(id, Value::Null),
+        Err(e) => error_response(id, -32603, &format!("Failed to drop trigger: {}", e)),
+    }
+}
+
+/// All columns for every base table in a schema, in one query — the batch
+/// analog of `get_columns`. Mirrors the built-in driver's
+/// `get_all_columns_batch` byte-for-byte: same SELECT (reusing
+/// `row_to_table_column`) minus the `c.table_name = $2` filter, with
+/// `c.table_name` projected out and results ordered by table then
+/// ordinal position, grouped by table name into the host's
+/// `HashMap<String, Vec<TableColumn>>` wire shape (a JSON object).
+pub async fn get_all_columns_batch(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    match fetch_all_columns(&conn_params, schema).await {
+        Ok(map) => ok_response(id, Value::Object(map)),
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+/// All foreign keys for every base table in a schema, in one query — the
+/// batch analog of `get_foreign_keys`. Mirrors the built-in driver's
+/// `get_all_foreign_keys_batch` byte-for-byte: same SELECT (reusing
+/// `row_to_foreign_key`) minus the `src_cl.relname = $2` filter, with
+/// `src_cl.relname` projected out and results ordered by table then
+/// constraint then column, grouped by table name into the host's
+/// `HashMap<String, Vec<ForeignKey>>` wire shape (a JSON object).
+pub async fn get_all_foreign_keys_batch(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    match fetch_all_foreign_keys(&conn_params, schema).await {
+        Ok(map) => ok_response(id, Value::Object(map)),
+        Err(e) => error_response(id, -32603, &e),
+    }
+}
+
+/// A schema's tables, each with its columns and foreign keys, in one
+/// round trip on the host side — what the ER diagram window calls to
+/// render a schema. Mirrors the built-in driver's `get_schema_snapshot`:
+/// the same `get_tables` + `get_all_columns_batch` + `get_all_foreign_keys_batch`
+/// composition the host already falls back to (tabularis#822) when this
+/// RPC returns "method not found", but without the O(number of tables)
+/// extra round trips. Returns the host's `Vec<TableSchema>` wire shape
+/// (`[{name, columns, foreign_keys}]`).
+pub async fn get_schema_snapshot(id: Value, params: &Value) -> Value {
+    let conn_params = ConnectionParams::from_value(inner_params(params));
+    let schema = params
+        .get("schema")
+        .and_then(Value::as_str)
+        .unwrap_or("public");
+
+    let tables = match fetch_tables(&conn_params, schema).await {
+        Ok(t) => t,
+        Err(e) => return error_response(id, -32603, &e),
+    };
+    let columns_map = match fetch_all_columns(&conn_params, schema).await {
+        Ok(m) => m,
+        Err(e) => return error_response(id, -32603, &e),
+    };
+    let fks_map = match fetch_all_foreign_keys(&conn_params, schema).await {
+        Ok(m) => m,
+        Err(e) => return error_response(id, -32603, &e),
+    };
+
+    ok_response(
+        id,
+        json!(build_schema_snapshot(tables, columns_map, fks_map)),
+    )
+}
+
+/// Shared by `get_all_columns_batch` and `get_schema_snapshot` — the
+/// batch column query without the RPC response envelope.
+async fn fetch_all_columns(
+    conn_params: &ConnectionParams,
+    schema: &str,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let query = r#"
+        SELECT
+            c.table_name::text,
+            c.column_name::text,
+            CASE
+                WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name::text
+                ELSE c.data_type::text
+            END AS data_type,
+            c.is_nullable::text,
+            c.column_default::text,
+            c.is_identity::text,
+            c.character_maximum_length,
+            d.description::text AS comment,
+            (SELECT string_agg('''' || replace(e.enumlabel, '''', '''''') || '''', ',' ORDER BY e.enumsortorder)
+             FROM pg_enum e
+             JOIN pg_type t ON t.oid = e.enumtypid
+             JOIN pg_namespace tn ON tn.oid = t.typnamespace
+             WHERE t.typname = c.udt_name AND tn.nspname = c.udt_schema) AS enum_values,
+            EXISTS (
+                SELECT 1
+                FROM pg_constraint pk_con
+                JOIN pg_class pk_table ON pk_table.oid = pk_con.conrelid
+                JOIN pg_namespace pk_schema ON pk_schema.oid = pk_table.relnamespace
+                JOIN unnest(pk_con.conkey) AS pk_col(attnum) ON true
+                JOIN pg_attribute pk_att
+                    ON pk_att.attrelid = pk_table.oid
+                    AND pk_att.attnum = pk_col.attnum
+                    AND NOT pk_att.attisdropped
+                WHERE pk_con.contype = 'p'
+                    AND pk_schema.nspname = c.table_schema
+                    AND pk_table.relname = c.table_name
+                    AND pk_att.attname = c.column_name
+            ) AS is_pk
+        FROM information_schema.columns c
+        JOIN pg_namespace n ON n.nspname = c.table_schema
+        JOIN pg_class pc ON pc.relnamespace = n.oid AND pc.relname = c.table_name
+        JOIN pg_attribute a ON a.attrelid = pc.oid AND a.attname = c.column_name
+        LEFT JOIN pg_description d
+            ON d.objoid = pc.oid
+            AND d.classoid = 'pg_class'::regclass
+            AND d.objsubid = a.attnum
+        WHERE c.table_schema = $1
+        ORDER BY c.table_name, c.ordinal_position
+    "#;
+
+    let rows = client::query_rows(conn_params, query, &[&schema]).await?;
+    Ok(group_rows_by_table(rows, row_to_table_column))
+}
+
+/// Shared by `get_all_foreign_keys_batch` and `get_schema_snapshot` — the
+/// batch FK query without the RPC response envelope.
+async fn fetch_all_foreign_keys(
+    conn_params: &ConnectionParams,
+    schema: &str,
+) -> Result<serde_json::Map<String, Value>, String> {
+    let query = r#"
+        SELECT
+            src_cl.relname::text AS table_name,
+            con.conname::text AS constraint_name,
+            src_att.attname::text AS column_name,
+            ref_nsp.nspname::text AS foreign_schema_name,
+            ref_cl.relname::text AS foreign_table_name,
+            ref_att.attname::text AS foreign_column_name,
+            CASE con.confupdtype
+                WHEN 'a' THEN 'NO ACTION'
+                WHEN 'r' THEN 'RESTRICT'
+                WHEN 'c' THEN 'CASCADE'
+                WHEN 'n' THEN 'SET NULL'
+                WHEN 'd' THEN 'SET DEFAULT'
+            END::text AS update_rule,
+            CASE con.confdeltype
+                WHEN 'a' THEN 'NO ACTION'
+                WHEN 'r' THEN 'RESTRICT'
+                WHEN 'c' THEN 'CASCADE'
+                WHEN 'n' THEN 'SET NULL'
+                WHEN 'd' THEN 'SET DEFAULT'
+            END::text AS delete_rule
+        FROM pg_constraint con
+        JOIN pg_class src_cl ON src_cl.oid = con.conrelid
+        JOIN pg_namespace src_nsp ON src_nsp.oid = src_cl.relnamespace
+        JOIN pg_class ref_cl ON ref_cl.oid = con.confrelid
+        JOIN pg_namespace ref_nsp ON ref_nsp.oid = ref_cl.relnamespace
+        JOIN unnest(con.conkey, con.confkey) AS cols(src_attnum, ref_attnum) ON true
+        JOIN pg_attribute src_att
+            ON src_att.attrelid = src_cl.oid
+            AND src_att.attnum = cols.src_attnum
+            AND NOT src_att.attisdropped
+        JOIN pg_attribute ref_att
+            ON ref_att.attrelid = ref_cl.oid
+            AND ref_att.attnum = cols.ref_attnum
+            AND NOT ref_att.attisdropped
+        WHERE con.contype = 'f'
+          AND con.conparentid = 0
+          AND src_nsp.nspname = $1
+        ORDER BY src_cl.relname, con.conname, cols.src_attnum
+    "#;
+
+    let rows = client::query_rows(conn_params, query, &[&schema]).await?;
+    Ok(group_rows_by_table(rows, row_to_foreign_key))
+}
+
+/// Group rows into a JSON object keyed by each row's `table_name`, with
+/// each row mapped through `row_fn`. This is the host's
+/// `HashMap<String, Vec<_>>` wire shape — a table→rows JSON object. The
+/// SQL for both batch queries already orders by `table_name` first, so
+/// rows for a table arrive contiguously and the array per table
+/// preserves column/constraint ordering as queried.
+fn group_rows_by_table<F>(
+    rows: Vec<tokio_postgres::Row>,
+    row_fn: F,
+) -> serde_json::Map<String, Value>
+where
+    F: Fn(&tokio_postgres::Row) -> Value,
+{
+    let mut map = serde_json::Map::new();
+    for row in rows {
+        let table_name: String = row.try_get("table_name").unwrap_or_default();
+        let value = row_fn(&row);
+        map.entry(table_name)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .unwrap()
+            .push(value);
+    }
+    map
+}
+
+/// Pure composition of the three batch fetches into the host's
+/// `Vec<TableSchema>` wire shape, split out of `get_schema_snapshot` for
+/// unit testing without a live database. `tables` is the
+/// `fetch_tables`-shaped JSON (each with a `name`); `columns_map` and
+/// `fks_map` are the `group_rows_by_table`-shaped objects keyed by table
+/// name. A table with no columns in the map gets an empty array, and
+/// likewise for foreign keys — matching the builtin's `unwrap_or_default`.
+fn build_schema_snapshot(
+    tables: Vec<Value>,
+    columns_map: serde_json::Map<String, Value>,
+    fks_map: serde_json::Map<String, Value>,
+) -> Vec<Value> {
+    tables
+        .into_iter()
+        .map(|t| {
+            let name = t["name"].as_str().unwrap_or_default().to_string();
+            let columns = columns_map.get(&name).cloned().unwrap_or_else(|| json!([]));
+            let foreign_keys = fks_map.get(&name).cloned().unwrap_or_else(|| json!([]));
+            json!({
+                "name": name,
+                "columns": columns,
+                "foreign_keys": foreign_keys,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "metadata_tests.rs"]
+mod metadata_tests;
