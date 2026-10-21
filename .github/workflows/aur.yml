@@ -25,7 +25,7 @@ jobs:
     # Stable prereleases never reach the AUR. Nightlies are prereleases too,
     # but they arrive via workflow_call, never via the release event (releases
     # created with GITHUB_TOKEN don't trigger workflows).
-    if: ${{ github.event_name != 'release' || !github.event.release.prerelease }}
+    if: ${{ github.repository == 'TabularisDB/tabularis' && (github.event_name != 'release' || !github.event.release.prerelease) }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

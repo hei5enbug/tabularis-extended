@@ -18,7 +18,7 @@ on:
 jobs:
   flatpark-publish:
     # Prereleases never reach FlatPark (same gate as Snap/Winget/AUR).
-    if: ${{ github.event_name == 'workflow_dispatch' || !github.event.release.prerelease }}
+    if: ${{ github.repository == 'TabularisDB/tabularis' && (github.event_name == 'workflow_dispatch' || !github.event.release.prerelease) }}
     runs-on: ubuntu-latest
     continue-on-error: true
     permissions: {}
