@@ -1,0 +1,128 @@
+{
+  "$schema": "https://registry.tabularis.dev/manifest.schema.json?kind=driver",
+  "id": "postgresql-plus",
+  "name": "PostgreSQL Plus",
+  "version": "1.0.0-rc.6",
+  "description": "Full-featured PostgreSQL driver for Tabularis: browse schemas, tables, views, routines, and triggers; run queries with EXPLAIN plans; edit rows with type-aware binding for enums, JSON, arrays, UUIDs; generate DDL for tables, columns, indexes, and foreign keys.",
+  "category": "database",
+  "tags": ["driver", "postgresql", "postgres", "sql", "relational", "database-driver"],
+  "license": "Apache-2.0",
+  "icon": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/postgresql-icon.svg",
+  "color": "#336791",
+  "screenshots": [
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/screenshots/01-fresh-install.png",
+      "caption": "Database Manager on first launch",
+      "alt": "Tabularis Database Manager showing no active connections"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/screenshots/02-database-picker.png",
+      "caption": "PostgreSQL listed in the database picker",
+      "alt": "Choose a database dialog showing PostgreSQL installed under SQL and Relational categories"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/screenshots/03-connection-form.png",
+      "caption": "Connection configuration form",
+      "alt": "PostgreSQL connection form with host, port, username, password, and database name fields filled in"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/screenshots/04-test-connection-success.png",
+      "caption": "Successful connection test",
+      "alt": "Connection form showing a green Connection successful message"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/screenshots/05-connections-list.png",
+      "caption": "Saved connection in the Database Manager",
+      "alt": "Database Manager showing one saved PostgreSQL connection card"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/screenshots/06-schema-browser.png",
+      "caption": "Multi-schema browsing with tables, views, and materialized views",
+      "alt": "Sidebar schema tree showing multiple schemas with tables, views, materialized views, and triggers"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/screenshots/07-table-data.png",
+      "caption": "Data grid with filtering, sorting, and enum column support",
+      "alt": "Data grid showing a table row with a PostgreSQL enum column value, a WHERE filter, and sort controls"
+    }
+  ],
+  "readme": "README.md",
+  "homepage": "https://github.com/TabularisDB/tabularis-postgresql-plugin",
+  "documentation_url": "https://github.com/TabularisDB/tabularis-postgresql-plugin#readme",
+  "min_runtime_version": "0.20.0",
+  "support": {
+    "issues_url": "https://github.com/TabularisDB/tabularis-postgresql-plugin/issues"
+  },
+  "kind": "driver",
+  "engine": "postgresql",
+  "paradigms": ["relational"],
+  "default_port": 5432,
+  "default_username": "postgres",
+  "executable": "postgresql-plugin",
+  "capabilities": {
+    "schemas": true,
+    "views": true,
+    "materialized_views": true,
+    "routines": true,
+    "routine_management": true,
+    "triggers": true,
+    "file_based": false,
+    "folder_based": false,
+    "connection_string": true,
+    "connection_string_example": "postgres://user:pass@localhost:5432/db",
+    "identifier_quote": "\"",
+    "sql_dialect": "postgres",
+    "alter_primary_key": true,
+    "alter_column": true,
+    "create_foreign_keys": true,
+    "manage_tables": true,
+    "supports_ssl": true,
+    "explain": true,
+    "readonly": false,
+    "no_connection_required": false,
+    "serial_type": "SERIAL",
+    "auto_increment_keyword": "",
+    "inline_pk": false
+  },
+  "type_mappings": {
+    "DATETIME": "TIMESTAMP",
+    "JSON": "JSONB"
+  },
+  "settings": [
+    {
+      "key": "poolMaxSize",
+      "label": "Pool Max Size",
+      "type": "number",
+      "default": 10,
+      "description": "Maximum number of PostgreSQL connections kept in the pool."
+    }
+  ],
+  "data_types": [
+    {"name": "SMALLINT", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "INTEGER", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "BIGINT", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "SERIAL", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "BIGSERIAL", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "REAL", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "DOUBLE PRECISION", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "NUMERIC", "category": "numeric", "requires_length": false, "requires_precision": true},
+    {"name": "DECIMAL", "category": "numeric", "requires_length": false, "requires_precision": true},
+    {"name": "MONEY", "category": "numeric", "requires_length": false, "requires_precision": false},
+    {"name": "CHAR", "category": "string", "requires_length": true, "requires_precision": false},
+    {"name": "VARCHAR", "category": "string", "requires_length": true, "requires_precision": false},
+    {"name": "TEXT", "category": "string", "requires_length": false, "requires_precision": false},
+    {"name": "DATE", "category": "date", "requires_length": false, "requires_precision": false},
+    {"name": "TIME", "category": "date", "requires_length": false, "requires_precision": false},
+    {"name": "TIMESTAMP", "category": "date", "requires_length": false, "requires_precision": false},
+    {"name": "TIMESTAMPTZ", "category": "date", "requires_length": false, "requires_precision": false},
+    {"name": "INTERVAL", "category": "date", "requires_length": false, "requires_precision": false},
+    {"name": "BOOLEAN", "category": "other", "requires_length": false, "requires_precision": false},
+    {"name": "UUID", "category": "other", "requires_length": false, "requires_precision": false},
+    {"name": "JSON", "category": "json", "requires_length": false, "requires_precision": false},
+    {"name": "JSONB", "category": "json", "requires_length": false, "requires_precision": false},
+    {"name": "BYTEA", "category": "binary", "requires_length": false, "requires_precision": false},
+    {"name": "INET", "category": "other", "requires_length": false, "requires_precision": false},
+    {"name": "CIDR", "category": "other", "requires_length": false, "requires_precision": false},
+    {"name": "MACADDR", "category": "other", "requires_length": false, "requires_precision": false}
+  ]
+}
