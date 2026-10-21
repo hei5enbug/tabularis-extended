@@ -23,6 +23,8 @@ mod tests {
             client_hint: Some("claude-desktop".to_string()),
             explain_plan: Some(serde_json::json!({"node": "Seq Scan"})),
             explain_error: None,
+            editable: true,
+            service: None,
         }
     }
 
@@ -221,5 +223,79 @@ mod tests {
         assert_eq!(deleted, 1);
         assert!(!stale_path.exists());
         assert!(read_pending_in(tmp.path(), "recent").unwrap().is_some());
+    }
+
+    // Service approvals -----------------------------------------------------
+
+    fn service_pending(id: &str) -> PendingApproval {
+        PendingApproval {
+            editable: false,
+            service: Some(crate::ai_approval::ServiceApprovalMarker {
+                operation: "connection.update".into(),
+                request_hash: "a".repeat(64),
+                credential_retarget: true,
+            }),
+            ..make_pending(id)
+        }
+    }
+
+    #[test]
+    fn 서비스_승인은_수정불가와_요청_표식을_pending_파일에_싣는다() {
+        // given
+        let tmp = TempDir::new().unwrap();
+        let path = write_pending_in(tmp.path(), &service_pending("svc")).unwrap();
+
+        // when
+        let raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let listed = list_pending_in(tmp.path()).unwrap();
+
+        // then
+        assert_eq!(raw["editable"], false);
+        assert_eq!(raw["service"]["operation"], "connection.update");
+        assert_eq!(raw["service"]["credentialRetarget"], true);
+        assert_eq!(listed[0].service, service_pending("svc").service);
+    }
+
+    #[test]
+    fn 표식이_없는_이전_pending_파일은_수정가능한_구형_승인으로_읽는다() {
+        // given
+        let tmp = TempDir::new().unwrap();
+        let path = write_pending_in(tmp.path(), &make_pending("legacy")).unwrap();
+        let mut raw: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        raw.as_object_mut().unwrap().remove("editable");
+        raw.as_object_mut().unwrap().remove("service");
+        std::fs::write(&path, raw.to_string()).unwrap();
+
+        // when
+        let actual = read_pending_in(tmp.path(), "legacy").unwrap().unwrap();
+
+        // then
+        assert!(actual.editable);
+        assert!(actual.service.is_none());
+    }
+
+    #[test]
+    fn 수정불가_승인은_수정된_쿼리가_있는_결정을_기록하지_않는다() {
+        // given
+        let tmp = TempDir::new().unwrap();
+        write_pending_in(tmp.path(), &service_pending("svc")).unwrap();
+        write_pending_in(tmp.path(), &make_pending("legacy")).unwrap();
+        let edited = |id: &str| ApprovalDecision {
+            edited_query: Some("SELECT 1".into()),
+            ..make_decision(id, "approve")
+        };
+
+        // when
+        let service = write_decision_in(tmp.path(), &edited("svc"));
+        let plain = write_decision_in(tmp.path(), &make_decision("svc", "approve"));
+        let legacy = write_decision_in(tmp.path(), &edited("legacy"));
+
+        // then
+        assert!(service.is_err());
+        assert!(read_decision_in(tmp.path(), "svc").unwrap().is_some());
+        assert!(plain.is_ok());
+        assert!(legacy.is_ok());
     }
 }

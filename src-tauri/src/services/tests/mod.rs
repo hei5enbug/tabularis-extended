@@ -9,6 +9,7 @@ mod newguiinput;
 mod oauth;
 mod platform;
 mod platform_mutations;
+mod policy;
 mod regressions;
 mod results;
 mod runtime;

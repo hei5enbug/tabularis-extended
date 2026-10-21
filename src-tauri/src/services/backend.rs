@@ -72,6 +72,12 @@ pub trait ConnectionBackend: Send + Sync {
         self.update(id, expected_version, patch).await
     }
     async fn delete(&self, id: &str, expected_version: u64) -> ServiceResult<()>;
+    /// True when the saved connection holds a stored secret (keychain
+    /// password or URI, inline SSH secret, or a service credential
+    /// reference).
+    async fn has_stored_secrets(&self, _id: &str) -> ServiceResult<bool> {
+        Ok(false)
+    }
 }
 
 #[async_trait]
@@ -93,6 +99,32 @@ pub trait PolicyBackend: Send + Sync {
         request: &ServiceRequest,
         request_hash: &str,
     ) -> ServiceResult<()>;
+    /// Approval for a request that is not a write (`approval_mode = all`).
+    async fn consume_read_approval(
+        &self,
+        connection: &SavedConnection,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        request_hash: &str,
+    ) -> ServiceResult<()> {
+        self.consume_write_approval(connection, caller, request, request_hash)
+            .await
+    }
+    async fn authorize_connection_change_annotated(
+        &self,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        _annotations: super::policy::ChangeAnnotations,
+    ) -> ServiceResult<()> {
+        self.authorize_connection_change(caller, request).await
+    }
+    async fn approval_mode(
+        &self,
+        _connection: &SavedConnection,
+        _caller: &CallerContext,
+    ) -> ServiceResult<super::policy::ApprovalMode> {
+        Ok(super::policy::ApprovalMode::WritesOnly)
+    }
     async fn query_is_write(
         &self,
         _caller: &CallerContext,

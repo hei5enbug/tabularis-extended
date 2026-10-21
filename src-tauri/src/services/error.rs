@@ -11,6 +11,13 @@ pub fn failure(code: ErrorCode) -> ServiceError {
         ErrorCode::WriteNotAllowed => {
             "This write requires connection permission and request approval."
         }
+        ErrorCode::WriteIntentRequired => {
+            "This statement is not a proven read; resend it with write set to true."
+        }
+        ErrorCode::SecretNotAccepted => {
+            "Secrets are not accepted here; enter them in the Tabularis window."
+        }
+        ErrorCode::OperationNotAllowed => "This operation is not available through MCP.",
         ErrorCode::VersionConflict => "The saved version has changed.",
         ErrorCode::ConnectionConflict => "The connection has changed since it was read.",
         ErrorCode::AuthRequired => "Authentication is required.",

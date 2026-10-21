@@ -98,13 +98,18 @@ async fn 같은_request_id라도_연결이_다르면_동시에_실행하고_한�
     assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 2);
 }
 
-async fn logout_during_query(harness: &Harness, gate: Arc<TestGate>) -> ServiceResponse {
+async fn logout_during_query(
+    harness: &Harness,
+    gate: Arc<TestGate>,
+    write: bool,
+) -> ServiceResponse {
     let runtime = harness.runtime.clone();
-    let task = tokio::spawn(async move {
-        runtime
-            .call_validated(&query("gate-query"), &caller())
-            .await
-    });
+    let input = if write {
+        write_query("gate-query")
+    } else {
+        query("gate-query")
+    };
+    let task = tokio::spawn(async move { runtime.call_validated(&input, &caller()).await });
     gate.wait_entered().await;
     harness.runtime.auth.logout("conn-a").await.unwrap();
     gate.release();
@@ -124,7 +129,7 @@ async fn 진행_중인_쿼리에서_로그아웃하면_이전_주체의_결과�
         .insert("gate-query".into(), gate.clone());
 
     // when
-    let actual = logout_during_query(&harness, gate).await;
+    let actual = logout_during_query(&harness, gate, false).await;
 
     // then
     assert_eq!(actual.error.unwrap().code, ErrorCode::AuthRequired);
@@ -383,7 +388,7 @@ async fn 드라이버가_확정한_not_started_오류는_unknown으로_바꾸지
     harness.policy.write_intent.store(true, Ordering::SeqCst);
 
     // when
-    let actual = harness.call(&query("invalid")).await;
+    let actual = harness.call(&write_query("invalid")).await;
 
     // then
     assert_eq!(
@@ -402,7 +407,7 @@ async fn db_쓰기_성공_후_결과_저장_실패는_applied로_보고하고_�
     harness.policy.write_intent.store(true, Ordering::SeqCst);
 
     // when
-    let actual = harness.call(&query("oversized")).await;
+    let actual = harness.call(&write_query("oversized")).await;
 
     // then
     assert_eq!(
@@ -835,7 +840,7 @@ async fn 쓰기_성공_후_로그아웃이_결과를_막아도_applied를_보존
         .insert("gate-query".into(), gate.clone());
 
     // when
-    let actual = logout_during_query(&harness, gate).await;
+    let actual = logout_during_query(&harness, gate, true).await;
 
     // then
     assert_eq!(actual.error.as_ref().unwrap().code, ErrorCode::AuthRequired);

@@ -882,4 +882,60 @@ mod tests {
     fn to_local_rfc3339_returns_input_when_unparseable() {
         assert_eq!(to_local_rfc3339("not-a-date", Some("Asia/Tokyo")), "not-a-date");
     }
+
+    #[test]
+    fn select_into와_exec와_call은_읽기가_아니다() {
+        // given
+        let statements = [
+            "SELECT * INTO backup_t FROM t",
+            "select a into @v from t",
+            "SELECT 1 INTO OUTFILE '/tmp/x'",
+            "WITH x AS (SELECT 1 AS a) SELECT a INTO t2 FROM x",
+            "EXPLAIN ANALYZE SELECT * INTO t2 FROM t",
+            "EXEC sp_who",
+            "EXECUTE sp_who",
+            "CALL refresh_all()",
+            "PRAGMA journal_mode = WAL",
+        ];
+        // when
+        let actual: Vec<_> = statements.iter().map(|sql| classify_query_kind(sql)).collect();
+        // then
+        assert!(actual.iter().all(|kind| *kind != "select"), "{actual:?}");
+    }
+
+    #[test]
+    fn 문자열과_식별자와_주석_안의_구분자와_into는_읽기_판정을_바꾸지_않는다() {
+        // given
+        let statements = [
+            "SELECT 'a; b'",
+            "SELECT 'into; DROP TABLE t'",
+            "SELECT \"into\" FROM t -- ; DROP TABLE t",
+            "SELECT `a;b` FROM t /* ; DELETE FROM t */",
+            "SELECT [a b] FROM t",
+            "SELECT $$a b$$",
+            "SELECT 1;",
+        ];
+        // when
+        let actual: Vec<_> = statements.iter().map(|sql| classify_query_kind(sql)).collect();
+        // then
+        assert!(actual.iter().all(|kind| *kind == "select"), "{actual:?}");
+    }
+
+    #[test]
+    fn 방언마다_다르게_보이는_따옴표_뒤의_두번째_문장은_읽기가_아니다() {
+        // given
+        let statements = [
+            "SELECT '\\''; DROP TABLE users",
+            "SELECT $$'$$; DROP TABLE users; SELECT $$'$$",
+            "SELECT [a'b]; DROP TABLE users; --']",
+            "SELECT 1; SELECT 2",
+            "SELECT 1; EXEC sp_who",
+            "SELECT [a;b] FROM t",
+            "SELECT $$a; b$$",
+        ];
+        // when
+        let actual: Vec<_> = statements.iter().map(|sql| classify_query_kind(sql)).collect();
+        // then
+        assert!(actual.iter().all(|kind| *kind != "select"), "{actual:?}");
+    }
 }

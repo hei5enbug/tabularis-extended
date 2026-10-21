@@ -366,3 +366,87 @@ fn 열_메타데이터만으로_페이지_예산을_넘으면_원본결과를_�
     // then
     assert_eq!(actual.unwrap_err().code, ErrorCode::ResourceLimit);
 }
+
+fn json_files(directory: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.ends_with(".json"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn 해제한_결과는_캐시_파일까지_지운다() {
+    // given
+    let directory = TestDirectory::new();
+    let store = ResultStore::new(directory.0.clone()).unwrap();
+    let id = store.insert(binding(), snapshot(vec![json!([1])])).unwrap();
+    let before = json_files(&directory.0);
+
+    // when
+    store.release(&id, &binding()).unwrap();
+
+    // then
+    assert_eq!(before, [format!("{id}.json")]);
+    assert!(json_files(&directory.0).is_empty());
+}
+
+#[test]
+fn 만료된_결과_파일은_정리_때_지워진다() {
+    // given
+    let directory = TestDirectory::new();
+    let store = ResultStore::with_limits(directory.0.clone(), 0, MAX_CACHE_BYTES).unwrap();
+    store.insert(binding(), snapshot(vec![json!([1])])).unwrap();
+    let before = json_files(&directory.0).len();
+
+    // when
+    store.cleanup().unwrap();
+
+    // then
+    assert_eq!(before, 1);
+    assert!(json_files(&directory.0).is_empty());
+}
+
+#[test]
+fn 단독으로_시작한_프로세스는_이전_프로세스가_남긴_결과와_임시_파일을_지운다() {
+    // given
+    let directory = TestDirectory::new();
+    let previous = ResultStore::new(directory.0.clone()).unwrap();
+    let id = previous
+        .insert(binding(), snapshot(vec![json!([1]), json!([2])]))
+        .unwrap();
+    previous.page(&id, &binding(), 0, 0, 1).unwrap();
+    std::fs::write(directory.0.join("interrupted.tmp"), b"partial").unwrap();
+    drop(previous);
+
+    // when
+    let current = ResultStore::new(directory.0.clone()).unwrap();
+
+    // then
+    assert!(json_files(&directory.0).is_empty());
+    assert!(!directory.0.join("interrupted.tmp").exists());
+    assert_eq!(
+        current.snapshot(&id, &binding()).unwrap_err().code,
+        ErrorCode::ResultExpired
+    );
+}
+
+#[test]
+fn 다른_프로세스가_같은_디렉터리를_쓰는_동안에는_그_결과를_지우지_않는다() {
+    // given
+    let directory = TestDirectory::new();
+    let running = ResultStore::new(directory.0.clone()).unwrap();
+    let id = running
+        .insert(binding(), snapshot(vec![json!([1])]))
+        .unwrap();
+
+    // when
+    let starting = ResultStore::new(directory.0.clone()).unwrap();
+
+    // then
+    assert!(starting.snapshot(&id, &binding()).is_ok());
+    assert_eq!(json_files(&directory.0), [format!("{id}.json")]);
+}

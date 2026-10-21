@@ -24,6 +24,44 @@ pub trait AccessBackend: Send + Sync {
         caller: &CallerContext,
         request: &ServiceRequest,
     ) -> ServiceResult<()>;
+    async fn authorize_connection_change_annotated(
+        &self,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        _annotations: ChangeAnnotations,
+    ) -> ServiceResult<()> {
+        self.authorize_connection_change(caller, request).await
+    }
+    async fn approval_mode(
+        &self,
+        _connection: &SavedConnection,
+        _caller: &CallerContext,
+    ) -> ServiceResult<ApprovalMode> {
+        Ok(ApprovalMode::WritesOnly)
+    }
+}
+
+/// Facts about a connection change that the approval must show.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ChangeAnnotations {
+    /// Stored credentials would be sent to a different target.
+    pub credential_retarget: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApprovalMode {
+    Off,
+    WritesOnly,
+    All,
+}
+impl ApprovalMode {
+    pub fn parse(value: Option<&str>) -> Self {
+        match value {
+            Some("off") => Self::Off,
+            Some("all") => Self::All,
+            _ => Self::WritesOnly,
+        }
+    }
 }
 
 pub struct ApprovalGrant {
@@ -43,6 +81,29 @@ pub trait ApprovalBackend: Send + Sync {
         request: &ServiceRequest,
         request_hash: &str,
     ) -> ServiceResult<ApprovalGrant>;
+}
+
+/// Operations an MCP caller can never run, whatever approval it holds.
+pub fn mcp_forbidden(operation: super::contracts::Operation) -> bool {
+    use super::contracts::Operation::*;
+    matches!(operation, CredentialImport | ConnectionDelete)
+}
+
+/// Operations whose caller must state `write: true` before they can run as
+/// a write.
+pub fn accepts_write_intent(operation: super::contracts::Operation) -> bool {
+    use super::contracts::Operation::*;
+    matches!(
+        operation,
+        QueryExecute
+            | RowInsert
+            | RowUpdate
+            | RowDelete
+            | DocumentCreate
+            | DocumentReplace
+            | DocumentDelete
+            | SessionCommit
+    )
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -74,7 +135,7 @@ impl ApprovalPolicy {
         caller: &CallerContext,
         request: &ServiceRequest,
     ) -> ServiceResult<()> {
-        if request.operation != super::contracts::Operation::QueryExecute {
+        if !accepts_write_intent(request.operation) {
             return Err(failure(ErrorCode::InvalidArgument));
         }
         let mut intents = self
@@ -114,6 +175,33 @@ impl PolicyBackend for ApprovalPolicy {
             .authorize_connection_change(caller, request)
             .await
     }
+    async fn authorize_connection_change_annotated(
+        &self,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        annotations: ChangeAnnotations,
+    ) -> ServiceResult<()> {
+        self.access
+            .authorize_connection_change_annotated(caller, request, annotations)
+            .await
+    }
+    async fn approval_mode(
+        &self,
+        connection: &SavedConnection,
+        caller: &CallerContext,
+    ) -> ServiceResult<ApprovalMode> {
+        self.access.approval_mode(connection, caller).await
+    }
+    async fn consume_read_approval(
+        &self,
+        connection: &SavedConnection,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        request_hash: &str,
+    ) -> ServiceResult<()> {
+        self.consume(connection, caller, request, request_hash, false)
+            .await
+    }
     async fn query_is_write(
         &self,
         caller: &CallerContext,
@@ -133,8 +221,22 @@ impl PolicyBackend for ApprovalPolicy {
         request: &ServiceRequest,
         request_hash: &str,
     ) -> ServiceResult<()> {
+        self.consume(connection, caller, request, request_hash, true)
+            .await
+    }
+}
+
+impl ApprovalPolicy {
+    async fn consume(
+        &self,
+        connection: &SavedConnection,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        request_hash: &str,
+        write: bool,
+    ) -> ServiceResult<()> {
         let permission = self.access.permission(connection, caller).await?;
-        if !connection.allow_writes || !permission.allow_writes {
+        if write && !permission.allow_writes {
             return Err(failure(ErrorCode::WriteNotAllowed));
         }
         let grant = self

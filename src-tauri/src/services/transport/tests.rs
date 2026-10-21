@@ -151,14 +151,21 @@ async fn 프로토콜_불일치는_고정된_오류로_거부한다() {
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
-async fn 도구_목록은_공유_스키마의_마흔아홉_작업과_쓰기_별칭을_사용한다() {
+async fn 도구_목록은_공유_스키마의_작업에서_가져오기와_연결_삭제를_뺀_마흔일곱_작업과_쓰기_별칭을_사용한다(
+) {
     // given
     let h = Harness::new();
     let source: Value = serde_json::from_str(super::super::contracts::REQUEST_SCHEMA).unwrap();
     // when
     let actual = checked_catalog(&h);
     // then
-    assert_eq!(actual.0["tools"].as_array().unwrap().len(), 50);
+    assert_eq!(actual.0["tools"].as_array().unwrap().len(), 48);
+    assert!(actual.0["tools"].as_array().unwrap().iter().all(|tool| {
+        !matches!(
+            tool["name"].as_str(),
+            Some("credential.import" | "connection.delete")
+        )
+    }));
     assert_eq!(
         actual.0["tools"][0]["inputSchema"]["definitions"]["input.connection.list"],
         source["definitions"]["input.connection.list"]
@@ -177,9 +184,9 @@ async fn 도구_목록은_공유_스키마의_마흔아홉_작업과_쓰기_별�
             .len(),
         1
     );
-    assert_eq!(actual.0["tools"][49]["name"], "query.execute_write");
+    assert_eq!(actual.0["tools"][47]["name"], "query.execute_write");
     assert_eq!(
-        actual.0["tools"][49]["inputSchema"]["properties"]["operation"]["const"],
+        actual.0["tools"][47]["inputSchema"]["properties"]["operation"]["const"],
         "query.execute"
     );
     assert!(actual.1);
@@ -209,8 +216,26 @@ async fn MCP_자격증명_가져오기는_보호된_입력채널을_읽지_않�
         .call_tool("credential.import", raw, mcp_caller(), None)
         .await;
     // then
-    assert_eq!(actual.unwrap_err().code, ErrorCode::PermissionDenied);
+    assert_eq!(actual.unwrap_err().code, ErrorCode::OperationNotAllowed);
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
+}
+#[tokio::test]
+async fn MCP는_연결_삭제를_도구와_직접_제출_모두에서_거부한다() {
+    // given
+    let h = Harness::new();
+    let mut request = support::request(Operation::ConnectionDelete, json!({}));
+    request.expected_version = Some(1);
+    let raw = serde_json::to_value(request).unwrap();
+    // when
+    let tool = h
+        .transport
+        .call_tool("connection.delete", raw.clone(), mcp_caller(), None)
+        .await;
+    let submitted = h.transport.submit(raw, mcp_caller()).await;
+    // then
+    assert_eq!(tool.unwrap_err().code, ErrorCode::OperationNotAllowed);
+    assert_eq!(submitted.unwrap_err().code, ErrorCode::OperationNotAllowed);
+    assert_eq!(h.connections.writes.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
 async fn 쓰기_별칭도_연결의_쓰기_승인을_우회하지_않는다() {

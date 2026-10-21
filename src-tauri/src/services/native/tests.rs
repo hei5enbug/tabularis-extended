@@ -576,9 +576,14 @@ async fn 인증_협상_오류는_구형_드라이버로_우회하지_않는다()
     assert_eq!(h.secrets.0.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
-async fn 저장된_쓰기_허용이_없으면_명시적_의도도_실행되지_않는다() {
+async fn 읽기_전용_연결이면_명시적_의도도_큐에_넣기_전에_거부한다() {
     // given
     let h = Harness::new().await;
+    crate::persistence::service_write_atomic(
+        &h.directory.0.join("config.json"),
+        br#"{"mcpReadonlyDefault":true}"#,
+    )
+    .unwrap();
     // when
     let actual = h
         .core

@@ -131,6 +131,10 @@ impl ServiceTransport {
             .validator
             .operation_names()
             .into_iter()
+            .filter(|name| {
+                serde_json::from_value::<super::super::contracts::Operation>(json!(name))
+                    .map_or(true, |operation| !super::mcp_forbidden(operation))
+            })
             .chain(std::iter::once("query.execute_write".into()))
         {
             let operation = if name == "query.execute_write" {
@@ -185,6 +189,9 @@ impl ServiceTransport {
         request::validate_caller(&caller)?;
         let alias = name == "query.execute_write";
         let operation = if alias { "query.execute" } else { name };
+        if serde_json::from_value::<Operation>(json!(operation)).is_ok_and(super::mcp_forbidden) {
+            return Err(failure(ErrorCode::OperationNotAllowed));
+        }
         if !self
             .validator
             .operation_names()
@@ -207,8 +214,8 @@ impl ServiceTransport {
         {
             return Err(failure(ErrorCode::InvalidArgument));
         }
-        if decoded.operation == Operation::CredentialImport {
-            return Err(failure(ErrorCode::PermissionDenied));
+        if super::mcp_forbidden(decoded.operation) {
+            return Err(failure(ErrorCode::OperationNotAllowed));
         }
         let response = match self.run_one(arguments, caller, alias, signal).await {
             Ok(response) => response,

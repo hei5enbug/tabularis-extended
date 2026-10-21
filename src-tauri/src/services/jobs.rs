@@ -3,6 +3,7 @@ use super::{
     contracts::{ErrorCode, JobStatus, Outcome, ServiceRequest, ServiceResponse},
     dispatch::CallerContext,
     error::{failure, ServiceResult},
+    history::{HistoryMeta, HistoryStore, LiveJobs},
     storage::{now_ms, PrivateStore},
 };
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex, Weak,
+        Arc, Mutex, OnceLock, Weak,
     },
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -46,6 +47,7 @@ pub struct JobRecord {
 struct ActiveJob {
     record: Mutex<JobRecord>,
     signal: CancellationSignal,
+    history: Option<HistoryMeta>,
 }
 struct State {
     active_requests: HashMap<(Option<String>, String), String>,
@@ -59,6 +61,7 @@ pub struct JobManager {
     global: Arc<Semaphore>,
     waiting: AtomicUsize,
     store: PrivateStore,
+    history: OnceLock<Arc<dyn HistoryStore>>,
 }
 
 impl JobManager {
@@ -73,12 +76,40 @@ impl JobManager {
             global: Arc::new(Semaphore::new(GLOBAL_CONCURRENCY)),
             waiting: AtomicUsize::new(0),
             store: PrivateStore::new(root, 10 * 1024 * 1024)?,
+            history: OnceLock::new(),
         });
         manager.recover()?;
         Ok(manager)
     }
     pub fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+    /// Starts recording a start and a terminal event for every job.
+    pub fn set_history(&self, history: Arc<dyn HistoryStore>) {
+        let _ = self.history.set(history);
+    }
+    /// The jobs this process still holds, for the history reader.
+    pub fn live_jobs(&self) -> LiveJobs {
+        let statuses = self
+            .state
+            .lock()
+            .map(|state| {
+                state
+                    .active_jobs
+                    .iter()
+                    .filter_map(|(id, job)| {
+                        job.record
+                            .lock()
+                            .ok()
+                            .map(|record| (id.clone(), record.status))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        LiveJobs {
+            instance_id: self.instance_id.clone(),
+            statuses,
+        }
     }
     fn recover(&self) -> ServiceResult<()> {
         let _lock = self.store.lock()?;
@@ -174,9 +205,25 @@ impl JobManager {
             expires_at_ms: now_ms().saturating_add(JOB_TTL_MS),
             response: None,
         };
+        let history = (!control && self.history.get().is_some()).then(|| {
+            let operation = serde_json::to_value(request.operation)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let query = (request.operation == super::contracts::Operation::QueryExecute)
+                .then(|| request.input["text"].as_str())
+                .flatten();
+            HistoryMeta::new(
+                &record.job_id,
+                &operation,
+                request.connection_id.as_deref(),
+                query,
+            )
+        });
         let active = Arc::new(ActiveJob {
             record: Mutex::new(record.clone()),
             signal: CancellationSignal::default(),
+            history,
         });
         let connection_semaphore = {
             let mut state = self
@@ -231,6 +278,9 @@ impl JobManager {
         };
         if !control {
             self.persist(&record)?;
+            if let (Some(history), Some(meta)) = (self.history.get(), &lease.active.history) {
+                history.record_start(meta, JobStatus::Queued);
+            }
         }
         Ok(lease)
     }
@@ -466,6 +516,9 @@ impl JobLease {
         if self.persisted {
             self.manager.persist(&record)?;
         }
+        if let (Some(history), Some(meta)) = (self.manager.history.get(), &self.active.history) {
+            history.record_terminal(meta, &response);
+        }
         self.completed.store(true, Ordering::SeqCst);
         Ok(response)
     }
@@ -480,6 +533,16 @@ impl Drop for JobLease {
                 interrupt_record(&mut record);
                 if self.persisted {
                     let _ = self.manager.persist(&record);
+                }
+                if let (Some(history), Some(meta)) =
+                    (self.manager.history.get(), &self.active.history)
+                {
+                    let code = record
+                        .response
+                        .as_ref()
+                        .and_then(|response| response.error.as_ref())
+                        .map_or(ErrorCode::DriverExited, |error| error.code);
+                    history.record_interrupted(meta, record.status, code);
                 }
             }
             if let Ok(mut state) = self.manager.state.lock() {

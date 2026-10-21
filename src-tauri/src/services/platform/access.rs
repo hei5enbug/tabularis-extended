@@ -4,7 +4,7 @@ use crate::services::{
     contracts::{ErrorCode, Operation, ServiceRequest},
     dispatch::{CallerContext, CallerTransport},
     error::{failure, ServiceResult},
-    policy::AccessBackend,
+    policy::{AccessBackend, ApprovalMode, ChangeAnnotations},
     security::value_hash,
 };
 use async_trait::async_trait;
@@ -17,6 +17,22 @@ pub struct ProfileAccess {
     approvals: Arc<ServiceApprovals>,
 }
 impl ProfileAccess {
+    fn config(&self) -> ServiceResult<crate::config::AppConfig> {
+        Ok(
+            match crate::persistence::service_read_file(
+                &self.profile.join("config.json"),
+                16 * 1024 * 1024,
+                false,
+            )? {
+                Some(bytes) => serde_json::from_slice::<crate::config::AppConfig>(&bytes)
+                    .map_err(|_| failure(ErrorCode::PermissionDenied))?,
+                None => crate::config::AppConfig {
+                    mcp_readonly_default: Some(true),
+                    ..Default::default()
+                },
+            },
+        )
+    }
     pub fn new(
         profile: PathBuf,
         local_caller_id: String,
@@ -39,18 +55,7 @@ impl AccessBackend for ProfileAccess {
         if caller.caller_id != self.local_caller_id {
             return Err(failure(ErrorCode::PermissionDenied));
         }
-        let config = match crate::persistence::service_read_file(
-            &self.profile.join("config.json"),
-            16 * 1024 * 1024,
-            false,
-        )? {
-            Some(bytes) => serde_json::from_slice::<crate::config::AppConfig>(&bytes)
-                .map_err(|_| failure(ErrorCode::PermissionDenied))?,
-            None => crate::config::AppConfig {
-                mcp_readonly_default: Some(true),
-                ..Default::default()
-            },
-        };
+        let config = self.config()?;
         let mut connections = config.mcp_readonly_connections.clone().unwrap_or_default();
         connections.sort();
         connections.dedup();
@@ -64,10 +69,28 @@ impl AccessBackend for ProfileAccess {
             allow_writes,
         })
     }
+    async fn approval_mode(
+        &self,
+        _connection: &SavedConnection,
+        _caller: &CallerContext,
+    ) -> ServiceResult<ApprovalMode> {
+        Ok(ApprovalMode::parse(
+            self.config()?.mcp_approval_mode.as_deref(),
+        ))
+    }
     async fn authorize_connection_change(
         &self,
         caller: &CallerContext,
         request: &ServiceRequest,
+    ) -> ServiceResult<()> {
+        self.authorize_connection_change_annotated(caller, request, Default::default())
+            .await
+    }
+    async fn authorize_connection_change_annotated(
+        &self,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        annotations: ChangeAnnotations,
     ) -> ServiceResult<()> {
         if caller.caller_id != self.local_caller_id
             || !matches!(
@@ -86,6 +109,8 @@ impl AccessBackend for ProfileAccess {
         ) {
             return Ok(());
         }
-        self.approvals.configuration(caller, request).await
+        self.approvals
+            .configuration_annotated(caller, request, annotations)
+            .await
     }
 }

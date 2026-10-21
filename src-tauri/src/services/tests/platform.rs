@@ -303,7 +303,7 @@ async fn cosmos_처음_마지막_replay_result_get은_원래_요청_origin을_�
     .unwrap();
     let request = request(
         Operation::QueryExecute,
-        json!({"language":"cosmos_sql","text":"native","parameters":[],"page_size":2,"database":"canonical-db","container":"canonical-container"}),
+        json!({"language":"cosmos_sql","text":"SELECT 'native'","parameters":[],"page_size":2,"database":"canonical-db","container":"canonical-container"}),
     );
     // when
     let actual = native_origin_pages(&runtime, request).await;
@@ -571,7 +571,7 @@ async fn long_origin_pages(runtime: &ServiceRuntime) -> Vec<(Value, Vec<ServiceR
         let origin = json!({"database":"d".repeat(length),"container":"c".repeat(length)});
         let request = request(
             Operation::QueryExecute,
-            json!({"language":"cosmos_sql","text":"native","parameters":[],"page_size":2,"database":origin["database"],"container":origin["container"]}),
+            json!({"language":"cosmos_sql","text":"SELECT 'native'","parameters":[],"page_size":2,"database":origin["database"],"container":origin["container"]}),
         );
         output.push((origin, native_origin_pages(runtime, request).await));
     }

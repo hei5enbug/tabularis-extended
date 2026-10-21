@@ -141,13 +141,20 @@ async fn 비GUI_transport는_등록된_GUI_채널을_credential_import에_사용
         (harness, input, CallerContext { transport, ..gui() })
     })
     .collect();
+    let expected = [
+        ErrorCode::PermissionDenied,
+        ErrorCode::OperationNotAllowed,
+        ErrorCode::PermissionDenied,
+    ];
     // When
     let actual = reject_transport_cases(&cases).await;
     // Then
     assert!(actual
         .into_iter()
-        .all(|(response, stored, retained)| response.error.unwrap().code
-            == ErrorCode::PermissionDenied
-            && !stored
-            && !retained));
+        .zip(expected)
+        .all(
+            |((response, stored, retained), code)| response.error.unwrap().code == code
+                && !stored
+                && !retained
+        ));
 }

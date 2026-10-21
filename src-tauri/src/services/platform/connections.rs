@@ -346,6 +346,17 @@ impl ConnectionBackend for ProfileConnections {
         }
         Ok(connection)
     }
+    async fn has_stored_secrets(&self, id: &str) -> ServiceResult<bool> {
+        let params = self.private_params(id)?;
+        let filled = |value: &Option<String>| value.as_deref().is_some_and(|v| !v.is_empty());
+        Ok(self.fresh(id, false)?.0.credential_ref.is_some()
+            || params.save_in_keychain == Some(true)
+            || params.connection_uri_in_keychain == Some(true)
+            || filled(&params.password)
+            || filled(&params.connection_uri)
+            || filled(&params.ssh_password)
+            || filled(&params.ssh_key_passphrase))
+    }
     async fn create(
         &self,
         name: &str,

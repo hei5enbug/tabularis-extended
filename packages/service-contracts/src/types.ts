@@ -85,7 +85,10 @@ export const errorCodes = [
   "APPLY_TIMEOUT",
   "DRIVER_EXITED",
   "OUTCOME_UNKNOWN",
-  "DOCUMENT_NOT_FOUND"
+  "DOCUMENT_NOT_FOUND",
+  "WRITE_INTENT_REQUIRED",
+  "SECRET_NOT_ACCEPTED",
+  "OPERATION_NOT_ALLOWED"
 ] as const;
 export type ErrorCode = (typeof errorCodes)[number];
 export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled" | "interrupted" | "outcome_unknown";

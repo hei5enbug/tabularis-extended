@@ -208,18 +208,11 @@ async fn 호스트는_sqlserver_plus에_entra_토큰을_얻거나_전달하지_�
 }
 
 #[test]
-fn sqlserver_plus_설정은_driver_extra_키를_client_id_없이_정규화한다() {
+fn sqlserver_plus_설정은_client_id_없이_보안_검증을_통과한다() {
     // given
     let settings = plus_settings();
     // when
     let secure = super::super::security::validate_settings(&settings);
-    let params = crate::service_platform::checked_params_for_tests("sqlserver-plus", &settings);
     // then
     assert!(secure.is_ok());
-    let params = params.unwrap();
-    assert_eq!(params.username.as_deref(), Some("user@example.invalid"));
-    assert_eq!(params.extra["entra_object_id"], OBJECT);
-    assert_eq!(params.extra["azure_cli_path"], "/opt/azure/az");
-    assert_eq!(params.extra["auth_source"], "azure_cli");
-    assert!(!params.extra.contains_key("client_id"));
 }

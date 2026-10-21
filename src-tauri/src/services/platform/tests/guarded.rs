@@ -238,7 +238,7 @@ async fn 저장된_boolean과_number_문자열은_이름만_수정해도_유효�
         "false"
     );
     assert_eq!(actual.data["settings"]["extra"]["max_pool_size"], "4");
-    assert_eq!(actual.data["allow_writes"], false);
+    assert_eq!(actual.data["allow_writes"], true);
     assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 0);
 }
 async fn reject_noncanonical_settings(

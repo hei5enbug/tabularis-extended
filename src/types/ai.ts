@@ -67,6 +67,17 @@ export interface PendingApproval {
   clientHint: string | null;
   explainPlan: unknown | null;
   explainError: string | null;
+  /** `false` for a service approval bound to one exact request: approve or deny only. Absent on older files. */
+  editable?: boolean;
+  /** Present only for approvals raised by the common service layer. */
+  service?: ServiceApprovalMarker;
+}
+
+export interface ServiceApprovalMarker {
+  operation: string;
+  requestHash: string;
+  /** Stored credentials will be sent to a different target. */
+  credentialRetarget: boolean;
 }
 
 export type ApprovalDecisionKind = "approve" | "deny";

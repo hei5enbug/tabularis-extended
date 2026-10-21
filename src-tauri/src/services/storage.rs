@@ -85,6 +85,28 @@ impl PrivateStore {
         }
         Ok(file)
     }
+    /// Opens (creating when missing) a private file in the store directory
+    /// without locking it, for callers that hold their own long-lived lock.
+    pub fn named_file(&self, name: &str) -> ServiceResult<File> {
+        if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
+            return Err(failure(ErrorCode::InvalidArgument));
+        }
+        let path = self.root.join(name);
+        match self.open_private(&path, true) {
+            Ok(file) => Ok(file),
+            Err(_) => self.open_private(&path, false),
+        }
+    }
+    /// Removes `*.tmp` files left behind by an interrupted write.
+    pub fn remove_temporaries(&self) -> ServiceResult<()> {
+        for entry in fs::read_dir(&self.root).map_err(|_| failure(ErrorCode::ResourceLimit))? {
+            let path = entry.map_err(|_| failure(ErrorCode::ResourceLimit))?.path();
+            if path.extension().is_some_and(|extension| extension == "tmp") {
+                let _ = fs::remove_file(path);
+            }
+        }
+        Ok(())
+    }
     pub fn lock(&self) -> ServiceResult<File> {
         let path = self.root.join("store.lock");
         let file = match self.open_private(&path, true) {

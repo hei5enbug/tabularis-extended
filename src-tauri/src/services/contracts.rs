@@ -282,6 +282,12 @@ pub enum ErrorCode {
     DriverExited,
     #[serde(rename = "OUTCOME_UNKNOWN")]
     OutcomeUnknown,
+    #[serde(rename = "WRITE_INTENT_REQUIRED")]
+    WriteIntentRequired,
+    #[serde(rename = "SECRET_NOT_ACCEPTED")]
+    SecretNotAccepted,
+    #[serde(rename = "OPERATION_NOT_ALLOWED")]
+    OperationNotAllowed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

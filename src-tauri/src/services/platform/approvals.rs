@@ -3,12 +3,12 @@ use crate::services::{
     contracts::{ErrorCode, Operation, ServiceRequest},
     dispatch::{CallerContext, CallerTransport},
     error::{failure, ServiceResult},
-    policy::{ApprovalBackend, ApprovalGrant},
+    policy::{ApprovalBackend, ApprovalGrant, ChangeAnnotations},
     security::value_hash,
     storage::{now_ms, PrivateStore},
 };
 use crate::{
-    ai_approval::{self, ApprovalDecision, PendingApproval},
+    ai_approval::{self, ApprovalDecision, PendingApproval, ServiceApprovalMarker},
     persistence,
 };
 use async_trait::async_trait;
@@ -145,6 +145,7 @@ impl ServiceApprovals {
         caller: &CallerContext,
         request: &ServiceRequest,
         request_hash: &str,
+        annotations: ChangeAnnotations,
     ) -> ServiceResult<ApprovalGrant> {
         if caller.caller_id != self.local_caller_id
             || request_hash
@@ -162,23 +163,28 @@ impl ServiceApprovals {
         let id = uuid::Uuid::new_v4().to_string();
         let created = now_ms();
         let deadline = created.saturating_add(request.deadline_ms);
+        let operation_value = serde_json::to_value(request.operation)
+            .map_err(|_| failure(ErrorCode::WriteNotAllowed))?;
+        let operation = operation_value
+            .as_str()
+            .ok_or_else(|| failure(ErrorCode::WriteNotAllowed))?;
         let pending = PendingApproval {
             id: id.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             session_id: caller.owner_instance_id.clone(),
             connection_id: request.connection_id.clone().unwrap_or_default(),
             connection_name: connection.name.clone(),
-            query: approval_display(request)?,
-            query_kind: format!(
-                "service:{}",
-                serde_json::to_value(request.operation)
-                    .map_err(|_| failure(ErrorCode::WriteNotAllowed))?
-                    .as_str()
-                    .ok_or_else(|| failure(ErrorCode::WriteNotAllowed))?
-            ),
+            query: approval_display(request, annotations)?,
+            query_kind: format!("service:{operation}"),
             client_hint: Some("service".into()),
             explain_plan: None,
             explain_error: None,
+            editable: false,
+            service: Some(ServiceApprovalMarker {
+                operation: operation.into(),
+                request_hash: request_hash.into(),
+                credential_retarget: annotations.credential_retarget,
+            }),
         };
         let binding = ApprovalBinding {
             caller_id: caller.caller_id.clone(),
@@ -264,6 +270,15 @@ impl ServiceApprovals {
         caller: &CallerContext,
         request: &ServiceRequest,
     ) -> ServiceResult<()> {
+        self.configuration_annotated(caller, request, ChangeAnnotations::default())
+            .await
+    }
+    pub async fn configuration_annotated(
+        &self,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        annotations: ChangeAnnotations,
+    ) -> ServiceResult<()> {
         let scope = request.connection_id.as_deref().unwrap_or(CREATE_SCOPE);
         let connection = SavedConnection {
             id: scope.into(),
@@ -278,7 +293,7 @@ impl ServiceApprovals {
         let hash = value_hash(
             &serde_json::to_value(request).map_err(|_| failure(ErrorCode::WriteNotAllowed))?,
         );
-        self.wait(&connection, caller, request, &hash)
+        self.wait(&connection, caller, request, &hash, annotations)
             .await
             .map(|_| ())
     }
@@ -301,7 +316,14 @@ impl ApprovalBackend for ServiceApprovals {
         request: &ServiceRequest,
         request_hash: &str,
     ) -> ServiceResult<ApprovalGrant> {
-        self.wait(connection, caller, request, request_hash).await
+        self.wait(
+            connection,
+            caller,
+            request,
+            request_hash,
+            ChangeAnnotations::default(),
+        )
+        .await
     }
 }
 
@@ -330,7 +352,10 @@ fn validate_decision(
     }
     Ok(())
 }
-fn approval_display(request: &ServiceRequest) -> ServiceResult<String> {
+fn approval_display(
+    request: &ServiceRequest,
+    annotations: ChangeAnnotations,
+) -> ServiceResult<String> {
     if request.operation == Operation::ConnectionCreate {
         crate::services::security::validate_settings(&request.input["settings"])?;
     }
@@ -381,8 +406,15 @@ fn approval_display(request: &ServiceRequest) -> ServiceResult<String> {
         }
         _ => request.input.clone(),
     };
-    let display = serde_json::to_string(&json!({"operation":operation,"input":input}))
-        .map_err(|_| failure(ErrorCode::WriteNotAllowed))?;
+    let mut shown = json!({"operation":operation,"input":input});
+    if matches!(
+        request.operation,
+        Operation::ConnectionCreate | Operation::ConnectionUpdate
+    ) {
+        shown["connection_id"] = json!(request.connection_id);
+        shown["credential_retarget"] = json!(annotations.credential_retarget);
+    }
+    let display = serde_json::to_string(&shown).map_err(|_| failure(ErrorCode::WriteNotAllowed))?;
     if display.len() > 512 * 1024 {
         return Err(failure(ErrorCode::ResourceLimit));
     }

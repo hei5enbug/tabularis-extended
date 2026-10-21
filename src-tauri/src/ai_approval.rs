@@ -30,6 +30,30 @@ pub struct PendingApproval {
     pub client_hint: Option<String>,
     pub explain_plan: Option<serde_json::Value>,
     pub explain_error: Option<String>,
+    /// `false` when the approval covers one exact request, so the approver
+    /// may only approve or deny it and the modal must not offer an edit.
+    #[serde(default = "default_editable")]
+    pub editable: bool,
+    /// Present only for approvals raised by the common service layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<ServiceApprovalMarker>,
+}
+
+fn default_editable() -> bool {
+    true
+}
+
+/// Marks a pending approval as a single-use service approval bound to the
+/// hash of the exact request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ServiceApprovalMarker {
+    pub operation: String,
+    pub request_hash: String,
+    /// The change moves a connection that has stored credentials to a new
+    /// target, so those credentials will be sent there.
+    #[serde(default)]
+    pub credential_retarget: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -134,6 +158,15 @@ pub fn list_pending_in(base: &Path) -> Result<Vec<PendingApproval>, String> {
 
 pub fn write_decision_in(base: &Path, decision: &ApprovalDecision) -> Result<(), String> {
     ensure_dir(base)?;
+    if decision.edited_query.is_some() {
+        if let Some(pending) = read_pending_in(base, &decision.approval_id)? {
+            if !pending.editable {
+                return Err(
+                    "This approval is bound to one exact request and cannot be edited".into(),
+                );
+            }
+        }
+    }
     let path = decision_file(base, &decision.approval_id);
     let content = serde_json::to_string_pretty(decision).map_err(|e| e.to_string())?;
     fs::write(&path, content).map_err(|e| e.to_string())

@@ -69,7 +69,7 @@ async fn 승인된_쓰기는_드라이버의_제한과_경고를_보존한다() 
 }
 
 #[tokio::test]
-async fn 기본_쿼리는_sql_첫_단어와_무관하게_db_읽기_전용_문맥을_사용한다() {
+async fn 첫_단어가_with여도_변경문이_있으면_쓰기_의도를_요구한다() {
     // given
     let harness = Harness::new();
     harness.allow_write();
@@ -79,22 +79,49 @@ async fn 기본_쿼리는_sql_첫_단어와_무관하게_db_읽기_전용_문맥
     let actual = harness.call(&input).await;
 
     // then
-    assert_eq!(actual.status, JobStatus::Succeeded);
-    assert_eq!(harness.driver.contexts.lock().unwrap()[0].1, true);
+    assert_eq!(actual.error.unwrap().code, ErrorCode::WriteIntentRequired);
+    assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 0);
     assert_eq!(harness.policy.approvals.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
-async fn db_읽기_전용_보장이_없으면_쿼리를_호출하지_않는다() {
+async fn db_읽기_전용_보장이_없어도_읽기로_증명된_쿼리는_분류_기준으로_실행한다() {
     // given
     let harness = Harness::new();
     harness.driver.readonly.store(false, Ordering::SeqCst);
 
     // when
-    let actual = harness.call(&query("SELECT dangerous_function()")).await;
+    let actual = harness.call(&query("SELECT 1")).await;
 
     // then
-    assert_eq!(actual.error.unwrap().code, ErrorCode::WriteNotAllowed);
+    assert_eq!(actual.status, JobStatus::Succeeded);
+    assert_eq!(actual.data["readonly_guarantee"], "classification_only");
+    assert_eq!(harness.driver.contexts.lock().unwrap()[0].1, true);
+}
+
+#[tokio::test]
+async fn db_읽기_전용_보장이_있으면_그_보장을_결과에_표시한다() {
+    // given
+    let harness = Harness::new();
+
+    // when
+    let actual = harness.call(&query("SELECT 1")).await;
+
+    // then
+    assert_eq!(actual.data["readonly_guarantee"], "read_only_transaction");
+}
+
+#[tokio::test]
+async fn db_읽기_전용_보장이_없으면_분류가_읽기가_아닌_쿼리를_호출하지_않는다() {
+    // given
+    let harness = Harness::new();
+    harness.driver.readonly.store(false, Ordering::SeqCst);
+
+    // when
+    let actual = harness.call(&query("SELECT * INTO copy FROM items")).await;
+
+    // then
+    assert_eq!(actual.error.unwrap().code, ErrorCode::WriteIntentRequired);
     assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 0);
 }
 
@@ -137,9 +164,18 @@ async fn 비밀과_알_수_없는_연결_설정은_저장되지_않는다() {
     let actual = call_scenarios(&harness, inputs).await;
 
     // then
-    assert!(actual
+    let codes: Vec<_> = actual
         .iter()
-        .all(|response| response.error.as_ref().unwrap().code == ErrorCode::InvalidArgument));
+        .map(|response| response.error.as_ref().unwrap().code)
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            ErrorCode::SecretNotAccepted,
+            ErrorCode::SecretNotAccepted,
+            ErrorCode::InvalidArgument
+        ]
+    );
     assert_eq!(harness.connections.writes.load(Ordering::SeqCst), 0);
 }
 

@@ -239,7 +239,7 @@ async fn 쓰기_세션에서도_이번_쓰기_의도와_승인_없는_쿼리는_
     let actual = harness.call(&input).await;
 
     // then
-    assert_eq!(actual.error.unwrap().code, ErrorCode::WriteNotAllowed);
+    assert_eq!(actual.error.unwrap().code, ErrorCode::WriteIntentRequired);
     assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 0);
 }
 

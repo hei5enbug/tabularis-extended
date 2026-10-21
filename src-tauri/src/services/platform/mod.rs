@@ -2,6 +2,7 @@ mod access;
 mod approvals;
 mod connections;
 mod expander;
+mod history;
 mod isolation;
 
 pub use access::ProfileAccess;
@@ -10,9 +11,10 @@ pub use connections::{ConnectionObservation, ProfileConnections};
 #[cfg(test)]
 pub use connections::checked_params_for_tests;
 pub use expander::{
-    GuiParamExpander, HeadlessParamExpander, NoopParamExpander, ProfileConnectionResolver,
-    ServiceParamExpander,
+    restore_saved_secrets, GuiParamExpander, HeadlessParamExpander, KeychainSecrets,
+    NoopParamExpander, ProfileConnectionResolver, SavedSecrets, ServiceParamExpander,
 };
+pub use history::{HistoryRecord, Phase, QueryHistory};
 pub use isolation::{checked_isolation_paths, read_isolation_paths, IsolationPaths};
 
 use crate::{
@@ -67,6 +69,7 @@ impl ServicePlatform {
             approvals.clone(),
         ));
         let policy = Arc::new(ApprovalPolicy::new(access, approvals.clone()));
+        let history = Arc::new(QueryHistory::new(profile.clone(), instance_id.clone()));
         let runtime = ServiceRuntime::new(
             profile,
             instance_id,
@@ -76,6 +79,7 @@ impl ServicePlatform {
             secrets,
             oauth,
         )?;
+        runtime.set_history(history);
         connections.set_observation(Arc::new(RuntimeObservation {
             runtime: Arc::downgrade(&runtime),
         }))?;

@@ -66,10 +66,37 @@ pub fn request(operation: Operation, input: Value) -> ServiceRequest {
         input,
     }
 }
+/// Fixture words such as `wait` drive the test driver; the request carries
+/// them as a provable read so the write policy lets them through.
 pub fn query(text: &str) -> ServiceRequest {
+    let text = if text == "write" {
+        "UPDATE fixture SET value = 1".to_owned()
+    } else if super::super::sql_classifier::classify_query_kind(text) == "unknown" {
+        format!("SELECT '{text}'")
+    } else {
+        text.to_owned()
+    };
     request(
         Operation::QueryExecute,
         json!({"language":"sql","text":text,"parameters":[],"page_size":10}),
+    )
+}
+/// Fixture word carried as a statement that needs write intent.
+pub fn write_query(text: &str) -> ServiceRequest {
+    request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":format!("UPDATE fixture SET value = '{text}'"),"parameters":[],"page_size":10}),
+    )
+}
+fn fixture_text(request: &ServiceRequest) -> Option<String> {
+    let text = request.input["text"].as_str()?;
+    Some(
+        ["SELECT '", "UPDATE fixture SET value = '"]
+            .iter()
+            .find_map(|prefix| text.strip_prefix(prefix))
+            .and_then(|text| text.strip_suffix('\''))
+            .unwrap_or(text)
+            .to_owned(),
     )
 }
 pub fn snapshot(rows: Vec<Value>) -> ResultSnapshot {
@@ -234,6 +261,7 @@ impl ConnectionBackend for TestConnections {
 }
 
 pub struct TestPolicy {
+    pub mode: Mutex<super::super::policy::ApprovalMode>,
     pub allowed: AtomicBool,
     pub writes_allowed: AtomicBool,
     pub approved: AtomicBool,
@@ -243,6 +271,7 @@ pub struct TestPolicy {
 impl TestPolicy {
     pub fn new() -> Self {
         Self {
+            mode: Mutex::new(super::super::policy::ApprovalMode::WritesOnly),
             allowed: AtomicBool::new(true),
             writes_allowed: AtomicBool::new(false),
             approved: AtomicBool::new(false),
@@ -265,6 +294,13 @@ impl PolicyBackend for TestPolicy {
             identity: caller.caller_id.clone(),
             allow_writes: self.writes_allowed.load(Ordering::SeqCst),
         })
+    }
+    async fn approval_mode(
+        &self,
+        _connection: &SavedConnection,
+        _caller: &CallerContext,
+    ) -> ServiceResult<super::super::policy::ApprovalMode> {
+        Ok(*self.mode.lock().unwrap())
     }
     async fn authorize_connection_change(
         &self,
@@ -423,13 +459,14 @@ impl DriverBackend for TestDriver {
             self.session_peak.fetch_max(count, Ordering::SeqCst);
         }
         let _active = ActiveCall(&self.active, session);
-        let gate = request.input["text"]
-            .as_str()
+        let fixture = fixture_text(request);
+        let gate = fixture
+            .as_deref()
             .and_then(|text| self.gates.lock().unwrap().get(text).cloned());
         if let Some(gate) = gate {
             tokio::select! { _ = gate.enter() => {}, _ = context.signal.cancelled() => return Ok(DriverOutput { data: Value::Null, snapshot: None, cursor: None, confirmed_cancelled: true, session_closed: false, metrics: Metrics::default(), limits: Limits::default(), warnings: vec![] }) }
         }
-        match request.input["text"].as_str() {
+        match fixture.as_deref() {
             Some("wait") => {
                 context.signal.cancelled().await;
                 return Ok(DriverOutput {
@@ -444,6 +481,7 @@ impl DriverBackend for TestDriver {
                 });
             }
             Some("slow") => tokio::time::sleep(Duration::from_millis(40)).await,
+            Some("stuck") => std::future::pending::<()>().await,
             Some("error") => {
                 let mut error = failure(ErrorCode::DriverExited);
                 error.message = "canary-password-token-593".into();
@@ -480,13 +518,13 @@ impl DriverBackend for TestDriver {
             _ => {}
         }
         Ok(DriverOutput {
-            data: if request.input["text"] == "oversized" {
+            data: if fixture.as_deref() == Some("oversized") {
                 json!({"blob":"a".repeat(MAX_PAGE_BYTES+1)})
             } else {
                 json!({"affected_rows":1})
             },
             snapshot: if request.operation == Operation::QueryExecute
-                && request.input["text"] != "oversized"
+                && fixture.as_deref() != Some("oversized")
             {
                 Some(snapshot((0..30).map(|row| json!([row])).collect()))
             } else {

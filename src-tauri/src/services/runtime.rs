@@ -9,13 +9,16 @@ use super::{
         ServiceResponse,
     },
     credentials::{SecretInputs, SecretSlot, SecretStore, SessionSecretStore},
-    dispatch::{CallerContext, ServiceDispatcher, ServiceHandler},
+    dispatch::{CallerContext, CallerTransport, ServiceDispatcher, ServiceHandler},
     error::{failure, redact_error, ServiceResult},
+    history::{HistoryPage, HistoryQuery, HistoryStore},
     jobs::{JobLease, JobManager},
     oauth::OAuthProvider,
+    policy::{ApprovalMode, ChangeAnnotations},
     results::{CursorBinding, NextPage, ResultStore, StoredPage},
     security::{sanitized_settings, validate_settings, value_hash},
     sessions::SessionManager,
+    sql_classifier::classify_query_kind,
     storage::now_ms,
 };
 use async_trait::async_trait;
@@ -74,6 +77,7 @@ pub struct ServiceRuntime {
     pub sessions: Arc<SessionManager>,
     pub auth: Arc<AuthManager>,
     pub secret_inputs: Arc<SecretInputs>,
+    history: std::sync::OnceLock<Arc<dyn HistoryStore>>,
     validator: super::contracts::SchemaValidator,
     tasks: Mutex<HashMap<String, tokio::task::JoinHandle<()>>>,
     stopping: AtomicBool,
@@ -163,6 +167,7 @@ impl ServiceRuntime {
             sessions,
             auth,
             secret_inputs: Arc::new(SecretInputs::default()),
+            history: std::sync::OnceLock::new(),
             validator: super::contracts::SchemaValidator::new()
                 .map_err(|_| failure(ErrorCode::InvalidArgument))?,
             tasks: Mutex::new(HashMap::new()),
@@ -171,6 +176,19 @@ impl ServiceRuntime {
         });
         runtime.start_maintenance()?;
         Ok(runtime)
+    }
+    /// Running and recent jobs with persisted history, newest first. Only
+    /// jobs this process owns are marked cancellable.
+    pub fn job_history(&self, query: &HistoryQuery) -> ServiceResult<HistoryPage> {
+        self.history
+            .get()
+            .ok_or_else(|| failure(ErrorCode::CapabilityUnavailable))?
+            .list(query, &self.jobs.live_jobs())
+    }
+    /// Records every job from now on and serves `job_history`.
+    pub fn set_history(&self, history: Arc<dyn HistoryStore>) {
+        self.jobs.set_history(history.clone());
+        let _ = self.history.set(history);
     }
     pub fn register(self: &Arc<Self>, dispatcher: &mut ServiceDispatcher) {
         for operation in SERVICE_OPERATIONS {
@@ -234,6 +252,19 @@ impl ServiceRuntime {
         }
         Ok((connection, permission))
     }
+    /// A write needs the caller's explicit `write: true` on the MCP surface,
+    /// which reaches the policy as a registered intent.
+    async fn require_write_intent(
+        &self,
+        request: &ServiceRequest,
+        caller: &CallerContext,
+    ) -> ServiceResult<()> {
+        let intent = self.policy.query_is_write(caller, request).await?;
+        if caller.transport == CallerTransport::Mcp && !intent {
+            return Err(failure(ErrorCode::WriteIntentRequired));
+        }
+        Ok(())
+    }
     async fn is_write(
         &self,
         request: &ServiceRequest,
@@ -245,7 +276,10 @@ impl ServiceRuntime {
             | Operation::RowDelete
             | Operation::DocumentCreate
             | Operation::DocumentReplace
-            | Operation::DocumentDelete => true,
+            | Operation::DocumentDelete => {
+                self.require_write_intent(request, caller).await?;
+                true
+            }
             Operation::QueryExecute => {
                 let intent = self.policy.query_is_write(caller, request).await?;
                 let session_write = match &request.session_id {
@@ -263,14 +297,21 @@ impl ServiceRuntime {
                     }
                     None => false,
                 };
-                if session_write && !intent {
-                    return Err(failure(ErrorCode::WriteNotAllowed));
+                let read =
+                    classify_query_kind(request.input["text"].as_str().unwrap_or("")) == "select";
+                match (session_write, read, intent) {
+                    (true, _, true) => true,
+                    (true, _, false) => return Err(failure(ErrorCode::WriteIntentRequired)),
+                    (false, true, false) => false,
+                    (false, true, true) => return Err(failure(ErrorCode::InvalidArgument)),
+                    (false, false, true) => true,
+                    (false, false, false) => return Err(failure(ErrorCode::WriteIntentRequired)),
                 }
-                intent || session_write
             }
             Operation::SessionOpen => request.input["mode"] == "write",
             Operation::SessionCommit => {
-                self.sessions
+                let write = self
+                    .sessions
                     .is_write(
                         request
                             .session_id
@@ -282,10 +323,59 @@ impl ServiceRuntime {
                             .ok_or_else(|| failure(ErrorCode::InvalidArgument))?,
                         caller,
                     )
-                    .await?
+                    .await?;
+                if write {
+                    self.require_write_intent(request, caller).await?;
+                }
+                write
             }
             _ => false,
         })
+    }
+    async fn effective_allow_writes(
+        &self,
+        connection: &SavedConnection,
+        caller: &CallerContext,
+    ) -> bool {
+        self.policy
+            .permission(connection, caller)
+            .await
+            .map_or(false, |permission| permission.allow_writes)
+    }
+    /// `approval_mode` decides for MCP callers; every other caller approves
+    /// writes only.
+    async fn needs_approval(
+        &self,
+        request: &ServiceRequest,
+        connection: &SavedConnection,
+        caller: &CallerContext,
+        is_write: bool,
+    ) -> ServiceResult<bool> {
+        if caller.transport != CallerTransport::Mcp {
+            return Ok(is_write);
+        }
+        Ok(match self.policy.approval_mode(connection, caller).await? {
+            ApprovalMode::Off => false,
+            ApprovalMode::WritesOnly => is_write,
+            ApprovalMode::All => is_write || request.operation == Operation::QueryExecute,
+        })
+    }
+    /// A read-only connection rejects every write before it is queued.
+    async fn write_gate(
+        &self,
+        request: &ServiceRequest,
+        caller: &CallerContext,
+        is_write: bool,
+    ) -> ServiceResult<()> {
+        if !is_write {
+            return Ok(());
+        }
+        if let Ok((_, permission)) = self.connection(request, caller).await {
+            if !permission.allow_writes {
+                return Err(failure(ErrorCode::WriteNotAllowed));
+            }
+        }
+        Ok(())
     }
     async fn execute(
         &self,
@@ -334,8 +424,8 @@ impl ServiceRuntime {
             Operation::ConnectionList => {
                 let mut list = Vec::new();
                 for connection in self.connections.list().await? {
-                    if self.policy.permission(&connection, caller).await.is_ok() {
-                        list.push(public_connection(&connection));
+                    if let Ok(permission) = self.policy.permission(&connection, caller).await {
+                        list.push(public_connection(&connection, permission.allow_writes));
                     }
                 }
                 return Ok(success(request, json!({"connections":list})));
@@ -368,7 +458,11 @@ impl ServiceRuntime {
                     )
                     .await?;
                 lease.mark_write_confirmed()?;
-                return Ok(success(request, public_connection(&connection)));
+                let allow_writes = self.effective_allow_writes(&connection, caller).await;
+                return Ok(success(
+                    request,
+                    public_connection(&connection, allow_writes),
+                ));
             }
             Operation::JobGet | Operation::JobResult | Operation::JobCancel => {
                 let job_id = string(&request.input, "job_id")?;
@@ -403,23 +497,31 @@ impl ServiceRuntime {
             _ => {}
         }
         let (connection, permission) = self.connection(request, caller).await?;
-        if is_write {
-            if !connection.allow_writes || !permission.allow_writes {
-                return Err(failure(ErrorCode::WriteNotAllowed));
+        if is_write && !permission.allow_writes {
+            return Err(failure(ErrorCode::WriteNotAllowed));
+        }
+        if self
+            .needs_approval(request, &connection, caller, is_write)
+            .await?
+        {
+            let hash = value_hash(
+                &serde_json::to_value(request).map_err(|_| failure(ErrorCode::InvalidArgument))?,
+            );
+            if is_write {
+                before_publication(
+                    lease,
+                    self.policy
+                        .consume_write_approval(&connection, caller, request, &hash),
+                )
+                .await?;
+            } else {
+                before_publication(
+                    lease,
+                    self.policy
+                        .consume_read_approval(&connection, caller, request, &hash),
+                )
+                .await?;
             }
-            before_publication(
-                lease,
-                self.policy.consume_write_approval(
-                    &connection,
-                    caller,
-                    request,
-                    &value_hash(
-                        &serde_json::to_value(request)
-                            .map_err(|_| failure(ErrorCode::InvalidArgument))?,
-                    ),
-                ),
-            )
-            .await?;
         }
         let mut context = DriverContext {
             connection_id: connection.id.clone(),
@@ -432,11 +534,6 @@ impl ServiceRuntime {
         };
         match request.operation {
             Operation::ConnectionUpdate => {
-                before_publication(
-                    lease,
-                    self.policy.authorize_connection_change(caller, request),
-                )
-                .await?;
                 validate_settings(&request.input["patch"])?;
                 let patch = &request.input["patch"];
                 if patch.as_object().is_none_or(|patch| {
@@ -446,24 +543,44 @@ impl ServiceRuntime {
                             "name" | "settings" | "credential_ref" | "allow_writes"
                         )
                     })
-                }) {
+                }) || (caller.transport == CallerTransport::Mcp
+                    && patch.get("allow_writes").is_some())
+                {
                     return Err(failure(ErrorCode::InvalidArgument));
                 }
+                let expected_version = request
+                    .expected_version
+                    .ok_or_else(|| failure(ErrorCode::InvalidArgument))?;
                 let settings = patch.get("settings").unwrap_or(&connection.settings);
                 validate_connection_configuration(&connection.driver, settings)?;
                 self.connections
                     .validate_settings(&connection.driver, settings)
                     .await?;
+                let credential_retarget = match patch.get("settings") {
+                    Some(settings)
+                        if super::security::credential_target_changed(
+                            &connection.settings,
+                            settings,
+                        ) =>
+                    {
+                        self.connections.has_stored_secrets(&connection.id).await?
+                    }
+                    _ => false,
+                };
+                before_publication(
+                    lease,
+                    self.policy.authorize_connection_change_annotated(
+                        caller,
+                        request,
+                        ChangeAnnotations {
+                            credential_retarget,
+                        },
+                    ),
+                )
+                .await?;
                 let updated = self
                     .connections
-                    .update_guarded(
-                        &connection.id,
-                        request
-                            .expected_version
-                            .ok_or_else(|| failure(ErrorCode::InvalidArgument))?,
-                        patch.clone(),
-                        lease,
-                    )
+                    .update_guarded(&connection.id, expected_version, patch.clone(), lease)
                     .await?;
                 lease.mark_write_confirmed()?;
                 if patch.get("settings").is_some()
@@ -472,7 +589,8 @@ impl ServiceRuntime {
                 {
                     self.auth.invalidate(&connection.id, false).await?;
                 }
-                return Ok(success(request, public_connection(&updated)));
+                let allow_writes = self.effective_allow_writes(&updated, caller).await;
+                return Ok(success(request, public_connection(&updated, allow_writes)));
             }
             Operation::ConnectionDelete => {
                 before_publication(
@@ -620,11 +738,18 @@ impl ServiceRuntime {
         if !self.driver.supports(&connection, request.operation).await? {
             return Err(failure(ErrorCode::CapabilityUnavailable));
         }
-        if !is_write
-            && self.driver.read_only_guarantee(&connection).await? == ReadOnlyGuarantee::Unavailable
-        {
-            return Err(failure(ErrorCode::WriteNotAllowed));
-        }
+        let guarantee = if is_write {
+            "not_applicable"
+        } else {
+            let guarantee = self.driver.read_only_guarantee(&connection).await?;
+            if guarantee == ReadOnlyGuarantee::Unavailable
+                && request.operation == Operation::QueryExecute
+                && classify_query_kind(request.input["text"].as_str().unwrap_or("")) != "select"
+            {
+                return Err(failure(ErrorCode::WriteNotAllowed));
+            }
+            guarantee_label(guarantee)
+        };
         context.transient_auth = self.auth.context(&connection, context.deadline_ms).await?;
         context.deadline_ms = lease.deadline_at_ms.saturating_sub(now_ms());
         if context.deadline_ms == 0 {
@@ -729,8 +854,9 @@ impl ServiceRuntime {
                     output,
                     None,
                     reservation.as_ref(),
+                    guarantee,
                 )?;
-                Ok(from_page(request, page))
+                Ok(from_page(request, with_guarantee(page, guarantee)))
             }
         }
     }
@@ -765,11 +891,11 @@ impl ServiceRuntime {
                         .driver
                         .supports(connection, Operation::QueryNext)
                         .await?
-                        || self.driver.read_only_guarantee(connection).await?
-                            == ReadOnlyGuarantee::Unavailable
                     {
                         return Err(failure(ErrorCode::CapabilityUnavailable));
                     }
+                    let guarantee =
+                        guarantee_label(self.driver.read_only_guarantee(connection).await?);
                     context.transient_auth =
                         self.auth.context(connection, context.deadline_ms).await?;
                     let reservation = self
@@ -786,8 +912,10 @@ impl ServiceRuntime {
                         output,
                         Some(&binding),
                         Some(&reservation),
+                        guarantee,
                     )?;
-                    self.results.finish_next(token, &binding, page)
+                    self.results
+                        .finish_next(token, &binding, with_guarantee(page, guarantee))
                 }
                 .await;
                 match result {
@@ -873,6 +1001,7 @@ impl ServiceRuntime {
         output: DriverOutput,
         previous: Option<&CursorBinding>,
         reservation: Option<&super::results::ResultReservation>,
+        guarantee: &str,
     ) -> ServiceResult<StoredPage> {
         let origin = if connection.driver == "cosmos-nosql"
             && request.operation == Operation::QueryExecute
@@ -985,11 +1114,12 @@ impl ServiceRuntime {
             }
         }
         let mut page = if let Some(snapshot) = snapshot {
-            let id = self.results.insert_reserved_with_origin(
+            let id = self.results.insert_labeled(
                 binding.clone(),
                 snapshot,
                 reservation,
                 origin,
+                Some(guarantee),
             )?;
             let page = self.results.page(&id, &binding, 0, 0, page_size)?;
             if cursor.is_some() && page.page.has_more {
@@ -1057,17 +1187,13 @@ impl ServiceRuntime {
                 | Operation::AuthCancel
                 | Operation::AuthLogout
         );
+        let is_write = match self.admit(request, caller).await {
+            Ok(value) => value,
+            Err(error) => return error_response(request, error),
+        };
         let lease = match self.jobs.begin(request, caller, false, control).await {
             Ok(lease) => lease,
             Err(error) => return error_response(request, error),
-        };
-        let is_write = match self.classify(request, caller, &lease).await {
-            Ok(value) => value,
-            Err(error) => {
-                return lease
-                    .finish(error_response(request, error.clone()))
-                    .unwrap_or_else(|_| error_response(request, error))
-            }
         };
         self.complete(request, caller, lease, is_write).await
     }
@@ -1175,6 +1301,16 @@ impl ServiceRuntime {
         {
             return Err(failure(ErrorCode::CapabilityUnavailable));
         }
+        match request.operation {
+            Operation::ConnectionCreate => {
+                super::security::reject_secret_fields(&request.input["settings"])?
+            }
+            Operation::ConnectionUpdate => {
+                super::security::reject_secret_fields(&request.input["patch"])?;
+                super::security::reject_secret_fields(&request.input["patch"]["settings"])?;
+            }
+            _ => {}
+        }
         if request.session_id.is_some()
             && !matches!(
                 request.operation,
@@ -1212,6 +1348,13 @@ impl ServiceRuntime {
         if control {
             return self.call_validated(&request, &caller).await;
         }
+        let is_write = match self.admit(&request, &caller).await {
+            Ok(value) => value,
+            Err(error) => {
+                self.secret_inputs.discard(&caller, &request.request_id);
+                return error_response(&request, error);
+            }
+        };
         let mut lease = match self.jobs.queue(&request, &caller, false, false) {
             Ok(lease) => lease,
             Err(error) => {
@@ -1237,14 +1380,9 @@ impl ServiceRuntime {
                 request: &request,
             };
             match runtime.jobs.start(&mut lease).await {
-                Ok(()) => match runtime.classify(&request, &caller, &lease).await {
-                    Ok(is_write) => {
-                        runtime.complete(&request, &caller, lease, is_write).await;
-                    }
-                    Err(error) => {
-                        let _ = lease.finish(error_response(&request, error));
-                    }
-                },
+                Ok(()) => {
+                    runtime.complete(&request, &caller, lease, is_write).await;
+                }
                 Err(error) => {
                     let _ = lease.finish(error_response(&request, error));
                 }
@@ -1328,18 +1466,22 @@ impl ServiceRuntime {
         }
         Ok(())
     }
-    async fn classify(
-        &self,
-        request: &ServiceRequest,
-        caller: &CallerContext,
-        lease: &JobLease,
-    ) -> ServiceResult<bool> {
-        tokio::time::timeout(
-            Duration::from_millis(lease.deadline_at_ms.saturating_sub(now_ms())),
+    /// Decides whether a request is a write and rejects it before queueing
+    /// when its intent is missing or the connection is read-only.
+    async fn admit(&self, request: &ServiceRequest, caller: &CallerContext) -> ServiceResult<bool> {
+        if caller.transport == CallerTransport::Mcp
+            && super::policy::mcp_forbidden(request.operation)
+        {
+            return Err(failure(ErrorCode::OperationNotAllowed));
+        }
+        let is_write = tokio::time::timeout(
+            Duration::from_millis(request.deadline_ms),
             self.is_write(request, caller),
         )
         .await
-        .map_err(|_| failure(ErrorCode::DeadlineExceeded))?
+        .map_err(|_| failure(ErrorCode::DeadlineExceeded))??;
+        self.write_gate(request, caller, is_write).await?;
+        Ok(is_write)
     }
     fn start_maintenance(self: &Arc<Self>) -> ServiceResult<()> {
         let handle = tokio::runtime::Handle::try_current()
@@ -1429,6 +1571,23 @@ fn success(request: &ServiceRequest, data: Value) -> ServiceResponse {
         error: None,
     }
 }
+fn guarantee_label(guarantee: ReadOnlyGuarantee) -> &'static str {
+    match guarantee {
+        ReadOnlyGuarantee::ReadOnlyTransaction => "read_only_transaction",
+        ReadOnlyGuarantee::RestrictedDatabasePrincipal => "restricted_database_principal",
+        ReadOnlyGuarantee::ReadOnlyDataPlaneRole => "read_only_data_plane_role",
+        ReadOnlyGuarantee::ReadOnlyAccountKey => "read_only_account_key",
+        ReadOnlyGuarantee::ReadOnlySdkOperations => "read_only_sdk_operations",
+        ReadOnlyGuarantee::Unavailable => "classification_only",
+    }
+}
+fn with_guarantee(mut page: StoredPage, guarantee: &str) -> StoredPage {
+    if let Some(data) = page.data.as_object_mut() {
+        data.entry("readonly_guarantee")
+            .or_insert_with(|| json!(guarantee));
+    }
+    page
+}
 fn error_response(
     request: &ServiceRequest,
     error: super::contracts::ServiceError,
@@ -1465,8 +1624,10 @@ fn integer(value: &Value, key: &str) -> ServiceResult<usize> {
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| failure(ErrorCode::InvalidArgument))
 }
-fn public_connection(connection: &SavedConnection) -> Value {
-    json!({"connection_id":connection.id,"name":connection.name,"driver":connection.driver,"settings":sanitized_settings(&connection.settings),"credential_ref":connection.credential_ref,"version":connection.version,"allow_writes":connection.allow_writes})
+/// `allow_writes` is the effective permission from the profile's MCP
+/// read-only settings, not the value saved on the connection.
+fn public_connection(connection: &SavedConnection, allow_writes: bool) -> Value {
+    json!({"connection_id":connection.id,"name":connection.name,"driver":connection.driver,"settings":sanitized_settings(&connection.settings),"credential_ref":connection.credential_ref,"version":connection.version,"allow_writes":allow_writes})
 }
 fn authorize_binding(
     binding: &CursorBinding,
@@ -1493,7 +1654,12 @@ fn validate_driver_owned_entra(settings: &Value, extra: &Value) -> ServiceResult
             .or_else(|| extra.get(key))
             .filter(|value| !value.is_null())
     };
-    let entra_keys = ["auth_source", "tenant_id", "entra_object_id", "azure_cli_path"];
+    let entra_keys = [
+        "auth_source",
+        "tenant_id",
+        "entra_object_id",
+        "azure_cli_path",
+    ];
     match extra["auth_mode"].as_str() {
         Some("entra_user") => {}
         Some("entra_service_principal") => return Err(failure(ErrorCode::InvalidArgument)),

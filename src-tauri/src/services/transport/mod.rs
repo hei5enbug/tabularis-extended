@@ -21,6 +21,7 @@ use std::{
 };
 use tokio::time::{timeout_at, Instant};
 
+pub use super::policy::mcp_forbidden;
 pub use mcp::{ArtifactResource, LegacyMcpBackend, ResourceRead};
 pub use request::{error_exit_code, exit_code, MAX_FRAME_BYTES};
 pub use stdio::Mode;
@@ -101,7 +102,9 @@ impl ServiceTransport {
         if caller.transport == CallerTransport::LocalIpc {
             return Err(failure(ErrorCode::PermissionDenied));
         }
-        if decoded.operation != Operation::QueryExecute || decoded.connection_id.is_none() {
+        if !super::policy::accepts_write_intent(decoded.operation)
+            || decoded.connection_id.is_none()
+        {
             return Err(failure(ErrorCode::InvalidArgument));
         }
         self.policy
@@ -124,10 +127,8 @@ impl ServiceTransport {
         decoded: ServiceRequest,
         caller: CallerContext,
     ) -> ServiceResult<ServiceResponse> {
-        if caller.transport == CallerTransport::Mcp
-            && decoded.operation == Operation::CredentialImport
-        {
-            return Err(failure(ErrorCode::PermissionDenied));
+        if caller.transport == CallerTransport::Mcp && mcp_forbidden(decoded.operation) {
+            return Err(failure(ErrorCode::OperationNotAllowed));
         }
         let remote = request::control_operation(decoded.operation)
             && matches!(
@@ -349,7 +350,7 @@ impl ServiceTransport {
             return Err(failure(ErrorCode::Cancelled));
         }
         let decoded = request::decode(&self.validator, &raw)?;
-        if write_intent && decoded.operation == Operation::QueryExecute {
+        if write_intent && super::policy::accepts_write_intent(decoded.operation) {
             self.register_query_write(raw.clone(), &caller)?;
         }
         self.call(raw, caller, signal).await

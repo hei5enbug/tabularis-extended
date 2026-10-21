@@ -27,8 +27,10 @@ use std::{
 };
 
 mod approvals;
+mod connection_policy;
 mod connections;
 mod guarded;
+mod history;
 mod origin_policy;
 
 struct Directory(PathBuf);
@@ -148,6 +150,7 @@ impl ServiceParamExpander for CountExpander {
 struct CountDriver {
     calls: AtomicUsize,
     invalidations: AtomicUsize,
+    fail_with_secret: std::sync::atomic::AtomicBool,
 }
 #[async_trait]
 impl DriverBackend for CountDriver {
@@ -164,6 +167,12 @@ impl DriverBackend for CountDriver {
         _: DriverContext,
     ) -> ServiceResult<DriverOutput> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_with_secret.load(Ordering::SeqCst) {
+            let mut error = failure(ErrorCode::DriverExited);
+            error.message = "canary-password-token-593".into();
+            error.details = json!({"access_token":"canary-password-token-593"});
+            return Err(error);
+        }
         Ok(DriverOutput {
             data: json!({"affected_rows":1}),
             snapshot: None,
@@ -247,6 +256,10 @@ impl Harness {
             oauth.clone(),
         )
         .unwrap();
+        runtime.set_history(Arc::new(crate::service_platform::QueryHistory::new(
+            directory.0.clone(),
+            "platform-owner".into(),
+        )));
         Self {
             directory,
             connections,

@@ -4,6 +4,7 @@ use super::{
     security::{digest, opaque_id},
     storage::{now_ms, PrivateStore},
 };
+use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{path::PathBuf, sync::Arc};
@@ -106,6 +107,8 @@ struct SnapshotRecord {
     snapshot: ResultSnapshot,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     origin: Option<ResultOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    readonly_guarantee: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -168,6 +171,9 @@ pub struct ResultStore {
     store: Arc<PrivateStore>,
     ttl_ms: u64,
     max_bytes: u64,
+    /// Held shared for the life of the store so that a starting process can
+    /// tell whether any other process still uses this directory.
+    _alive: std::fs::File,
 }
 
 fn snapshot_checksum(
@@ -189,14 +195,38 @@ impl ResultStore {
         Self::with_limits(root, RESULT_TTL_MS, MAX_CACHE_BYTES)
     }
     pub fn with_limits(root: PathBuf, ttl_ms: u64, max_bytes: u64) -> ServiceResult<Self> {
-        Ok(Self {
-            store: Arc::new(PrivateStore::new(
-                root,
-                (MAX_RESULT_BYTES + MAX_PAGE_BYTES + 1024 * 1024) as u64,
-            )?),
+        let store = Arc::new(PrivateStore::new(
+            root,
+            (MAX_RESULT_BYTES + MAX_PAGE_BYTES + 1024 * 1024) as u64,
+        )?);
+        let alive = store.named_file("alive.lock")?;
+        let result = Self {
+            store,
             ttl_ms: ttl_ms.min(RESULT_TTL_MS),
             max_bytes: max_bytes.min(MAX_CACHE_BYTES),
-        })
+            _alive: alive,
+        };
+        result.startup_sweep()?;
+        Ok(result)
+    }
+    /// Removes what an earlier process left behind. Another running process
+    /// keeps its own results, so everything is swept only when this process
+    /// is the only user of the directory; expired entries always go.
+    fn startup_sweep(&self) -> ServiceResult<()> {
+        let _lock = self.store.lock()?;
+        let sole_user = FileExt::try_lock_exclusive(&self._alive).is_ok();
+        FileExt::lock_shared(&self._alive).map_err(|_| failure(ErrorCode::ResourceLimit))?;
+        self.store.remove_temporaries()?;
+        if !sole_user {
+            return self.cleanup_locked();
+        }
+        for id in self.store.ids()? {
+            match self.store.read::<CacheRecord>(&id) {
+                Ok(Some(CacheRecord::AuthRevision { .. })) => {}
+                _ => self.store.remove(&id)?,
+            }
+        }
+        Ok(())
     }
     pub fn root(&self) -> &std::path::Path {
         self.store.root()
@@ -279,6 +309,18 @@ impl ResultStore {
         reservation: Option<&ResultReservation>,
         origin: Option<ResultOrigin>,
     ) -> ServiceResult<String> {
+        self.insert_labeled(binding, snapshot, reservation, origin, None)
+    }
+    /// Stores a result together with the read-only guarantee that applied
+    /// when it ran, so `result.get` reports it without re-running anything.
+    pub fn insert_labeled(
+        &self,
+        binding: CursorBinding,
+        snapshot: ResultSnapshot,
+        reservation: Option<&ResultReservation>,
+        origin: Option<ResultOrigin>,
+        readonly_guarantee: Option<&str>,
+    ) -> ServiceResult<String> {
         let snapshot = bound_snapshot(snapshot)?;
         if snapshot.revision != binding.result_revision {
             return Err(failure(ErrorCode::InvalidArgument));
@@ -304,6 +346,7 @@ impl ResultStore {
             checksum,
             snapshot,
             origin,
+            readonly_guarantee: readonly_guarantee.map(str::to_owned),
         });
         let _lock = self.store.lock()?;
         self.cleanup_locked()?;
@@ -384,7 +427,11 @@ impl ResultStore {
         data["result_set_index"] = set_index.into();
         data["result_set_count"] = snapshot.sets.len().into();
         data["offset"] = offset.into();
+        data["stored_row_count"] = set.rows.len().into();
         data["result_revision"] = snapshot.revision.into();
+        if let Some(label) = record.readonly_guarantee {
+            data["readonly_guarantee"] = label.into();
+        }
         if matches!(set.kind, ResultKind::Documents | ResultKind::JsonValues) {
             if let Some(origin) = record.origin {
                 data["origin"] =

@@ -1226,6 +1226,8 @@ async fn tool_run_query(
             client_hint: ai_activity::get_client_hint(),
             explain_plan,
             explain_error,
+            editable: true,
+            service: None,
         };
 
         if let Err(e) = ai_approval::write_pending(&pending) {

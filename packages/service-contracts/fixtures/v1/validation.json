@@ -10036,5 +10036,113 @@
         "persistence": "session"
       }
     }
+  },
+  {
+    "name": "쓰기 의도 누락 오류 코드를 허용한다",
+    "schema": "response",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "request_id": "fixture-response",
+      "connection_id": "connection-1",
+      "status": "failed",
+      "job_id": null,
+      "result_id": null,
+      "data": null,
+      "page": {
+        "next_token": null,
+        "has_more": false,
+        "resume_mode": "none"
+      },
+      "limits": {
+        "truncated": false,
+        "reasons": []
+      },
+      "metrics": {
+        "elapsed_ms": 0,
+        "request_charge": null,
+        "retry_count": 0
+      },
+      "warnings": [],
+      "error": {
+        "code": "WRITE_INTENT_REQUIRED",
+        "message": "Rejected before queueing",
+        "retryable": false,
+        "outcome": "not_started",
+        "details": null
+      }
+    }
+  },
+  {
+    "name": "비밀 거부 오류 코드를 허용한다",
+    "schema": "response",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "request_id": "fixture-response",
+      "connection_id": "connection-1",
+      "status": "failed",
+      "job_id": null,
+      "result_id": null,
+      "data": null,
+      "page": {
+        "next_token": null,
+        "has_more": false,
+        "resume_mode": "none"
+      },
+      "limits": {
+        "truncated": false,
+        "reasons": []
+      },
+      "metrics": {
+        "elapsed_ms": 0,
+        "request_charge": null,
+        "retry_count": 0
+      },
+      "warnings": [],
+      "error": {
+        "code": "SECRET_NOT_ACCEPTED",
+        "message": "Rejected before queueing",
+        "retryable": false,
+        "outcome": "not_started",
+        "details": null
+      }
+    }
+  },
+  {
+    "name": "MCP 금지 작업 오류 코드를 허용한다",
+    "schema": "response",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "request_id": "fixture-response",
+      "connection_id": "connection-1",
+      "status": "failed",
+      "job_id": null,
+      "result_id": null,
+      "data": null,
+      "page": {
+        "next_token": null,
+        "has_more": false,
+        "resume_mode": "none"
+      },
+      "limits": {
+        "truncated": false,
+        "reasons": []
+      },
+      "metrics": {
+        "elapsed_ms": 0,
+        "request_charge": null,
+        "retry_count": 0
+      },
+      "warnings": [],
+      "error": {
+        "code": "OPERATION_NOT_ALLOWED",
+        "message": "Rejected before queueing",
+        "retryable": false,
+        "outcome": "not_started",
+        "details": null
+      }
+    }
   }
 ]
