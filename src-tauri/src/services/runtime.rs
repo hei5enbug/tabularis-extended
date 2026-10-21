@@ -557,6 +557,8 @@ impl ServiceRuntime {
             };
             lease.set_awaiting_approval(false);
             approved?;
+            self.recheck_after_approval(request, caller, &connection, is_write)
+                .await?;
         }
         let mut context = DriverContext {
             connection_id: connection.id.clone(),
@@ -1572,6 +1574,26 @@ impl ServiceRuntime {
                 .await?;
         }
         self.jobs.recover_owner(self.jobs.instance_id())
+    }
+    /// An approval authorizes the permission and the saved connection it was
+    /// requested for; neither may have changed while it was pending.
+    async fn recheck_after_approval(
+        &self,
+        request: &ServiceRequest,
+        caller: &CallerContext,
+        connection: &SavedConnection,
+        is_write: bool,
+    ) -> ServiceResult<()> {
+        let (current, permission) = self.connection(request, caller).await?;
+        if is_write && !permission.allow_writes {
+            return Err(failure(ErrorCode::WriteNotAllowed));
+        }
+        if current.version != connection.version {
+            let mut error = failure(ErrorCode::ConnectionConflict);
+            error.details = json!({"current_version":current.version});
+            return Err(error);
+        }
+        Ok(())
     }
     async fn revalidate(
         &self,

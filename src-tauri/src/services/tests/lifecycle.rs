@@ -417,3 +417,58 @@ async fn 취소_제어_요청은_일반_작업_semaphore를_기다리지_않는�
     // then
     assert!(actual.is_ok_and(|result| result.is_ok()));
 }
+
+#[test]
+fn 작업_목록_조회와_작업_종료가_동시에_반복돼도_교착하지_않는다() {
+    // given
+    let directory = TestDirectory::new();
+    let manager = JobManager::new("owner".into(), directory.0.clone()).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (done, finished) = std::sync::mpsc::channel();
+
+    // when
+    let readers: Vec<_> = (0..4)
+        .map(|_| {
+            let (manager, stop) = (manager.clone(), stop.clone());
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::SeqCst) {
+                    let _ = manager.live_jobs();
+                    let _ = manager.live_details();
+                }
+            })
+        })
+        .collect();
+    let completers: Vec<_> = (0..4)
+        .map(|_| {
+            let (manager, done) = (manager.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut held = Vec::new();
+                for _ in 0..3000 {
+                    held.push(manager.queue(&query("SELECT 1"), &caller(), false, true).unwrap());
+                    if held.len() >= 8 {
+                        held.clear();
+                    }
+                }
+                drop(held);
+                let _ = done.send(());
+            })
+        })
+        .collect();
+    drop(done);
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let completed = (0..completers.len())
+        .filter(|_| {
+            finished
+                .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                .is_ok()
+        })
+        .count();
+    stop.store(true, Ordering::SeqCst);
+
+    // then
+    assert_eq!(completed, completers.len());
+    assert_eq!(manager.active_count(), 0);
+    for reader in readers {
+        reader.join().unwrap();
+    }
+}

@@ -396,3 +396,59 @@ fn sqlserver_plus_설정은_driver_extra_키를_client_id_없이_정규화한다
     assert_eq!(actual.extra["auth_source"], "azure_cli");
     assert!(!actual.extra.contains_key("client_id"));
 }
+
+#[tokio::test]
+async fn mcp_설정_갱신은_키체인_저장_상태와_비밀을_그대로_유지한다() {
+    // given
+    let harness = Harness::new().await;
+    let saved = harness.connections.get("fixture").await.unwrap();
+    let raw = json!({"groups":[],"connections":[{"id":"fixture","name":"Fixture","params":{
+        "driver":saved.driver,"host":"localhost","port":5432,"database":"fixture",
+        "save_in_keychain":true,"connectionUriInKeychain":true,
+        "ssh_key_passphrase":"synthetic-passphrase",
+        "extra":{"api_token":"synthetic-token"}}}]});
+    persistence::service_write_atomic(
+        harness.connections.path(),
+        &serde_json::to_vec(&raw).unwrap(),
+    )
+    .unwrap();
+    let before = harness.connections.get("fixture").await.unwrap();
+    let update = update_request(
+        before.version,
+        json!({"settings":{"host":"localhost","port":5433,"database":"fixture"}}),
+    );
+    let secrets = Arc::new(FakeSecrets {
+        password: Some("keychain-password".into()),
+        uri: Ok(Some("synthetic://restored".into())),
+    });
+
+    // when
+    let updated = approve_and_finish(&harness, update).await;
+    let stored = harness.connections.private_params("fixture").unwrap();
+    let on_disk: Value =
+        serde_json::from_slice(&std::fs::read(harness.connections.path()).unwrap()).unwrap();
+    let restored = restore_saved_secrets(secrets, stored.clone(), "fixture")
+        .await
+        .unwrap();
+
+    // then
+    assert_eq!(updated.1.status, JobStatus::Succeeded);
+    assert_eq!(stored.port, Some(5433));
+    assert_eq!(stored.save_in_keychain, Some(true));
+    assert_eq!(stored.connection_uri_in_keychain, Some(true));
+    assert_eq!(
+        stored.ssh_key_passphrase.as_deref(),
+        Some("synthetic-passphrase")
+    );
+    assert_eq!(stored.extra["api_token"], "synthetic-token");
+    assert_eq!(on_disk["connections"][0]["params"]["save_in_keychain"], true);
+    assert_eq!(
+        on_disk["connections"][0]["params"]["connection_uri_in_keychain"],
+        true
+    );
+    assert_eq!(restored.password.as_deref(), Some("keychain-password"));
+    assert_eq!(
+        restored.connection_uri.as_deref(),
+        Some("synthetic://restored")
+    );
+}

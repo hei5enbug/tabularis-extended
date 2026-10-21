@@ -55,6 +55,14 @@ fn is_secret_name(key: &str) -> bool {
     .any(|suffix| key.ends_with(suffix))
 }
 
+/// An `extra` key that looks like it carries a credential.
+pub(crate) fn is_secret_extra_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    ["password", "secret", "token", "key"]
+        .iter()
+        .any(|word| lower.contains(word))
+}
+
 /// Connection settings that are saved without the user typing them in the
 /// app: no secret fields, and no `extra` key that looks like one.
 pub fn reject_secret_fields(settings: &Value) -> ServiceResult<()> {
@@ -68,11 +76,7 @@ pub fn reject_secret_fields(settings: &Value) -> ServiceResult<()> {
         }
         if key == "extra" {
             for extra_key in value.as_object().into_iter().flat_map(|extra| extra.keys()) {
-                let lower = extra_key.to_ascii_lowercase();
-                if ["password", "secret", "token", "key"]
-                    .iter()
-                    .any(|word| lower.contains(word))
-                {
+                if is_secret_extra_key(extra_key) {
                     return Err(rejected());
                 }
             }

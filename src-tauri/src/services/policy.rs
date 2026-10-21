@@ -252,14 +252,25 @@ impl ApprovalPolicy {
         {
             return Err(failure(ErrorCode::WriteNotAllowed));
         }
-        let mut consumed = self
-            .consumed
-            .lock()
-            .map_err(|_| failure(ErrorCode::WriteNotAllowed))?;
-        if consumed.len() >= 16_384 {
-            return Err(failure(ErrorCode::ResourceLimit));
+        {
+            let mut consumed = self
+                .consumed
+                .lock()
+                .map_err(|_| failure(ErrorCode::WriteNotAllowed))?;
+            if consumed.len() >= 16_384 {
+                return Err(failure(ErrorCode::ResourceLimit));
+            }
+            if !consumed.insert(grant.approval_id) {
+                return Err(failure(ErrorCode::WriteNotAllowed));
+            }
         }
-        if !consumed.insert(grant.approval_id) {
+        if write
+            && !self
+                .access
+                .permission(connection, caller)
+                .await?
+                .allow_writes
+        {
             return Err(failure(ErrorCode::WriteNotAllowed));
         }
         Ok(())

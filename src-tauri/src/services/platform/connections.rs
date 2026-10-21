@@ -88,6 +88,19 @@ impl ProfileConnections {
                 .ok_or_else(|| failure(ErrorCode::ConnectionNotFound))
         })
     }
+    /// The stored params of a connection read at `revision`; a connection
+    /// edited since then is a conflict, whatever the edit was.
+    pub fn private_params_at(&self, id: &str, revision: u64) -> ServiceResult<ConnectionParams> {
+        persistence::transact_connections(&self.path, |file, _| {
+            let connection = file
+                .connections
+                .iter()
+                .find(|connection| connection.id == id)
+                .ok_or_else(|| failure(ErrorCode::ConnectionNotFound))?;
+            require_version(connection.revision, revision)?;
+            Ok(connection.params.clone())
+        })
+    }
     fn fresh(&self, id: &str, detect_changes: bool) -> ServiceResult<(SavedConnection, bool)> {
         persistence::transact_connections(&self.path, |file, raw| {
             let connection = file
@@ -236,7 +249,8 @@ impl ProfileConnections {
             if let Some(name) = name {
                 connection.name = name;
             }
-            if let Some(params) = new_params {
+            if let Some(mut params) = new_params {
+                carry_protected_params(&connection.params, &mut params);
                 record["params"] = merged_params(&record["params"], &connection.params, &params)?;
                 connection.params = params;
                 metadata.settings_fingerprint = settings_fingerprint(&record["params"]);
@@ -553,6 +567,22 @@ fn public(
         auth_revision: metadata.auth_revision.clone(),
     })
 }
+/// Settings updates are rebuilt from non-secret input, so every credential and
+/// credential-storage marker of the stored record is carried over unchanged.
+fn carry_protected_params(previous: &ConnectionParams, next: &mut ConnectionParams) {
+    next.password = previous.password.clone();
+    next.save_in_keychain = previous.save_in_keychain;
+    next.connection_uri = previous.connection_uri.clone();
+    next.connection_uri_in_keychain = previous.connection_uri_in_keychain;
+    next.ssh_password = previous.ssh_password.clone();
+    next.ssh_key_passphrase = previous.ssh_key_passphrase.clone();
+    for (key, value) in &previous.extra {
+        if crate::services::security::is_secret_extra_key(key) {
+            next.extra.insert(key.clone(), value.clone());
+        }
+    }
+}
+
 fn merged_params(
     raw: &Value,
     previous: &ConnectionParams,

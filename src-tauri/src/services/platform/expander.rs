@@ -189,7 +189,9 @@ impl ProfileConnectionResolver {
 #[async_trait]
 impl ServiceConnectionResolver for ProfileConnectionResolver {
     async fn params(&self, connection: &SavedConnection) -> ServiceResult<ConnectionParams> {
-        let raw = self.connections.private_params(&connection.id)?;
+        let raw = self
+            .connections
+            .private_params_at(&connection.id, connection.version)?;
         if raw.driver != connection.driver
             || raw
                 .connection_id

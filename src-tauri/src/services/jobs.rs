@@ -106,23 +106,32 @@ impl JobManager {
     /// Jobs this process still holds, with no SQL text: enough to list and
     /// cancel them even when no history is being written.
     pub fn live_details(&self) -> Vec<LiveJob> {
+        self.active_handles()
+            .into_iter()
+            .filter_map(|(_, job)| {
+                let record = job.record.lock().ok()?;
+                let meta = job.history.as_ref()?;
+                Some(LiveJob {
+                    job_id: record.job_id.clone(),
+                    operation: meta.operation.clone(),
+                    connection_id: record.connection_id.clone(),
+                    status: record.status,
+                    started_ms: meta.started_ms,
+                })
+            })
+            .collect()
+    }
+    /// Lock order is `state` before any job `record`, and never both held at
+    /// once: handles are copied out under `state` and records locked after it
+    /// is released.
+    fn active_handles(&self) -> Vec<(String, Arc<ActiveJob>)> {
         self.state
             .lock()
             .map(|state| {
                 state
                     .active_jobs
-                    .values()
-                    .filter_map(|job| {
-                        let record = job.record.lock().ok()?;
-                        let meta = job.history.as_ref()?;
-                        Some(LiveJob {
-                            job_id: record.job_id.clone(),
-                            operation: meta.operation.clone(),
-                            connection_id: record.connection_id.clone(),
-                            status: record.status,
-                            started_ms: meta.started_ms,
-                        })
-                    })
+                    .iter()
+                    .map(|(id, job)| (id.clone(), job.clone()))
                     .collect()
             })
             .unwrap_or_default()
@@ -134,21 +143,15 @@ impl JobManager {
     /// The jobs this process still holds, for the history reader.
     pub fn live_jobs(&self) -> LiveJobs {
         let statuses = self
-            .state
-            .lock()
-            .map(|state| {
-                state
-                    .active_jobs
-                    .iter()
-                    .filter_map(|(id, job)| {
-                        job.record
-                            .lock()
-                            .ok()
-                            .map(|record| (id.clone(), record.status))
-                    })
-                    .collect()
+            .active_handles()
+            .into_iter()
+            .filter_map(|(id, job)| {
+                job.record
+                    .lock()
+                    .ok()
+                    .map(|record| (id, record.status))
             })
-            .unwrap_or_default();
+            .collect();
         LiveJobs {
             instance_id: self.instance_id.clone(),
             statuses,
@@ -674,7 +677,7 @@ impl Drop for JobLease {
         if self.waiting {
             self.manager.waiting.fetch_sub(1, Ordering::SeqCst);
         }
-        if let Ok(mut record) = self.active.record.lock() {
+        let keys = if let Ok(mut record) = self.active.record.lock() {
             if !self.completed.load(Ordering::SeqCst) {
                 interrupt_record(&mut record);
                 if self.persisted {
@@ -691,11 +694,18 @@ impl Drop for JobLease {
                     history.record_interrupted(meta, record.status, code);
                 }
             }
+            Some((
+                record.connection_id.clone(),
+                record.request_id.clone(),
+                record.job_id.clone(),
+            ))
+        } else {
+            None
+        };
+        if let Some((connection_id, request_id, job_id)) = keys {
             if let Ok(mut state) = self.manager.state.lock() {
-                state
-                    .active_requests
-                    .remove(&(record.connection_id.clone(), record.request_id.clone()));
-                state.active_jobs.remove(&record.job_id);
+                state.active_requests.remove(&(connection_id, request_id));
+                state.active_jobs.remove(&job_id);
             }
         }
     }

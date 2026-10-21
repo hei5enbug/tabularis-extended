@@ -233,6 +233,29 @@ async fn resolver는_명시_연결의_private_params만_확장한다() {
 }
 
 #[tokio::test]
+async fn 수정된_연결의_이전_snapshot으로는_private_params를_확장하지_않고_충돌로_끝낸다() {
+    // given
+    let harness = Harness::new().await;
+    let original = harness.connections.get("fixture").await.unwrap();
+    harness
+        .connections
+        .update("fixture", original.version, json!({"name":"Edited"}))
+        .await
+        .unwrap();
+    let expander = Arc::new(CountExpander::default());
+    let resolver = ProfileConnectionResolver::new(harness.connections.clone(), expander.clone());
+
+    // when
+    let actual =
+        crate::service_registry_driver::ServiceConnectionResolver::params(&resolver, &original)
+            .await;
+
+    // then
+    assert_eq!(actual.unwrap_err().code, ErrorCode::ConnectionConflict);
+    assert_eq!(expander.0.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn 다른_driver의_saved_claim은_private_자격증명_확장전에_거부한다() {
     // given
     let harness = Harness::new().await;

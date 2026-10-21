@@ -618,6 +618,135 @@ async fn 만개_행_결과는_한번의_실행으로_빠짐없이_중복없이_�
     assert!(last.get("truncated").is_some() && last.get("truncation_reason").is_some());
 }
 
+fn emitted_numbers(page: &Value) -> Vec<u64> {
+    summary(page)["data"]["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row[0].as_u64().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn 크기_때문에_줄인_페이지의_토큰과_next_offset은_생략된_첫_행에서_이어진다() {
+    // given
+    let h = Harness::new().await;
+    h.state.rows.store(100, Ordering::SeqCst);
+    h.state.cell_bytes.store(2_400, Ordering::SeqCst);
+    let first = call(
+        &h,
+        "query_execute",
+        json!({"connection_id":h.id,"text":"select n from wide","page_size":100}),
+    )
+    .await;
+    let result_id = summary(&first)["result_id"].as_str().unwrap().to_owned();
+    let emitted = emitted_numbers(&first);
+    let token = summary(&first)["page"]["next_token"].as_str().unwrap().to_owned();
+    let next_offset = summary(&first)["data"]["next_offset"].as_u64().unwrap();
+
+    // when
+    let by_token = call(
+        &h,
+        "query_next",
+        json!({"connection_id":h.id,"next_token":token}),
+    )
+    .await;
+    let by_offset = call(
+        &h,
+        "result_get",
+        json!({"connection_id":h.id,"result_id":result_id,"offset":next_offset,"limit":100}),
+    )
+    .await;
+    let mut all = emitted.clone();
+    let mut page = first.clone();
+    while summary(&page)["data"]["has_more"] == true {
+        let token = summary(&page)["page"]["next_token"].as_str().unwrap().to_owned();
+        page = call(
+            &h,
+            "query_next",
+            json!({"connection_id":h.id,"next_token":token}),
+        )
+        .await;
+        all.extend(emitted_numbers(&page));
+    }
+
+    // then
+    assert!(!emitted.is_empty() && emitted.len() < 100, "{}", emitted.len());
+    assert_eq!(next_offset, emitted.len() as u64);
+    assert_eq!(emitted_numbers(&by_token)[0], emitted.len() as u64);
+    assert_eq!(emitted_numbers(&by_offset)[0], emitted.len() as u64);
+    assert_eq!(emitted_numbers(&by_token), emitted_numbers(&by_offset));
+    assert_eq!(all, (0..100).collect::<Vec<u64>>());
+    assert!(serde_json::to_vec(&first).unwrap().len() <= 64 * 1024);
+}
+
+#[tokio::test]
+async fn 열이_삼백개인_테이블의_describe는_모든_열을_돌려준다() {
+    // given
+    let h = Harness::new().await;
+    h.state.columns.store(300, Ordering::SeqCst);
+
+    // when
+    let described = call(
+        &h,
+        "catalog_describe",
+        json!({"connection_id":h.id,"table":"records"}),
+    )
+    .await;
+
+    // then
+    let columns = summary(&described)["data"]["columns"].as_array().unwrap();
+    assert_eq!(columns.len(), 300);
+    assert_eq!(columns[299]["name"], "column_299");
+    assert_eq!(summary(&described)["data"]["has_more"], false);
+    assert_eq!(summary(&described)["presentation_truncated"], false);
+    assert!(serde_json::to_vec(&described).unwrap().len() <= 64 * 1024);
+}
+
+#[tokio::test]
+async fn 개체가_이천개인_목록은_offset으로_빠짐없이_이어_받는다() {
+    // given
+    let h = Harness::new().await;
+    h.state.objects.store(2_000, Ordering::SeqCst);
+
+    // when
+    let mut names: Vec<String> = Vec::new();
+    let mut sizes = Vec::new();
+    let mut offset = 0u64;
+    loop {
+        let page = call(
+            &h,
+            "catalog_objects",
+            json!({"connection_id":h.id,"offset":offset}),
+        )
+        .await;
+        sizes.push(serde_json::to_vec(&page).unwrap().len());
+        let data = &summary(&page)["data"];
+        assert_eq!(data["offset"], offset);
+        names.extend(
+            data["objects"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|object| object["name"].as_str().unwrap().to_owned()),
+        );
+        if data["has_more"] != true {
+            assert!(data["next_offset"].is_null());
+            break;
+        }
+        offset = data["next_offset"].as_u64().unwrap();
+        assert_eq!(offset, names.len() as u64);
+    }
+
+    // then
+    assert_eq!(
+        names,
+        (0..2_000).map(|n| format!("object_{n:04}")).collect::<Vec<_>>()
+    );
+    assert!(sizes.len() > 1);
+    assert!(sizes.iter().all(|size| *size <= 64 * 1024), "{sizes:?}");
+}
+
 #[tokio::test]
 async fn result_get은_범위를_벗어난_한도와_알수없는_결과를_거부한다() {
     // given

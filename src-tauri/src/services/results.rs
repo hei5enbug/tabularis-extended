@@ -557,6 +557,17 @@ impl ResultStore {
         )?;
         Ok(id)
     }
+    /// A page token that returns the rows of a stored result from `offset`.
+    pub fn resume_token(
+        &self,
+        result_id: &str,
+        set_index: usize,
+        offset: usize,
+        page_size: usize,
+    ) -> ServiceResult<String> {
+        let binding = self.result_binding(result_id)?;
+        self.materialized_token(result_id, &binding, set_index, offset, page_size)
+    }
     pub fn cursor_token(&self, state: CursorState) -> ServiceResult<String> {
         self.cursor_token_reserved(state, None)
     }

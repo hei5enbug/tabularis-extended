@@ -470,6 +470,106 @@ mod tests {
         assert_eq!(classify_query_kind("BEGIN"), "unknown");
     }
 
+    const APPENDED_STATEMENT_KEYWORDS: [&str; 44] = [
+        "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "TRUNCATE", "CREATE", "ALTER",
+        "DROP", "RENAME", "GRANT", "REVOKE", "DENY", "EXEC", "EXECUTE", "CALL", "DECLARE", "SET",
+        "BEGIN", "COMMIT", "ROLLBACK", "SAVE", "USE", "BACKUP", "RESTORE", "DBCC", "KILL",
+        "SHUTDOWN", "RECONFIGURE", "BULK", "OPENROWSET", "OPENDATASOURCE", "OPENQUERY", "WAITFOR",
+        "GO", "COPY", "VACUUM", "LOCK", "LOAD", "ATTACH", "DETACH", "PRAGMA", "HANDLER",
+    ];
+
+    #[test]
+    fn 세미콜론_없이_이어붙인_문장_키워드는_읽기로_분류하지_않는다() {
+        // given
+        let leads = ["SELECT TOP (1) 1 AS n", "(SELECT 1) UNION ALL (SELECT 2)", "WITH c AS (SELECT 1 AS n) SELECT n FROM c"];
+
+        // when
+        let actual: Vec<(String, &str)> = leads
+            .iter()
+            .flat_map(|lead| {
+                APPENDED_STATEMENT_KEYWORDS
+                    .iter()
+                    .flat_map(move |keyword| {
+                        [format!("{lead} {keyword} dbo.audit"), format!("{lead}\n{}", keyword.to_lowercase())]
+                    })
+            })
+            .map(|text| {
+                let kind = classify_query_kind(&text);
+                (text, kind)
+            })
+            .collect();
+
+        // then
+        for (text, kind) in actual {
+            assert_ne!(kind, "select", "{text}");
+        }
+    }
+
+    #[test]
+    fn 세미콜론_없이_이어붙인_delete는_unknown이고_into는_write다() {
+        // given
+        let batch = "SELECT TOP (1) 1 AS n DELETE FROM dbo.audit";
+        let into = "SELECT 1 AS n INTO dbo.copy_of_t";
+
+        // when
+        let batch_kind = classify_query_kind(batch);
+        let into_kind = classify_query_kind(into);
+
+        // then
+        assert_eq!(batch_kind, "unknown");
+        assert_eq!(into_kind, "write");
+    }
+
+    #[test]
+    fn 잠금_읽기와_중첩_구문_뒤의_쓰기도_읽기가_아니다() {
+        // given
+        let statements = [
+            "SELECT * FROM t WHERE id = 1 FOR UPDATE",
+            "SELECT * FROM t WHERE id IN (SELECT y FROM u) EXEC('x')",
+            "SELECT * FROM t WHERE EXISTS (SELECT 1 FROM u WHERE u.a = t.a) DROP TABLE t",
+            "SHOW TABLES DELETE FROM t",
+            "EXPLAIN ANALYZE SELECT 1 DELETE FROM t",
+        ];
+
+        // when
+        let actual: Vec<&str> = statements.iter().map(|text| classify_query_kind(text)).collect();
+
+        // then
+        assert!(actual.iter().all(|kind| *kind != "select"), "{actual:?}");
+    }
+
+    #[test]
+    fn 진짜_읽기와_키워드를_포함한_식별자는_계속_읽기로_분류한다() {
+        // given
+        let statements = [
+            "SELECT a, b FROM t WHERE x IN (SELECT y FROM u)",
+            "SELECT updated_at, delete_flag, set_id, created_by FROM t",
+            "SELECT REPLACE(name, 'a', 'b'), TRUNCATE(1.25, 1), INSERT('abc', 1, 1, 'x') FROM t",
+            "SELECT * FROM t USE INDEX (idx_a) WHERE a = 1",
+            "SELECT [Update], [Delete] FROM t",
+            "SELECT 'DELETE FROM t' AS s, \"update\" FROM t -- drop table t",
+            "WITH c AS (SELECT 1 AS n) SELECT n FROM c",
+            "EXPLAIN SELECT 1",
+            "EXPLAIN ANALYZE SELECT 1",
+            "SHOW TABLES",
+            "SHOW CREATE TABLE t",
+            "DESCRIBE users",
+            "DESC users",
+            "PRAGMA table_info(t)",
+        ];
+
+        // when
+        let actual: Vec<(&str, &str)> = statements
+            .iter()
+            .map(|text| (*text, classify_query_kind(text)))
+            .collect();
+
+        // then
+        for (text, kind) in actual {
+            assert_eq!(kind, "select", "{text}");
+        }
+    }
+
     #[test]
     fn classify_cte_with_select() {
         assert_eq!(

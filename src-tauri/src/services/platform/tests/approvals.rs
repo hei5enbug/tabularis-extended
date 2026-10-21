@@ -641,3 +641,131 @@ async fn 설정_json의_비밀은_pending_표시에도_저장하지_않는다() 
     assert_eq!(actual.unwrap_err().code, ErrorCode::InvalidArgument);
     assert_eq!(queue_counts(&harness.directory.0), (0, 0, 0));
 }
+
+fn pending_write() -> ServiceRequest {
+    request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":"DELETE FROM fixture","parameters":[],"page_size":10}),
+    )
+}
+async fn approve_after(
+    harness: &Harness,
+    request: ServiceRequest,
+    change: impl FnOnce(&Harness),
+) -> ServiceResponse {
+    let remote = caller(CallerTransport::Mcp);
+    harness
+        .policy
+        .register_query_write(&remote, &request)
+        .unwrap();
+    let queued = harness.runtime.submit(request, remote.clone()).await;
+    let pending = pending(&harness.approvals).await;
+    change(harness);
+    harness
+        .approvals
+        .approve_pending(
+            &pending.id,
+            &decision(&pending.id, true),
+            &caller(CallerTransport::Gui),
+        )
+        .unwrap();
+    let id = queued.job_id.unwrap();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(response) = harness
+                .runtime
+                .jobs
+                .get(&id, "platform-owner", &remote)
+                .unwrap()
+                .response
+            {
+                return response;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn 승인을_기다리는_동안_읽기전용이_켜지면_승인_뒤에도_쓰기를_막고_드라이버를_부르지_않는다() {
+    // given
+    let harness = Harness::new().await;
+
+    // when
+    let actual = approve_after(&harness, pending_write(), |harness| {
+        config(&harness.directory.0, true)
+    })
+    .await;
+
+    // then
+    assert_eq!(actual.error.unwrap().code, ErrorCode::WriteNotAllowed);
+    assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(queue_counts(&harness.directory.0), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn 승인을_기다리는_동안_연결을_수정하면_승인_뒤_connection_conflict로_끝나고_드라이버를_부르지_않는다()
+{
+    // given
+    let harness = Harness::new().await;
+    let saved = harness.connections.get("fixture").await.unwrap();
+
+    // when
+    let actual = approve_after(&harness, pending_write(), |harness| {
+        futures::executor::block_on(harness.connections.update(
+            "fixture",
+            saved.version,
+            json!({"name":"Renamed while pending"}),
+        ))
+        .unwrap();
+    })
+    .await;
+
+    // then
+    assert_eq!(actual.error.unwrap().code, ErrorCode::ConnectionConflict);
+    assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(queue_counts(&harness.directory.0), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn 승인정책은_승인이_끝난_뒤_권한을_다시_읽어_읽기전용_연결의_쓰기를_거부한다() {
+    // given
+    let harness = Harness::new().await;
+    let connection = harness.connections.get("fixture").await.unwrap();
+    let remote = caller(CallerTransport::Mcp);
+    let request = pending_write();
+    let hash = value_hash(&serde_json::to_value(&request).unwrap());
+    let policy = harness.policy.clone();
+    let task = {
+        let (connection, remote, request, hash) =
+            (connection.clone(), remote.clone(), request.clone(), hash);
+        tokio::spawn(async move {
+            crate::services::backend::PolicyBackend::consume_write_approval(
+                policy.as_ref(),
+                &connection,
+                &remote,
+                &request,
+                &hash,
+            )
+            .await
+        })
+    };
+    let pending = pending(&harness.approvals).await;
+
+    // when
+    config(&harness.directory.0, true);
+    harness
+        .approvals
+        .approve_pending(
+            &pending.id,
+            &decision(&pending.id, true),
+            &caller(CallerTransport::Gui),
+        )
+        .unwrap();
+    let actual = task.await.unwrap();
+
+    // then
+    assert_eq!(actual.unwrap_err().code, ErrorCode::WriteNotAllowed);
+}

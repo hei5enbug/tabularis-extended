@@ -5,7 +5,8 @@
 use super::super::{
     backend::{CancellationSignal, SavedConnection},
     contracts::{
-        ErrorCode, JobStatus, Operation, Outcome, ServiceError, ServiceRequest, ServiceResponse,
+        ErrorCode, JobStatus, Operation, Outcome, ResumeMode, ServiceError, ServiceRequest,
+        ServiceResponse,
     },
     dispatch::{CallerContext, CallerTransport},
     error::{failure, ServiceResult},
@@ -31,6 +32,7 @@ struct Extras {
     kind: Option<String>,
     database: Option<String>,
     schema: Option<String>,
+    offset: Option<u64>,
 }
 
 enum Waited {
@@ -226,6 +228,19 @@ impl ServiceTransport {
             None | Some(Value::Null) => None,
             Some(Value::String(kind)) if OBJECT_KINDS.contains(&kind.as_str()) => Some(kind),
             Some(_) => return Err(failure(ErrorCode::InvalidArgument)),
+        };
+        extras.offset = if matches!(
+            operation,
+            Operation::CatalogDatabases
+                | Operation::CatalogSchemas
+                | Operation::CatalogObjects
+                | Operation::CatalogDescribe
+        ) {
+            let offset = bounded(arguments, "offset", 0, 9_007_199_254_740_991)?;
+            arguments.remove("offset");
+            offset
+        } else {
+            None
         };
         let mut envelope = Map::new();
         for key in [
@@ -551,7 +566,28 @@ impl ServiceTransport {
                 }
             }
         }
-        present::tool_result(decoded.operation, &response, Some(effective))
+        let results = &self.runtime.results;
+        let resume = |next_offset: usize| {
+            if response.page.resume_mode == ResumeMode::Native {
+                return None;
+            }
+            let result_id = response.result_id.as_deref()?;
+            let set_index = response.data["result_set_index"].as_u64().unwrap_or(0) as usize;
+            let rows = ["rows", "documents", "values"]
+                .into_iter()
+                .find_map(|field| response.data[field].as_array())
+                .map_or(1, Vec::len);
+            results
+                .resume_token(result_id, set_index, next_offset, rows.clamp(1, 1000))
+                .ok()
+        };
+        present::tool_result_resuming(
+            decoded.operation,
+            &response,
+            Some(effective),
+            extras.offset.unwrap_or(0),
+            &resume,
+        )
     }
 
     /// Registers the job and replies once it finishes within `wait_ms`, or

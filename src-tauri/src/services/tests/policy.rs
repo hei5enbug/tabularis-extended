@@ -77,7 +77,18 @@ const MODES: [ApprovalMode; 3] = [
 #[tokio::test]
 async fn 읽기전용과_승인모드와_문장종류와_쓰기플래그_조합은_하나의_정책표를_따른다() {
     // given
-    let statements = [
+    let appended: Vec<String> = [
+        "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "TRUNCATE", "CREATE", "ALTER",
+        "DROP", "RENAME", "GRANT", "REVOKE", "DENY", "EXEC", "EXECUTE", "CALL", "DECLARE", "SET",
+        "BEGIN", "COMMIT", "ROLLBACK", "SAVE", "USE", "BACKUP", "RESTORE", "DBCC", "KILL",
+        "SHUTDOWN", "RECONFIGURE", "BULK", "OPENROWSET", "OPENDATASOURCE", "OPENQUERY", "WAITFOR",
+        "GO", "COPY", "VACUUM", "LOCK", "LOAD", "ATTACH", "DETACH", "PRAGMA", "HANDLER", "IMPORT",
+        "INTO",
+    ]
+    .iter()
+    .map(|keyword| format!("SELECT TOP (1) 1 AS n {keyword} dbo.audit"))
+    .collect();
+    let mut statements: Vec<(&str, bool)> = vec![
         ("SELECT 1", true),
         ("SELECT 'a;b'", true),
         ("UPDATE t SET a = 1", false),
@@ -87,14 +98,24 @@ async fn 읽기전용과_승인모드와_문장종류와_쓰기플래그_조합�
         ("EXEC sp_who", false),
         ("CALL refresh()", false),
         ("SELECT 1; DROP TABLE t", false),
+        ("SELECT TOP (1) 1 AS n DELETE FROM dbo.audit", false),
+        ("SELECT * FROM t WHERE id = 1 FOR UPDATE", false),
+        ("SELECT a, b FROM t WHERE x IN (SELECT y FROM u)", true),
+        ("SELECT updated_at, delete_flag FROM t", true),
+        ("WITH c AS (SELECT 1 AS n) SELECT n FROM c", true),
+        ("EXPLAIN SELECT 1", true),
+        ("SHOW TABLES", true),
+        ("DESCRIBE users", true),
     ];
+    statements.extend(appended.iter().map(|text| (text.as_str(), false)));
+    let statement_count = statements.len();
 
     // when
     let mut actual = Vec::new();
     let mut expected = Vec::new();
     for read_only in [false, true] {
         for mode in MODES {
-            for (text, is_read) in statements {
+            for (text, is_read) in statements.iter().copied() {
                 for write in [false, true] {
                     let harness = harness(read_only, mode);
                     let response = run(&harness, &sql(text), write).await;
@@ -109,7 +130,7 @@ async fn 읽기전용과_승인모드와_문장종류와_쓰기플래그_조합�
     }
 
     // then
-    assert_eq!(actual.len(), 108);
+    assert_eq!(actual.len(), statement_count * 12);
     assert_eq!(actual, expected);
 }
 

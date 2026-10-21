@@ -51,6 +51,10 @@ pub(crate) struct DriverState {
     pub rows: AtomicUsize,
     /// Bytes of text next to each row's number; none when zero.
     pub cell_bytes: AtomicUsize,
+    /// Objects the catalog lists; two when zero.
+    pub objects: AtomicUsize,
+    /// Columns the catalog describes; three when zero.
+    pub columns: AtomicUsize,
     pub hold: AtomicBool,
     pub entered: AtomicUsize,
     pub ignore_cancel: AtomicBool,
@@ -73,6 +77,8 @@ impl Default for DriverState {
             executions: Default::default(),
             rows: Default::default(),
             cell_bytes: Default::default(),
+            objects: Default::default(),
+            columns: Default::default(),
             hold: Default::default(),
             entered: Default::default(),
             ignore_cancel: Default::default(),
@@ -382,12 +388,22 @@ impl DatabaseDriver for MockDriver {
                     }
                 }
                 "catalog.schemas" => json!({"schemas":["public"]}),
-                "catalog.objects" => {
-                    json!({"objects":[{"name":"records","kind":"table"},{"name":"records_view","kind":"view"}]})
-                }
-                "catalog.describe" => {
-                    json!({"columns":[{"name":"b","native_type":"text","is_primary_key":true,"primary_key_position":2},{"name":"a","native_type":"int4","is_primary_key":true,"primary_key_position":1},{"name":"payload","native_type":"jsonb"}]})
-                }
+                "catalog.objects" => match self.state.objects.load(Ordering::SeqCst) {
+                    0 => {
+                        json!({"objects":[{"name":"records","kind":"table"},{"name":"records_view","kind":"view"}]})
+                    }
+                    count => {
+                        json!({"objects":(0..count).map(|n|json!({"name":format!("object_{n:04}"),"kind":"table"})).collect::<Vec<_>>()})
+                    }
+                },
+                "catalog.describe" => match self.state.columns.load(Ordering::SeqCst) {
+                    0 => {
+                        json!({"columns":[{"name":"b","native_type":"text","is_primary_key":true,"primary_key_position":2},{"name":"a","native_type":"int4","is_primary_key":true,"primary_key_position":1},{"name":"payload","native_type":"jsonb"}]})
+                    }
+                    count => {
+                        json!({"columns":(0..count).map(|n|json!({"name":format!("column_{n:03}"),"native_type":"varchar","is_nullable":true})).collect::<Vec<_>>()})
+                    }
+                },
                 _ => return Err(failure(ErrorCode::UnsupportedOperation)),
             },
             ServiceRpcMethod::Row => {

@@ -1171,6 +1171,38 @@ async fn tool_describe_table(
     tool_result(&result, format)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum RunQueryGate {
+    BlockedReadonly,
+    NeedsApproval,
+    Run,
+}
+
+fn approval_mode_of(config: &AppConfig) -> String {
+    config
+        .mcp_approval_mode
+        .clone()
+        .unwrap_or_else(|| DEFAULT_MCP_APPROVAL_MODE.to_string())
+}
+
+/// Read-only enforcement (fail-closed: anything but a proven select counts as
+/// a write) followed by the approval gate.
+fn run_query_gate(kind: &str, readonly: bool, approval_mode: &str) -> RunQueryGate {
+    if readonly && kind != "select" {
+        return RunQueryGate::BlockedReadonly;
+    }
+    let needs_approval = match approval_mode {
+        "off" => false,
+        "all" => true,
+        _ => kind != "select",
+    };
+    if needs_approval {
+        RunQueryGate::NeedsApproval
+    } else {
+        RunQueryGate::Run
+    }
+}
+
 async fn tool_run_query(
     args: &serde_json::Map<String, Value>,
     config: &AppConfig,
@@ -1214,7 +1246,8 @@ async fn tool_run_query(
     audit.effective_schema = schema.map(str::to_owned);
 
     // Read-only enforcement (fail-closed: unknown counts as write).
-    if config::is_connection_readonly(config, &conn.id) && kind != "select" {
+    let readonly = config::is_connection_readonly(config, &conn.id);
+    if run_query_gate(kind, readonly, &approval_mode_of(config)) == RunQueryGate::BlockedReadonly {
         audit.status = "blocked_readonly".to_string();
         let msg = "Query blocked by Tabularis read-only mode. Enable writes for this connection in Settings → MCP → Read-only mode.".to_string();
         audit.error = Some(msg.clone());
@@ -1226,16 +1259,8 @@ async fn tool_run_query(
     }
 
     // Approval gate
-    let approval_mode = config
-        .mcp_approval_mode
-        .clone()
-        .unwrap_or_else(|| DEFAULT_MCP_APPROVAL_MODE.to_string());
-    let needs_approval = match approval_mode.as_str() {
-        "off" => false,
-        "all" => true,
-        // writes_only — anything that isn't a clean select.
-        _ => kind != "select",
-    };
+    let needs_approval =
+        run_query_gate(kind, readonly, &approval_mode_of(config)) == RunQueryGate::NeedsApproval;
 
     let mut effective_query: String = query.to_string();
 

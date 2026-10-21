@@ -444,6 +444,27 @@ fn 일반_문서의_challenge_필드는_인증정보로_오판하지_않는다()
     );
 }
 #[test]
+fn 일반_목록은_응답이_맞으면_전부_싣고_진단_배열만_다섯개로_줄인다() {
+    // given
+    let request = support::query("select");
+    let mut response = ServiceResponse::failure(&request, ErrorCode::InvalidArgument, "fixed");
+    response.error = None;
+    response.status = JobStatus::Succeeded;
+    response.data = json!({
+        "maps": (0..40).map(|id| json!({"id":format!("map-{id}"),"name":"synthetic"})).collect::<Vec<_>>(),
+        "warnings": (0..12).map(|id| json!(format!("warning_{id}"))).collect::<Vec<_>>(),
+    });
+
+    // when
+    let actual = present::tool_result(Operation::MapList, &response, None);
+
+    // then
+    let data = &actual["structuredContent"]["data"];
+    assert_eq!(data["maps"].as_array().unwrap().len(), 40);
+    assert_eq!(data["warnings"].as_array().unwrap().len(), 5);
+    assert_eq!(actual["structuredContent"]["presentation_truncated"], true);
+}
+#[test]
 fn 공간_표시는_다섯_샘플과_참조만_보존하고_좌표는_제외한다() {
     // given
     let request = support::query("select");

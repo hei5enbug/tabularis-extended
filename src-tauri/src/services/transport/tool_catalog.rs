@@ -248,6 +248,19 @@ fn service_schema(source: &Value, operation: Operation) -> ServiceResult<Value> 
         _ => &[],
     };
     required.retain(|name| !optional.contains(&name.as_str()));
+    if matches!(
+        operation,
+        Operation::CatalogDatabases
+            | Operation::CatalogSchemas
+            | Operation::CatalogObjects
+            | Operation::CatalogDescribe
+    ) {
+        add(
+            &mut properties,
+            "offset",
+            json!({"type":"integer","minimum":0,"default":0,"description":"Entry to start the list at; use next_offset of the previous reply when has_more is true. A list that does not fit one 64 KiB response is returned in parts."}),
+        );
+    }
     match operation {
         Operation::QueryExecute => {
             add(

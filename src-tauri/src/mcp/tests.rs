@@ -232,3 +232,53 @@ async fn resolve_driver_for_params_does_not_retry_on_a_registered_drivers_own_fa
         "a registered driver's own for_connection failure should not be retried"
     );
 }
+
+#[test]
+fn 구형_run_query_관문은_세미콜론_없는_연결_문장을_읽기로_통과시키지_않는다() {
+    // given
+    let keywords = [
+        "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "TRUNCATE", "CREATE", "ALTER",
+        "DROP", "RENAME", "GRANT", "REVOKE", "DENY", "EXEC", "EXECUTE", "CALL", "DECLARE", "SET",
+        "BEGIN", "COMMIT", "ROLLBACK", "SAVE", "USE", "BACKUP", "RESTORE", "DBCC", "KILL",
+        "SHUTDOWN", "RECONFIGURE", "BULK", "OPENROWSET", "OPENDATASOURCE", "OPENQUERY", "WAITFOR",
+        "GO", "COPY", "VACUUM", "LOCK", "LOAD", "ATTACH", "DETACH", "PRAGMA", "HANDLER", "IMPORT",
+        "INTO",
+    ];
+    let mut writes: Vec<String> = keywords
+        .iter()
+        .map(|keyword| format!("SELECT TOP (1) 1 AS n {keyword} dbo.audit"))
+        .collect();
+    writes.push("SELECT TOP (1) 1 AS n DELETE FROM dbo.audit".into());
+    let reads = [
+        "SELECT a, b FROM t WHERE x IN (SELECT y FROM u)",
+        "SELECT updated_at, delete_flag FROM t",
+        "WITH c AS (SELECT 1 AS n) SELECT n FROM c",
+        "EXPLAIN SELECT 1",
+        "SHOW TABLES",
+        "DESCRIBE users",
+    ];
+
+    // when
+    let mut actual = Vec::new();
+    for readonly in [false, true] {
+        for mode in ["off", "writes_only", "all"] {
+            for text in writes.iter().map(String::as_str).chain(reads) {
+                let kind = crate::ai_activity::classify_query_kind(text);
+                actual.push((readonly, mode, text, run_query_gate(kind, readonly, mode)));
+            }
+        }
+    }
+
+    // then
+    for (readonly, mode, text, gate) in actual {
+        let is_read = reads.contains(&text);
+        let want = match (is_read, readonly, mode) {
+            (false, true, _) => RunQueryGate::BlockedReadonly,
+            (false, false, "off") => RunQueryGate::Run,
+            (false, false, _) => RunQueryGate::NeedsApproval,
+            (true, _, "all") => RunQueryGate::NeedsApproval,
+            (true, _, _) => RunQueryGate::Run,
+        };
+        assert_eq!(gate, want, "{readonly} {mode} {text}");
+    }
+}

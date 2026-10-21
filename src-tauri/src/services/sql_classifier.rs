@@ -88,13 +88,16 @@ fn classify_stripped(stripped: &str) -> &'static str {
         }
         // `PRAGMA name = value` changes database settings.
         "PRAGMA" if peeled_upper.contains('=') => "unknown",
-        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" => "select",
+        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" => {
+            read_unless_embedded_statement(&peeled_upper, &first)
+        }
         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => "write",
         "CREATE" | "DROP" | "ALTER" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE" | "COMMENT" => {
             "ddl"
         }
         "WITH" => match classify_cte(&peeled_upper) {
             "select" if contains_keyword(&peeled_upper, "INTO") => "write",
+            "select" => read_unless_embedded_statement(&peeled_upper, &first),
             kind => kind,
         },
         // EXEC, EXECUTE and CALL run code the scanner cannot see into.
@@ -178,6 +181,64 @@ pub(crate) fn has_trailing_statements(stripped: &str) -> bool {
         if c == ';' {
             found_semi = true;
         }
+    }
+    false
+}
+
+/// Words that begin a write, DDL or control statement. T-SQL and other
+/// dialects accept a second statement after a read without any separator
+/// (`SELECT 1 DELETE FROM t`), so a read is only proven when none of these
+/// appear after the leading keyword.
+const STATEMENT_STARTERS: &[&str] = &[
+    "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "TRUNCATE", "CREATE", "ALTER",
+    "DROP", "RENAME", "GRANT", "REVOKE", "DENY", "EXEC", "EXECUTE", "CALL", "DECLARE", "SET",
+    "BEGIN", "COMMIT", "ROLLBACK", "SAVE", "USE", "BACKUP", "RESTORE", "DBCC", "KILL", "SHUTDOWN",
+    "RECONFIGURE", "BULK", "OPENROWSET", "OPENDATASOURCE", "OPENQUERY", "WAITFOR", "GO", "COPY",
+    "VACUUM", "LOCK", "LOAD", "ATTACH", "DETACH", "PRAGMA", "HANDLER", "IMPORT", "INTO",
+];
+
+/// String functions that share a name with a statement keyword.
+const FUNCTION_LIKE_STARTERS: &[&str] = &["INSERT", "REPLACE", "TRUNCATE"];
+
+fn read_unless_embedded_statement(upper: &str, first: &str) -> &'static str {
+    if has_embedded_statement(upper, first) {
+        "unknown"
+    } else {
+        "select"
+    }
+}
+
+/// True when a whole-word statement starter appears at any nesting depth after
+/// the leading keyword. `upper` is the stripped, upper-cased SQL.
+fn has_embedded_statement(upper: &str, first: &str) -> bool {
+    let bytes = upper.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let skip_leading_create = matches!(first, "SHOW" | "DESCRIBE" | "DESC");
+    let mut cursor = first.len().min(bytes.len());
+    let mut first_token = true;
+    while cursor < bytes.len() {
+        if !is_word(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && is_word(bytes[cursor]) {
+            cursor += 1;
+        }
+        let token = &upper[start..cursor];
+        let was_first = std::mem::replace(&mut first_token, false);
+        if !STATEMENT_STARTERS.contains(&token) {
+            continue;
+        }
+        let rest = upper[cursor..].trim_start();
+        let bracketed = start > 0 && bytes[start - 1] == b'[' && bytes.get(cursor) == Some(&b']');
+        let function_call = FUNCTION_LIKE_STARTERS.contains(&token) && rest.starts_with('(');
+        let show_create = token == "CREATE" && skip_leading_create && was_first;
+        let index_hint = token == "USE" && (rest.starts_with("INDEX") || rest.starts_with("KEY"));
+        if bracketed || function_call || show_create || index_hint {
+            continue;
+        }
+        return true;
     }
     false
 }
@@ -305,12 +366,17 @@ fn classify_wrapped_statement(wrapped_upper: &str) -> &'static str {
     let peeled = wrapped_upper.trim_start_matches(|c: char| c == '(' || c.is_whitespace());
     match first_keyword(peeled).as_str() {
         "SELECT" | "VALUES" | "TABLE" if contains_keyword(peeled, "INTO") => "write",
-        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" | "TABLE" => "select",
+        first @ ("SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" | "TABLE") => {
+            read_unless_embedded_statement(peeled, first)
+        }
         "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => "write",
         "CREATE" | "DROP" | "ALTER" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE" | "COMMENT" => {
             "ddl"
         }
-        "WITH" => classify_cte(peeled),
+        "WITH" => match classify_cte(peeled) {
+            "select" => read_unless_embedded_statement(peeled, "WITH"),
+            kind => kind,
+        },
         _ => "unknown",
     }
 }
