@@ -4,7 +4,7 @@
   <img src="https://raw.githubusercontent.com/TabularisDB/tabularis-postgresql-plugin/main/assets/postgresql-logo-3colors.png" width="120" height="120" alt="PostgreSQL logo" />
 </div>
 
-# tabularis-postgresql-plugin
+# PostgreSQL Plus
 
 <p align="center">
 
@@ -139,9 +139,9 @@ ingested this plugin's releases first.
 
    | OS | Plugins Directory |
    | --- | --- |
-   | **Linux** | `~/.local/share/tabularis/plugins/postgresql/` |
-   | **macOS** | `~/Library/Application Support/tabularis/plugins/postgresql/` |
-   | **Windows** | `%APPDATA%\tabularis\plugins\postgresql\` |
+   | **Linux** | `~/.local/share/tabularis/plugins/drivers/postgresql-plus/` |
+   | **macOS** | `~/Library/Application Support/tabularis/plugins/drivers/postgresql-plus/` |
+   | **Windows** | `%APPDATA%\tabularis\plugins\drivers\postgresql-plus\` |
 
 4. Restart Tabularis.
 

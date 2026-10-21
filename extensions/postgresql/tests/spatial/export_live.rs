@@ -30,7 +30,7 @@ impl ExportFixture {
     }
     async fn call(&self,input:Value)->Value {
         let request=json!({"jsonrpc":"2.0","id":uuid::Uuid::new_v4().to_string(),"method":"spatial_query_table","params":{
-            "params":{"driver":"postgresql","host":"127.0.0.1","port":self.port,"database":"spatial_fixture","username":"postgres","ssl_mode":"disable"},
+            "params":{"driver":"postgresql-plus","host":"127.0.0.1","port":self.port,"database":"spatial_fixture","username":"postgres","ssl_mode":"disable"},
             "driver_context":{"protocol_version":1,"connection_id":self.schema,"request_id":uuid::Uuid::new_v4().to_string(),"deadline_ms":120000,"read_only":true},"input":input}});
         postgresql_plugin::rpc::handle_line(&request.to_string()).await.unwrap()
     }
@@ -276,7 +276,7 @@ async fn rejected_before_connection(inputs:Vec<Value>)->Vec<Value> {
     let mut results=Vec::new();
     for input in inputs {
         let request=json!({"jsonrpc":"2.0","id":uuid::Uuid::new_v4().to_string(),"method":"spatial_query_table","params":{
-            "params":{"driver":"postgresql","host":"127.0.0.1","port":1,"database":"spatial_fixture","username":"postgres","ssl_mode":"disable"},
+            "params":{"driver":"postgresql-plus","host":"127.0.0.1","port":1,"database":"spatial_fixture","username":"postgres","ssl_mode":"disable"},
             "driver_context":{"protocol_version":1,"connection_id":format!("p2_{}",uuid::Uuid::new_v4().simple()),"request_id":uuid::Uuid::new_v4().to_string(),"deadline_ms":5000,"read_only":true},"input":input}});
         results.push(postgresql_plugin::rpc::handle_line(&request.to_string()).await.unwrap());
     }

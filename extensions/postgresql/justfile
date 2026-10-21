@@ -42,18 +42,18 @@ demo-db-stop:
 
 [linux]
 dev-install: build
-    mkdir -p ~/.local/share/tabularis/plugins/postgresql
-    cp target/debug/postgresql-plugin ~/.local/share/tabularis/plugins/postgresql/
-    cp .tabularium ~/.local/share/tabularis/plugins/postgresql/
-    @echo "Installed to ~/.local/share/tabularis/plugins/postgresql"
+    mkdir -p ~/.local/share/tabularis/plugins/drivers/postgresql-plus
+    cp target/debug/postgresql-plugin ~/.local/share/tabularis/plugins/drivers/postgresql-plus/
+    cp .tabularium ~/.local/share/tabularis/plugins/drivers/postgresql-plus/
+    @echo "Installed to ~/.local/share/tabularis/plugins/drivers/postgresql-plus"
     @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
 [macos]
 dev-install: build
-    mkdir -p "$HOME/Library/Application Support/tabularis/plugins/postgresql"
-    cp target/debug/postgresql-plugin "$HOME/Library/Application Support/tabularis/plugins/postgresql/"
-    cp .tabularium "$HOME/Library/Application Support/tabularis/plugins/postgresql/"
-    @echo "Installed to ~/Library/Application Support/tabularis/plugins/postgresql"
+    mkdir -p "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus"
+    cp target/debug/postgresql-plugin "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus/"
+    cp .tabularium "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus/"
+    @echo "Installed to ~/Library/Application Support/tabularis/plugins/drivers/postgresql-plus"
     @echo "Restart Tabularis (or toggle the plugin in Settings) to pick up changes."
 
 # Each recipe line runs in a fresh shell, so this must be one logical command.
@@ -61,7 +61,7 @@ dev-install: build
 # (ProjectDirs "", "", "tabularis"), which on Windows is %APPDATA%\tabularis.
 [windows]
 dev-install: build
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\postgresql"; \
+    $dest = Join-Path $env:APPDATA "tabularis\plugins\drivers\postgresql-plus"; \
     New-Item -ItemType Directory -Force -Path $dest | Out-Null; \
     Copy-Item "target\debug\postgresql-plugin.exe" $dest; \
     Copy-Item ".tabularium" $dest; \
@@ -70,13 +70,13 @@ dev-install: build
 
 [linux]
 uninstall:
-    rm -rf ~/.local/share/tabularis/plugins/postgresql
+    rm -rf ~/.local/share/tabularis/plugins/drivers/postgresql-plus
 
 [macos]
 uninstall:
-    rm -rf "$HOME/Library/Application Support/tabularis/plugins/postgresql"
+    rm -rf "$HOME/Library/Application Support/tabularis/plugins/drivers/postgresql-plus"
 
 [windows]
 uninstall:
-    $dest = Join-Path $env:APPDATA "tabularis\plugins\postgresql"; \
+    $dest = Join-Path $env:APPDATA "tabularis\plugins\drivers\postgresql-plus"; \
     if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }

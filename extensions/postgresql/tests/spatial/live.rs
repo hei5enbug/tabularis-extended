@@ -58,7 +58,7 @@ impl Fixture {
                 PERFORM pg_sleep(20); RETURN 1; END $fn$;
         "#);
         client.batch_execute(&sql).await.unwrap();
-        let params=json!({"driver":"postgresql","host":"127.0.0.1","port":port,"database":database,"username":"postgres","ssl_mode":"disable"});
+        let params=json!({"driver":"postgresql-plus","host":"127.0.0.1","port":port,"database":database,"username":"postgres","ssl_mode":"disable"});
         Self {port,schema,client,params}
     }
     fn request(&self,method:&str,input:Value)->Value {
