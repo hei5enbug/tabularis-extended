@@ -1,20 +1,24 @@
-name: Release
+name: sqlserver-plus Release
 
 on:
   push:
     tags:
-      - "v*"
+      - "sqlserver-plus-v*"
+
+defaults:
+  run:
+    working-directory: extensions/sqlserver-plus
 
 jobs:
   validate:
-    name: Validate release version
+    name: sqlserver-plus / Validate release version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - name: Check tag matches manifest and EXPLAIN package versions
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${GITHUB_REF_NAME#sqlserver-plus-v}"
           TABULARIUM_VERSION=$(jq -r .version .tabularium)
           EXPLAIN_VERSION=$(jq -r .version explain/package.json)
 
@@ -34,7 +38,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          package_json_file: explain/package.json
+          package_json_file: extensions/sqlserver-plus/explain/package.json
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -45,14 +49,14 @@ jobs:
       # Typecheck and test the parser before any platform binary is built so a
       # broken parser fails the whole release instead of only the npm half.
       - name: Typecheck and test EXPLAIN parser
-        working-directory: explain
+        working-directory: extensions/sqlserver-plus/explain
         run: |
           pnpm install --frozen-lockfile
           pnpm typecheck
           pnpm test
 
   build:
-    name: ${{ matrix.platform-label }}
+    name: sqlserver-plus / ${{ matrix.platform-label }}
     needs: validate
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -120,7 +124,7 @@ jobs:
         if: steps.explain.outputs.present == 'true'
         uses: pnpm/action-setup@v6
         with:
-          package_json_file: explain/package.json
+          package_json_file: extensions/sqlserver-plus/explain/package.json
 
       - name: Setup Node
         if: steps.ui.outputs.present == 'true' || steps.explain.outputs.present == 'true'
@@ -132,7 +136,7 @@ jobs:
       - name: Build UI
         if: steps.ui.outputs.present == 'true'
         shell: bash
-        working-directory: ui
+        working-directory: extensions/sqlserver-plus/ui
         run: |
           npm ci --no-audit --no-fund
           npm run build
@@ -140,7 +144,7 @@ jobs:
       - name: Build EXPLAIN parser
         if: steps.explain.outputs.present == 'true'
         shell: bash
-        working-directory: explain
+        working-directory: extensions/sqlserver-plus/explain
         run: |
           pnpm install --frozen-lockfile
           pnpm run build
@@ -202,11 +206,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: sqlserver-plugin-${{ matrix.platform-label }}
-          path: sqlserver-plugin-${{ matrix.platform-label }}.zip
+          path: extensions/sqlserver-plus/sqlserver-plugin-${{ matrix.platform-label }}.zip
           retention-days: 1
 
   publish-explain:
-    name: Publish EXPLAIN parser to npm
+    name: sqlserver-plus / Publish EXPLAIN parser to npm
     # Runs only once every platform binary has built, so the npm package and
     # the GitHub release are cut from the same tag in the same run.
     needs: build
@@ -220,7 +224,7 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          package_json_file: explain/package.json
+          package_json_file: extensions/sqlserver-plus/explain/package.json
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -233,7 +237,7 @@ jobs:
       # npm half once the package is already out.
       - name: Check whether this version is already on npm
         id: npm
-        working-directory: explain
+        working-directory: extensions/sqlserver-plus/explain
         run: |
           NAME=$(jq -r .name package.json)
           VERSION=$(jq -r .version package.json)
@@ -246,7 +250,7 @@ jobs:
 
       - name: Install and build
         if: steps.npm.outputs.published == 'false'
-        working-directory: explain
+        working-directory: extensions/sqlserver-plus/explain
         run: |
           pnpm install --frozen-lockfile
           pnpm build
@@ -256,11 +260,11 @@ jobs:
       # no npm token secret is involved.
       - name: Publish
         if: steps.npm.outputs.published == 'false'
-        working-directory: explain
+        working-directory: extensions/sqlserver-plus/explain
         run: pnpm publish --access public --provenance --no-git-checks
 
   release:
-    name: Publish GitHub release
+    name: sqlserver-plus / Publish GitHub release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -272,7 +276,7 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          path: extensions/sqlserver-plus/artifacts
           merge-multiple: true
 
       - name: Detect prerelease from tag
@@ -280,7 +284,8 @@ jobs:
         env:
           TAG_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "$TAG_NAME" == *-* ]]; then
+          VERSION="${TAG_NAME#sqlserver-plus-v}"
+          if [[ "$VERSION" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -292,7 +297,7 @@ jobs:
           # .tabularium ships as a standalone asset: the registry resolves the
           # manifest from release assets, not the git ref.
           files: |
-            artifacts/*.zip
-            .tabularium
+            extensions/sqlserver-plus/artifacts/*.zip
+            extensions/sqlserver-plus/.tabularium
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          make_latest: ${{ steps.meta.outputs.prerelease == 'false' }}
+          make_latest: false

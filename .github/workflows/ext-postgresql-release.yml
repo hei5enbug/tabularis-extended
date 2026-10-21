@@ -1,20 +1,24 @@
-name: Release
+name: postgresql-plus Release
 
 on:
   push:
     tags:
-      - "v*"
+      - "postgresql-plus-v*"
+
+defaults:
+  run:
+    working-directory: extensions/postgresql
 
 jobs:
   validate:
-    name: Validate release version
+    name: postgresql-plus / Validate release version
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - name: Check tag matches manifest version
         run: |
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${GITHUB_REF_NAME#postgresql-plus-v}"
           TABULARIUM_VERSION=$(jq -r .version .tabularium)
 
           if [ "$TAG_VERSION" != "$TABULARIUM_VERSION" ]; then
@@ -23,7 +27,7 @@ jobs:
           fi
 
   build:
-    name: ${{ matrix.platform-label }}
+    name: postgresql-plus / ${{ matrix.platform-label }}
     needs: validate
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -126,11 +130,11 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: postgresql-plugin-${{ matrix.platform-label }}
-          path: postgresql-plugin-${{ matrix.platform-label }}.zip
+          path: extensions/postgresql/postgresql-plugin-${{ matrix.platform-label }}.zip
           retention-days: 1
 
   release:
-    name: Publish GitHub release
+    name: postgresql-plus / Publish GitHub release
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -142,7 +146,7 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
-          path: artifacts
+          path: extensions/postgresql/artifacts
           merge-multiple: true
 
       - name: Detect prerelease from tag
@@ -151,7 +155,8 @@ jobs:
           # Auto-flag prerelease when the tag has a "-" suffix (semver
           # pre-release, e.g. v1.0.0-beta.1) — matches tabularis's own
           # release.yml convention.
-          if [[ "${{ github.ref_name }}" == *-* ]]; then
+          VERSION="${GITHUB_REF_NAME#postgresql-plus-v}"
+          if [[ "$VERSION" == *-* ]]; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"
@@ -165,7 +170,7 @@ jobs:
           # follow-up) or relying on GitHub's auto-generated commit list.
           # A version's section runs from its "## [x.y.z]" heading to the
           # next one (or EOF for the oldest entry).
-          VERSION="${GITHUB_REF_NAME#v}"
+          VERSION="${GITHUB_REF_NAME#postgresql-plus-v}"
 
           awk -v ver="$VERSION" '
             /^## \[/ {
@@ -198,8 +203,8 @@ jobs:
           # .tabularium ships as a standalone asset: the registry resolves the
           # manifest from release assets, not the git ref.
           files: |
-            artifacts/*.zip
-            .tabularium
+            extensions/postgresql/artifacts/*.zip
+            extensions/postgresql/.tabularium
           body_path: /tmp/release-notes.md
           prerelease: ${{ steps.meta.outputs.prerelease == 'true' }}
-          make_latest: ${{ steps.meta.outputs.prerelease == 'false' }}
+          make_latest: false

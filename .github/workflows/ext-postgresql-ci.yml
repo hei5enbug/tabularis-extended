@@ -1,10 +1,16 @@
-name: CI
+name: postgresql-plus CI
 
 on:
   push:
     branches: [main]
+    paths:
+      - "extensions/postgresql/**"
+      - ".github/workflows/ext-postgresql-ci.yml"
   pull_request:
     branches: [main]
+    paths:
+      - "extensions/postgresql/**"
+      - ".github/workflows/ext-postgresql-ci.yml"
     # Default types are opened/synchronize/reopened, which miss title-only
     # edits — needed so pr-title re-checks a title edit. labeled/unlabeled
     # removed: those were only ever needed by version-suggestion, which now
@@ -15,9 +21,13 @@ on:
     # haven't otherwise changed. Off-peak minute, not :00/:30.
     - cron: "17 6 * * 1"
 
+defaults:
+  run:
+    working-directory: extensions/postgresql
+
 jobs:
   test:
-    name: Test
+    name: postgresql-plus / Test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -41,7 +51,7 @@ jobs:
         run: cargo fmt --all -- --check
 
   validate-manifest:
-    name: Validate .tabularium manifest
+    name: postgresql-plus / Validate .tabularium manifest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -50,7 +60,7 @@ jobs:
         run: npx --yes @tabularium/cli validate .tabularium --registry https://registry.tabularis.dev --kind driver
 
   pr-title:
-    name: PR title (Conventional Commits)
+    name: postgresql-plus / PR title (Conventional Commits)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     permissions:
@@ -61,7 +71,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   markdownlint:
-    name: Markdown lint
+    name: postgresql-plus / Markdown lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -70,7 +80,7 @@ jobs:
         run: npx --yes markdownlint-cli "**/*.md"
 
   audit:
-    name: Security audit
+    name: postgresql-plus / Security audit
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -85,6 +95,7 @@ jobs:
 
       - uses: rustsec/audit-check@v2
         with:
+          working-directory: extensions/postgresql
           token: ${{ secrets.GITHUB_TOKEN }}
           # RUSTSEC-2026-0235: vulnerable rkyv 0.7.46, pulled in transitively
           # by rust_decimal's own optional "rkyv" feature declaration in its
@@ -99,7 +110,7 @@ jobs:
           ignore: RUSTSEC-2026-0235
 
   live-db-integration:
-    name: Live PostgreSQL integration
+    name: postgresql-plus / Live PostgreSQL integration
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -126,7 +137,7 @@ jobs:
 
       - name: Run live-database integration test
         env:
-          POSTGRES_PLUGIN_BIN: ${{ github.workspace }}/target/debug/postgresql-plugin
+          POSTGRES_PLUGIN_BIN: ${{ github.workspace }}/extensions/postgresql/target/debug/postgresql-plugin
           PGHOST: 127.0.0.1
           PGPORT: 54320
           PGUSER: postgres

@@ -12,3 +12,18 @@ updates:
       default-days: 7
     labels:
       - "dependencies"
+
+  - package-ecosystem: "cargo"
+    directory: "/extensions/sqlserver-plus"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "npm"
+    directory: "/extensions/sqlserver-plus/explain"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "cargo"
+    directory: "/extensions/postgresql"
+    schedule:
+      interval: "weekly"

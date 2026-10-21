@@ -1,177 +1,30 @@
-name: CI
+name: postgresql-plus Version suggestion
 
+# Runs as pull_request_target (not pull_request) so GITHUB_TOKEN gets the
+# base repo's write permissions even on fork PRs — GitHub Actions issues a
+# read-only token for pull_request runs triggered from a fork, no matter
+# what the job's own `permissions:` block requests (see issue #115). Safe
+# here because this job never checks out or executes PR content — it only
+# reads github.event.pull_request.title/body/labels, which are already
+# present on the event payload without a checkout.
 on:
-  push:
+  pull_request_target:
     branches: [main]
-  pull_request:
-    branches: [main]
-    # Default types miss title-only edits. Label changes must also re-run the
-    # version suggestion because the prerelease channel comes from a label.
+    paths:
+      - "extensions/postgresql/**"
+      - ".github/workflows/ext-postgresql-version-suggestion.yml"
+    # Default types are opened/synchronize/reopened, which miss title-only
+    # edits entirely. labeled/unlabeled added so changing the prerelease:*
+    # label alone re-triggers this job.
     types: [opened, edited, reopened, synchronize, labeled, unlabeled]
-  schedule:
-    # Weekly cargo-audit sweep for advisories disclosed after dependencies land.
-    # Use an off-peak minute rather than :00 or :30.
-    - cron: "23 5 * * 2"
+
+defaults:
+  run:
+    working-directory: extensions/postgresql
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build
-        run: cargo build
-
-      - name: Run tests
-        # This crate has no library target, so --lib would fail. Select the
-        # fixture-only conformance target while keeping live_db in its
-        # dedicated SQL Server job below.
-        run: cargo test --bins --test conformance
-
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-  explain-package:
-    name: EXPLAIN parser package
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      # Installs the pnpm version pinned by "packageManager" in
-      # explain/package.json. Corepack is not used because the copy bundled
-      # with Node 22.13 carries stale npm registry signing keys and fails
-      # with "Cannot find matching keyid" when it resolves pnpm.
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          package_json_file: explain/package.json
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          # pnpm 11.23 requires Node 22.13 or newer.
-          node-version: "22.13"
-
-      - name: Install dependencies
-        working-directory: explain
-        run: pnpm install --frozen-lockfile
-
-      - name: Typecheck
-        working-directory: explain
-        run: pnpm typecheck
-
-      - name: Test
-        working-directory: explain
-        run: pnpm test
-
-      - name: Build
-        working-directory: explain
-        run: pnpm build
-
-  ui-extension:
-    name: Connection-modal UI extension
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Node
-        uses: actions/setup-node@v7
-        with:
-          node-version: "22.13"
-
-      - name: Install dependencies
-        working-directory: ui
-        run: npm ci
-
-      - name: Typecheck
-        working-directory: ui
-        run: npm run typecheck
-
-      - name: Run tests
-        working-directory: ui
-        run: npm test
-
-      - name: Build
-        working-directory: ui
-        run: npm run build
-
-  validate-manifest:
-    name: Validate .tabularium manifest
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      # registry.tabularis.dev serves the driver-kind schema including the
-      # additive explain_parsers field from core PR #688, so the whole
-      # manifest is validated against the live validator.
-      - name: Validate manifest against the live registry schema
-        run: |
-          npx --yes @tabularium/cli validate .tabularium \
-            --registry https://registry.tabularis.dev --kind driver
-
-  live-db-integration:
-    name: Live SQL Server integration
-    runs-on: ubuntu-latest
-    # SQL Server needs more startup time and memory than PostgreSQL. GitHub's
-    # hosted runner has sufficient memory; generous health retries wait for
-    # readiness without a fixed sleep.
-    services:
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        ports:
-          - 1433:1433
-        env:
-          ACCEPT_EULA: Y
-          MSSQL_SA_PASSWORD: "Str0ng!Passw0rd"
-        options: >-
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P 'Str0ng!Passw0rd' -C -Q 'SELECT 1' -b"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-start-period 20s
-          --health-retries 30
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build
-        run: cargo build
-
-      - name: Run live-database integration test
-        env:
-          SQLSERVER_PLUGIN_BIN: ${{ github.workspace }}/target/debug/sqlserver-plugin
-          SQLSERVER_TEST_HOST: 127.0.0.1
-          SQLSERVER_TEST_PORT: 1433
-          SQLSERVER_TEST_USER: sa
-          SQLSERVER_TEST_PASSWORD: "Str0ng!Passw0rd"
-          SQLSERVER_TEST_DATABASE: tabularis_test
-        run: cargo test --test live_db -- --test-threads=1
-
-  pr-title:
-    name: PR title (Conventional Commits)
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      pull-requests: read
-    steps:
-      - uses: amannn/action-semantic-pull-request@v6
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
   version-suggestion:
-    name: Version suggestion
-    # Dependabot cannot carry the prerelease:* label this job needs and its
-    # dependency bumps never drive a plugin version on their own, so the
-    # suggestion is skipped for it instead of failing every Dependabot PR.
-    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
+    name: postgresql-plus / Version suggestion
     runs-on: ubuntu-latest
     permissions:
       pull-requests: write
@@ -179,6 +32,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+          ref: refs/heads/main
 
       # Classify the PR title's Conventional Commits type + breaking-change
       # flag into a version-bump class. Requires the prerelease:* label to
@@ -207,12 +61,12 @@ jobs:
           fi
 
           case "$TYPE" in
-            feat) CLASS="minor" ;;
-            fix|refactor|perf) CLASS="patch" ;;
-            docs|style|chore|test|ci|build) CLASS="none" ;;
-            *) CLASS="none" ;;
+            feat) CLASS=minor ;;
+            fix|refactor|perf) CLASS=patch ;;
+            docs|style|chore|test|ci|build) CLASS=none ;;
+            *) CLASS=none ;;
           esac
-          [ "$BREAKING" = true ] && CLASS="major"
+          [ "$BREAKING" = true ] && CLASS=major
 
           CHANNEL=$(echo "$PR_LABELS" | jq -r '[.[] | select(.name | startswith("prerelease:")) | .name][0] // ""' | sed 's/^prerelease://')
           if [ -z "$CHANNEL" ]; then
@@ -224,25 +78,20 @@ jobs:
             *) echo "::error::Unrecognized prerelease label value '$CHANNEL' — expected alpha, beta, rc, or stable."; exit 1 ;;
           esac
 
-          {
-            echo "type=$TYPE"
-            echo "breaking=$BREAKING"
-            echo "class=$CLASS"
-            echo "channel=$CHANNEL"
-          } >> "$GITHUB_OUTPUT"
+          echo "type=$TYPE" >> "$GITHUB_OUTPUT"
+          echo "breaking=$BREAKING" >> "$GITHUB_OUTPUT"
+          echo "class=$CLASS" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
       - name: Resolve baseline version
         id: baseline
         run: |
           git fetch origin main --tags --quiet
-          # Only plugin release tags (v*) are a baseline. The npm parser
-          # package ships from the same v* tag; legacy explain-v* tags must
-          # not be picked up here.
-          TAG=$(git -C . describe --tags --abbrev=0 --match 'v[0-9]*' origin/main 2>/dev/null || true)
+          TAG=$(git -C . describe --tags --abbrev=0 --match 'postgresql-plus-v[0-9]*' origin/main 2>/dev/null || true)
           if [ -n "$TAG" ]; then
-            BASELINE="${TAG#v}"
+            BASELINE="${TAG#postgresql-plus-v}"
           else
-            BASELINE=$(git show origin/main:.tabularium | jq -r .version)
+            BASELINE=$(git show origin/main:extensions/postgresql/.tabularium | jq -r .version)
           fi
           echo "version=$BASELINE" >> "$GITHUB_OUTPUT"
 
@@ -255,7 +104,7 @@ jobs:
             const type = "${{ steps.classify.outputs.type }}";
             const breaking = "${{ steps.classify.outputs.breaking }}" === "true";
             const baselineStr = "${{ steps.baseline.outputs.version }}";
-            const marker = "<!-- version-suggestion-bot";
+            const marker = "<!-- version-suggestion-bot:postgresql-plus";
 
             function parseVersion(v) {
               const m = v.match(/^(\d+)\.(\d+)\.(\d+)(?:-([a-zA-Z]+)\.(\d+))?$/);
@@ -347,7 +196,7 @@ jobs:
             }
 
             const suggested = computeNextVersion(baselineStr, classification, channel);
-            const tag = `v${suggested}`;
+            const tag = `postgresql-plus-v${suggested}`;
 
             await minimizePrevious();
 
@@ -373,33 +222,3 @@ jobs:
               issue_number: prNumber,
               body,
             });
-
-  markdownlint:
-    name: Markdown lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Run markdownlint
-        run: npx --yes markdownlint-cli "**/*.md"
-
-  audit:
-    name: Security audit
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      checks: write
-      # Scheduled audit-check runs can file or update tracking issues.
-      issues: write
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          # RUSTSEC-2026-0235 affects rkyv 0.7.46, present only because
-          # rust_decimal declares an optional rkyv feature. This plugin does
-          # not enable it (`cargo tree -i rkyv` has no path), so no rkyv code
-          # is compiled into the shipped binary. Re-check whenever
-          # rust_decimal is upgraded or its enabled features change.
-          ignore: RUSTSEC-2026-0235
