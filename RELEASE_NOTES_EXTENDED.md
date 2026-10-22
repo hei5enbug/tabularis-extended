@@ -48,8 +48,8 @@ explicit `sql_password`.
 
 ## MCP server
 
-`tabularis-extended --mcp` serves 54 tools: the five legacy tools with unchanged output, 47 service tools, and
-`table_preview` and `job_list`.
+`tabularis-extended --mcp` serves 57 tools: the five legacy tools with unchanged output, 48 service tools, and
+`table_preview`, `job_list`, `server_activity`, and `server_cancel`.
 
 - `query_execute` returns a job ID right away. A job that finishes within `wait_ms` returns its first page.
 - `result_get` pages a stored result of up to 10,000 rows without running the SQL again. Each reply stays within
@@ -59,6 +59,13 @@ explicit `sql_password`.
   credentials.
 - Catalog tools list databases, schemas, tables, views, materialized views, routines, and triggers, and accept
   `offset` for long lists.
+- `query_explain` returns the estimated plan of one statement and never runs it. PostgreSQL Plus runs
+  `EXPLAIN (FORMAT JSON)` in a read-only transaction. SQL Server Plus uses `SHOWPLAN_XML` on a connection that is
+  thrown away afterwards. The reply sums up the total cost, estimated rows, operators, full scans, warnings, and
+  missing indexes, and carries the raw plan when it is small enough.
+- `server_activity` lists the queries running on the server, from any client. `server_cancel` stops one of them by
+  its process id. On PostgreSQL it cancels only the query and the session stays. On SQL Server it runs `KILL`, which
+  ends the session and rolls back its open transaction.
 
 ## Write policy
 
@@ -66,27 +73,41 @@ explicit `sql_password`.
   apply to both `run_query` and the service tools.
 - A statement counts as a read only when the classifier proves it is one read. `SELECT … INTO`, `EXEC`, `CALL`,
   several statements, and a write keyword after a read without a semicolon count as writes.
-- Service writes need `write: true`. Without it a non-read fails with `WRITE_INTENT_REQUIRED`.
+- A `SELECT` that calls a function that changes server or session state, such as `pg_cancel_backend`,
+  `set_config`, `nextval`, advisory locks, or `dblink`, counts as a write. A statement with a MySQL executable
+  comment (`/*! … */`) never counts as a read.
+- Service writes need `write: true`. Without it a non-read fails with `WRITE_INTENT_REQUIRED`. `server_cancel` is
+  always a write.
 - When a driver gives no database-level read-only guarantee, reads run on the classifier's result and report
   `readonly_guarantee: classification_only`.
 - After an approval, the host checks read-only mode and the connection revision again before it runs the request.
 - `connection_create` and `connection_update` reject secrets with `SECRET_NOT_ACCEPTED` and always wait for GUI
   approval. `credential_import` and `connection_delete` are not available through MCP.
 
+## Following upstream releases
+
+`node scripts/upstream-sync.mjs status` shows the newest upstream Tabularis release and the files a merge would
+conflict on, without touching the work tree. `sync` merges it on a new branch and `finish` sets the fork version.
+`UPSTREAM_SYNC.md` describes the steps, and `scripts/check-fork-identity.mjs` checks that the fork keeps its own
+name, identifiers, and version.
+
 ## Verification status
 
-Automated checks ran on macOS arm64 with deterministic fake drivers and fixtures. The host Rust library tests ran
-on 2026-10-22; the other suites ran on 2026-10-21.
+Automated checks ran on macOS arm64 with deterministic fake drivers and fixtures. The Spatial and Azure suites and
+the frontend tests ran on 2026-10-21; the others ran on 2026-10-22.
 
-- Host: 2,137 Rust library tests and 5,380 frontend tests. In one full parallel run, the Spatial test
-  `명시_export는_원본32mib이하_snapshot을_전체32mib이상_geojson으로_스트리밍한다` failed once. It passed in three
-  runs on its own, so the failure is likely a timeout under load.
-- Contracts: 447 Node tests and 268 Rust tests.
-- PostgreSQL Plus: 415 tests. SQL Server Plus: 325 driver tests, 3 conformance tests, and 33 offline harness tests.
+- Host: 2,181 Rust library tests passed in a full run, and 5,380 frontend tests. In an earlier full parallel run the
+  Spatial test `명시_export는_원본32mib이하_snapshot을_전체32mib이상_geojson으로_스트리밍한다` failed under load and
+  passed on its own, so it is likely a timeout under load.
+- Contracts: 456 Node tests and 284 Rust tests.
+- PostgreSQL Plus: 421 unit tests. SQL Server Plus: 334 unit tests; its 3 conformance tests and 33 offline harness
+  tests last ran on 2026-10-21.
+- Upstream sync scripts: 14 tests.
 - Spatial: 68 Rust, 124 UI, and 128 install tests. Azure: 26, 646, 14, and 126 tests in its suites.
 - A locked release build produced the macOS app bundle.
 
-Checks against real systems on 2026-10-22, macOS arm64, read-only:
+Checks against real systems on 2026-10-22, macOS arm64. Saved connections were used read-only; cancellation ran only
+on local Docker databases:
 
 | Check | Scope | Result |
 |---|---|---|
@@ -96,6 +117,8 @@ Checks against real systems on 2026-10-22, macOS arm64, read-only:
 | `readonly_guarantee` | Same 7 connections | `read_only_transaction` on PostgreSQL Plus, `classification_only` on SQL Server Plus |
 | Routine and trigger catalog | Same 7 connections | PostgreSQL counts match `pg_proc` and `pg_trigger` in `public`, without extension functions |
 | Server-side cancellation | Local Docker PostgreSQL 16 and SQL Server 2022 | `job_cancel` returned `cancelled`, and the server no longer listed the query |
+| `query_explain` | Same Docker databases, 200,000-row table | Plans for `SELECT` and `DELETE` with `executed: false`; the row count did not change; two statements and `EXPLAIN ANALYZE` were refused |
+| `server_activity` and `server_cancel` | Same Docker databases, a query from another client | The query was listed; cancel needed `write: true`, waited for approval in the default mode, was refused in read-only mode, and with approval off stopped the query (PostgreSQL) or killed its session (SQL Server) |
 
 The production connections were not used. Not yet verified: Windows bundles, install and rollback of the packaged
 plugins through the plugin manager, and any write path on a real database.
