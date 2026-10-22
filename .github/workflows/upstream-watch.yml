@@ -1,0 +1,67 @@
+name: Upstream watch
+
+# Reports a new stable TabularisDB/tabularis release as one issue. It never
+# pushes, opens pull requests, or merges. Scheduled runs use the default branch.
+on:
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: upstream-watch
+  cancel-in-progress: false
+
+jobs:
+  watch:
+    if: github.repository == 'hei5enbug/tabularis-extended'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Check upstream
+        run: node scripts/upstream-sync.mjs status --json > "$RUNNER_TEMP/status.json"
+
+      - name: Open or update the issue
+        run: |
+          latest=$(jq -r '.latest' "$RUNNER_TEMP/status.json")
+          if [ "$(jq -r '.merged' "$RUNNER_TEMP/status.json")" = "true" ]; then
+            echo "$latest is already merged. Nothing to report."
+            exit 0
+          fi
+
+          title="Upstream Tabularis ${latest} is available"
+          jq -r '
+            "Upstream Tabularis \(.latest) is not merged yet. This branch is based on \(.base // "no known release").\n\n"
+            + "## Commits behind: \(.behind)\n\n"
+            + (.commits | map("- `\(.hash)` \(.subject)") | join("\n"))
+            + (if .behind > (.commits | length) then "\n- ... and \(.behind - (.commits | length)) more" else "" end)
+            + "\n\n## Predicted conflicts\n\n"
+            + (if (.conflicts | length) == 0 then "None." else (.conflicts | map("- `\(.)`") | join("\n")) end)
+            + (if (.autoResolved | length) == 0 then "" else "\n\nVersion-only conflicts that the sync script settles by itself: " + (.autoResolved | map("`\(.)`") | join(", ")) end)
+            + "\n\n## Run locally\n\n```\nnode scripts/upstream-sync.mjs status\nnode scripts/upstream-sync.mjs sync \(.latest)\n```\n\n"
+            + "If the merge stops on conflicts, resolve them, then run `git merge --continue` and `node scripts/upstream-sync.mjs finish`. See UPSTREAM_SYNC.md."
+          ' "$RUNNER_TEMP/status.json" > "$RUNNER_TEMP/body.md"
+
+          number=$(gh issue list --state open --limit 200 --json number,title \
+            | jq -r --arg title "$title" '[.[] | select(.title == $title)][0].number // empty')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file "$RUNNER_TEMP/body.md"
+          else
+            gh issue create --title "$title" --body-file "$RUNNER_TEMP/body.md"
+          fi
