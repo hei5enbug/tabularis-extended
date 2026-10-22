@@ -194,6 +194,55 @@ pub fn remap_connections_in(
     Ok(report)
 }
 
+/// Adds each verified plus driver that a saved connection uses to the
+/// profile's `activeExternalDrivers`, so the plugin manager starts it. A
+/// missing config or list already starts every installed driver and stays
+/// unchanged, as does every other config field.
+pub fn activate_used_plus_drivers_in(
+    config_path: &Path,
+    connections_path: &Path,
+    plugins_dir: &Path,
+) -> Result<Vec<String>, String> {
+    if !config_path.exists() || !connections_path.exists() {
+        return Ok(Vec::new());
+    }
+    let connections = persistence::load_connections(connections_path)?;
+    let content = std::fs::read(config_path).map_err(|error| error.to_string())?;
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&content).map_err(|error| error.to_string())?;
+    let Some(active) = config
+        .get_mut("activeExternalDrivers")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(Vec::new());
+    };
+    let mut added = Vec::new();
+    for id in [POSTGRESQL_PLUS, SQLSERVER_PLUS] {
+        if connections
+            .iter()
+            .any(|connection| connection.params.driver == id)
+            && !active.iter().any(|value| value.as_str() == Some(id))
+            && verified_driver_package(plugins_dir, id)
+        {
+            active.push(id.into());
+            added.push(id.to_owned());
+        }
+    }
+    if !added.is_empty() {
+        let bytes = serde_json::to_vec_pretty(&config).map_err(|error| error.to_string())?;
+        persistence::service_write_atomic(config_path, &bytes)
+            .map_err(|_| "The config file could not be written.".to_owned())?;
+    }
+    Ok(added)
+}
+
+/// Startup hook for the fork profile, run before plugins load.
+pub fn activate_fork_plus_drivers() -> Result<Vec<String>, String> {
+    let (connections, plugins_dir) = fork_locations()?;
+    let config = crate::paths::get_app_config_dir().join("config.json");
+    activate_used_plus_drivers_in(&config, &connections, &plugins_dir)
+}
+
 fn fork_locations() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let plugins_dir = crate::paths::get_plugins_dir_checked()?;
     let connections = crate::paths::resolve_connections_path(&crate::paths::get_app_config_dir());

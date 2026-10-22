@@ -400,3 +400,85 @@ fn 연결_파일이_없으면_아무것도_만들지_않는다() {
         .with_file_name("connections.json.lock")
         .exists());
 }
+
+fn config_at(fixture: &Fixture, config: Value) -> PathBuf {
+    let path = fixture.connections.with_file_name("config.json");
+    fs::write(&path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    path
+}
+
+#[test]
+fn 연결이_쓰는_검증된_플러스_드라이버를_활성_목록에_추가하고_다른_설정은_보존한다() {
+    // given
+    let fixture = fixture(vec![
+        connection("pg", plain(POSTGRESQL_PLUS)),
+        connection("ms", plain(SQLSERVER_PLUS)),
+    ]);
+    package(&fixture.plugins, POSTGRESQL_PLUS, true);
+    package(&fixture.plugins, SQLSERVER_PLUS, true);
+    let config = config_at(
+        &fixture,
+        json!({"activeExternalDrivers": ["postgresql", "sqlserver"], "theme": "dark", "futureKey": {"a": 1}}),
+    );
+
+    // when
+    let added =
+        activate_used_plus_drivers_in(&config, &fixture.connections, &fixture.plugins).unwrap();
+
+    // then
+    assert_eq!(added, vec![POSTGRESQL_PLUS, SQLSERVER_PLUS]);
+    let written: Value = serde_json::from_slice(&fs::read(&config).unwrap()).unwrap();
+    assert_eq!(
+        written,
+        json!({
+            "activeExternalDrivers": ["postgresql", "sqlserver", POSTGRESQL_PLUS, SQLSERVER_PLUS],
+            "theme": "dark",
+            "futureKey": {"a": 1}
+        })
+    );
+}
+
+#[test]
+fn 쓰지_않거나_검증되지_않았거나_이미_있는_드라이버는_추가하지_않고_파일도_바꾸지_않는다() {
+    // given
+    let fixture = fixture(vec![
+        connection("pg", plain(POSTGRESQL_PLUS)),
+        connection("ms", plain(SQLSERVER_PLUS)),
+        connection("my", plain("mysql")),
+    ]);
+    package(&fixture.plugins, POSTGRESQL_PLUS, true);
+    package(&fixture.plugins, SQLSERVER_PLUS, false);
+    let config = config_at(
+        &fixture,
+        json!({"activeExternalDrivers": [POSTGRESQL_PLUS]}),
+    );
+    let before = fs::read(&config).unwrap();
+
+    // when
+    let added =
+        activate_used_plus_drivers_in(&config, &fixture.connections, &fixture.plugins).unwrap();
+
+    // then
+    assert!(added.is_empty());
+    assert_eq!(fs::read(&config).unwrap(), before);
+}
+
+#[test]
+fn 활성_목록이_null이면_모든_드라이버가_켜진_상태이므로_설정을_바꾸지_않는다() {
+    // given
+    let fixture = fixture(vec![connection("pg", plain(POSTGRESQL_PLUS))]);
+    package(&fixture.plugins, POSTGRESQL_PLUS, true);
+    let config = config_at(
+        &fixture,
+        json!({"activeExternalDrivers": null, "theme": "dark"}),
+    );
+    let before = fs::read(&config).unwrap();
+
+    // when
+    let added =
+        activate_used_plus_drivers_in(&config, &fixture.connections, &fixture.plugins).unwrap();
+
+    // then
+    assert!(added.is_empty());
+    assert_eq!(fs::read(&config).unwrap(), before);
+}

@@ -326,6 +326,17 @@ pub fn run() {
                 );
             }
 
+            // An imported profile lists only the legacy drivers its
+            // connections used before the remap; enable the plus drivers
+            // they use now so the load below starts them.
+            match crate::driver_remap::activate_fork_plus_drivers() {
+                Ok(added) if !added.is_empty() => {
+                    log::info!("Enabled plus drivers in use: {}", added.join(","))
+                }
+                Ok(_) => {}
+                Err(error) => log::warn!("Enabling plus drivers failed: {error}"),
+            }
+
             // Apply the persisted decoration policy as early as possible. The
             // main window is created from tauri.conf.json before this hook.
             let startup_config = crate::config::load_config_internal(&app.handle());
