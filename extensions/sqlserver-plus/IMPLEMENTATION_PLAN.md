@@ -13,7 +13,7 @@ The driver remains a JSON-RPC subprocess; it does not become a second MCP server
 
 | Item | Baseline or target |
 |---|---|
-| Repository | `extensions/sqlserver-plus` in [hei5enbug/tabularis-extended](https://github.com/hei5enbug/tabularis-extended), imported from [hei5enbug/tabularis-sqlserver-plus](https://github.com/hei5enbug/tabularis-sqlserver-plus) |
+| Repository | `extensions/sqlserver-plus` in [hei5enbug/tabularis-extended](https://github.com/hei5enbug/tabularis-extended), imported from `hei5enbug/tabularis-sqlserver-plus`; its final `main` is kept as the tag [`archive/tabularis-sqlserver-plus`](https://github.com/hei5enbug/tabularis-extended/tree/archive/tabularis-sqlserver-plus) |
 | Current fork code baseline | `885ea261edd424078a59aaa584c2cfc25f2969ae` |
 | Local source base | Official `v1.0.0-beta.3` |
 | Installed original package | `sqlserver`, version `1.0.0-beta.3` |
