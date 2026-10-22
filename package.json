@@ -12,6 +12,7 @@
     "mastodon": "https://mastodon.social/@tabularis"
   },
   "scripts": {
+    "prepare": "pnpm --filter @tabularis/service-contracts build",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint . && node scripts/check-theme-tokens.mjs",
