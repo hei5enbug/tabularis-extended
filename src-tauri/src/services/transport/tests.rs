@@ -158,7 +158,8 @@ fn catalog(h: &Harness) -> Vec<Value> {
         .clone()
 }
 #[tokio::test]
-async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔일곱_작업과_미리보기와_작업목록이다() {
+async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔여덟_작업과_미리보기와_작업목록과_서버_도구_둘이다(
+) {
     // given
     let h = Harness::new();
     let pattern = |name: &str| {
@@ -174,10 +175,12 @@ async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔일곱_작�
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 49);
+    assert_eq!(names.len(), 52);
     assert!(names.iter().all(|name| pattern(name)));
     assert!(names.iter().all(|name| !EXCLUDED.contains(name)));
     assert!(names.contains(&"table_preview") && names.contains(&"job_list"));
+    assert!(names.contains(&"query_explain"));
+    assert!(names.contains(&"server_activity") && names.contains(&"server_cancel"));
     assert!(names.contains(&"map_layer_add") && names.contains(&"connection_test"));
     assert!(!names.contains(&"query_execute_write"));
     assert_eq!(
@@ -213,7 +216,8 @@ async fn 모든_도구는_반환값과_쓰기_여부를_밝히는_실제_설명�
             "document_create",
             "document_replace",
             "document_delete",
-            "session_commit"
+            "session_commit",
+            "server_cancel"
         ]
     );
 }

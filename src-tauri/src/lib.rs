@@ -3,6 +3,8 @@ pub mod services;
 pub mod service_native;
 #[path = "commands/service.rs"]
 pub mod service_commands;
+#[path = "services/explain_summary.rs"]
+pub mod service_explain_summary;
 #[path = "services/registry_driver.rs"]
 pub mod service_registry_driver;
 #[path = "services/platform/mod.rs"]

@@ -36,6 +36,8 @@ pub enum Operation {
     QueryExecute,
     #[serde(rename = "query.next")]
     QueryNext,
+    #[serde(rename = "query.explain")]
+    QueryExplain,
     #[serde(rename = "result.get")]
     ResultGet,
     #[serde(rename = "result.release")]

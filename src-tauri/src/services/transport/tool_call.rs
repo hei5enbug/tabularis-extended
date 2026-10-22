@@ -22,6 +22,8 @@ use serde_json::{json, Map, Value};
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 
+mod server_calls;
+
 const POLL_MS: u64 = 25;
 
 /// Per-call facts the envelope does not carry.
@@ -209,6 +211,8 @@ impl ServiceTransport {
             }
             ToolKind::TablePreview => self.table_preview(arguments, caller, signal).await,
             ToolKind::JobList => self.job_list(arguments, caller).await,
+            ToolKind::ServerActivity => self.server_activity(arguments, caller, signal).await,
+            ToolKind::ServerCancel => self.server_cancel(arguments, caller, signal).await,
         }
     }
 
@@ -297,6 +301,10 @@ impl ServiceTransport {
                 input.entry("language").or_insert(json!("sql"));
                 input.entry("parameters").or_insert(json!([]));
                 input.entry("page_size").or_insert(json!(100));
+            }
+            Operation::QueryExplain => {
+                extras.database = text(&input, "database")?.map(str::to_owned);
+                extras.schema = text(&input, "schema")?.map(str::to_owned);
             }
             Operation::ResultGet => {
                 input.entry("result_set_index").or_insert(json!(0));
@@ -438,6 +446,7 @@ impl ServiceTransport {
                 Operation::CatalogObjects
                     | Operation::CatalogDescribe
                     | Operation::QueryExecute
+                    | Operation::QueryExplain
                     | Operation::RowInsert
                     | Operation::RowUpdate
                     | Operation::RowDelete
@@ -505,6 +514,7 @@ impl ServiceTransport {
                     && matches!(
                         operation,
                         Operation::QueryExecute
+                            | Operation::QueryExplain
                             | Operation::CatalogSchemas
                             | Operation::CatalogObjects
                             | Operation::CatalogDescribe

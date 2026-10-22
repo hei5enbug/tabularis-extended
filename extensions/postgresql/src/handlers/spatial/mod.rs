@@ -3,6 +3,7 @@ pub mod catalog_objects;
 pub mod connection;
 pub mod ewkb;
 pub mod exact;
+pub mod explain;
 pub mod service;
 pub mod sessions;
 pub mod sql;
@@ -80,6 +81,12 @@ async fn run(
             types::input::<transform::TransformInput>(params)?;
             None
         }
+        "service_explain" => {
+            let input = types::input::<explain::ExplainInput>(params)?;
+            explain::statement(&input.sql)?;
+            exact::search_path_statement(input.schema.as_deref())?;
+            None
+        }
         "service_test" | "service_catalog" | "service_row" => {
             service::validate(params, method, &context, &connection)?
         }
@@ -135,6 +142,9 @@ async fn run(
                 context.session_handle.is_some(),
             )
             .await;
+        }
+        if method == "service_explain" {
+            return explain::explain(lease.client(), &types::input(params)?).await;
         }
         match method {
             "service_test" => {

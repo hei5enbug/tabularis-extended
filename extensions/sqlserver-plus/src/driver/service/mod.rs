@@ -1,5 +1,6 @@
 pub mod catalog;
 pub mod exact;
+pub mod explain;
 pub mod pool;
 pub mod registry;
 pub mod row;

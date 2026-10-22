@@ -1,11 +1,15 @@
 //! The MCP tool catalog: one tool per service operation (dots become
-//! underscores) plus `table_preview` and `job_list`. Arguments are flat: the
+//! underscores) plus `table_preview`, `job_list`, `server_activity` and
+//! `server_cancel`. Arguments are flat: the
 //! operation's input fields at the top level next to the identifiers the
 //! operation uses, so a caller never builds the request envelope.
 
-use super::super::{
-    contracts::{ErrorCode, Operation, REQUEST_SCHEMA},
-    error::{failure, ServiceResult},
+use super::{
+    super::{
+        contracts::{ErrorCode, Operation, REQUEST_SCHEMA},
+        error::{failure, ServiceResult},
+    },
+    server_tools,
 };
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -19,6 +23,8 @@ pub enum ToolKind {
     Service(Operation),
     TablePreview,
     JobList,
+    ServerActivity,
+    ServerCancel,
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +82,7 @@ pub fn description(name: &str) -> &'static str {
         "catalog_objects" => "Lists the objects of a database and schema, optionally only one kind such as table, view or routine, and reports the effective database and schema. Read-only; a kind the driver lacks fails with UNSUPPORTED_OPERATION naming it.",
         "catalog_describe" => "Returns the columns and key positions of one table or view and reports the effective database and schema. Read-only; a kind the driver lacks fails with UNSUPPORTED_OPERATION naming it.",
         "query_execute" => "Registers a SQL job and returns at once with job_id, owner_instance_id and status (queued, awaiting_approval or running), or with the first page of rows when it finishes within wait_ms. Read-only unless write is true, which also needs connection write permission and approval; page further with result_get.",
+        "query_explain" => "Returns the estimated execution plan of one SELECT, WITH, INSERT, UPDATE, DELETE, MERGE, VALUES or TABLE statement without running it: the statement is planned only (never ANALYZE, BUFFERS or STATISTICS XML) inside a read-only call, so it needs no write flag and no approval. data.summary gives total_cost in cost_unit (postgres_planner_cost or sqlserver_estimated_subtree_cost, not comparable across engines), estimated_rows, node_count, nodes (pre-order, at most 40, each with depth, operation, object, index, estimated_rows and total_cost), full_scans (Seq Scan on PostgreSQL; Table Scan and Clustered Index Scan on SQL Server), and on SQL Server warnings and missing_indexes. data.plan holds the raw plan unless data.plan_omitted is true. Use it before query_execute to judge the load of a statement. Only postgresql-plus and sqlserver-plus connections support it.",
         "query_next" => "Continues a result from the page token of an earlier reply and returns the next page. Read-only; stored results are never re-run.",
         "result_get" => "Returns rows of a stored result by offset and limit with next_offset, has_more, stored_row_count and readonly_guarantee. Read-only; it pages the stored rows and never re-runs the SQL.",
         "result_release" => "Deletes a stored result before it expires. Does not touch the database.",
@@ -116,11 +123,12 @@ pub fn description(name: &str) -> &'static str {
         "auth_logout" => "Forgets the stored sign-in of a connection so the next use signs in again.",
         "table_preview" => "Returns the first rows of a table through a dialect-correct, quoted read-only query and reports the effective database and schema. Never writes; replies like query_execute when it takes longer than wait_ms.",
         "job_list" => "Lists running and recent jobs of this process together with persisted history, newest first, filtered by connection, status or time, with an opaque cursor. Returns metadata and SQL text, never rows.",
+        "server_activity" | "server_cancel" => server_tools::description(name),
         _ => "",
     }
 }
 
-fn clean_envelope(key: &str) -> Value {
+pub(super) fn clean_envelope(key: &str) -> Value {
     match key {
         "connection_id" => {
             json!({"type":"string","minLength":1,"maxLength":128,"description":"Id of the saved connection (see connection_list or list_connections)."})
@@ -308,6 +316,11 @@ fn service_schema(source: &Value, operation: Operation) -> ServiceResult<Value> 
                 json!({"enum":OBJECT_KINDS,"default":"table","description":"Kind of the object to describe."}),
             );
         }
+        Operation::QueryExplain => {
+            properties["sql"] = json!({"type":"string","minLength":1,"description":"The one statement to plan, without EXPLAIN. It is never run."});
+            properties["database"] = json!({"type":"string","minLength":1,"description":"Database to plan against (optional). It must be one catalog_databases lists for the connection."});
+            properties["schema"] = json!({"type":"string","minLength":1,"description":"Schema to put first on the search path for the plan (optional); PostgreSQL only, SQL Server ignores it."});
+        }
         Operation::ResultGet => {
             properties["result_set_index"] = json!({"type":"integer","minimum":0,"default":0});
             properties["offset"] = json!({"type":"integer","minimum":0,"default":0,"description":"Row to start at; use next_offset of the previous reply."});
@@ -380,6 +393,16 @@ pub fn build() -> ServiceResult<Vec<ToolSpec>> {
         "job_list".into(),
         ToolKind::JobList,
         job_list_schema(),
+    ));
+    tools.push(spec(
+        "server_activity".into(),
+        ToolKind::ServerActivity,
+        server_tools::activity_schema(),
+    ));
+    tools.push(spec(
+        "server_cancel".into(),
+        ToolKind::ServerCancel,
+        server_tools::cancel_schema(),
     ));
     for tool in &tools {
         if !valid_tool_name(&tool.name) || tool.description.is_empty() {

@@ -1074,6 +1074,169 @@
     }
   },
   {
+    "name": "query.explain 입력을 허용한다",
+    "schema": "request",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": "SELECT 1"
+      }
+    }
+  },
+  {
+    "name": "query.explain의 database와 schema 입력을 허용한다",
+    "schema": "request",
+    "valid": true,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": "SELECT 1",
+        "database": "app",
+        "schema": "public"
+      }
+    }
+  },
+  {
+    "name": "query.explain의 추가 입력 필드를 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": "SELECT 1",
+        "analyze": true
+      }
+    }
+  },
+  {
+    "name": "query.explain의 sql 누락을 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {}
+    }
+  },
+  {
+    "name": "query.explain의 빈 sql을 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": ""
+      }
+    }
+  },
+  {
+    "name": "query.explain의 문자열이 아닌 sql을 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": 1
+      }
+    }
+  },
+  {
+    "name": "query.explain의 빈 database를 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": "connection-1",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": "SELECT 1",
+        "database": ""
+      }
+    }
+  },
+  {
+    "name": "query.explain의 connection_id 누락을 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": "SELECT 1"
+      }
+    }
+  },
+  {
+    "name": "query.explain의 connection_id null을 거부한다",
+    "schema": "request",
+    "valid": false,
+    "value": {
+      "protocol_version": 1,
+      "operation": "query.explain",
+      "request_id": "fixture-query.explain",
+      "connection_id": null,
+      "session_id": null,
+      "map_id": null,
+      "expected_version": null,
+      "deadline_ms": 30000,
+      "input": {
+        "sql": "SELECT 1"
+      }
+    }
+  },
+  {
     "name": "result.get 입력을 허용한다",
     "schema": "request",
     "valid": true,

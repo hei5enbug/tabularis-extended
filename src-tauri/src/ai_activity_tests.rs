@@ -1083,4 +1083,80 @@ mod tests {
         // then
         assert!(actual.iter().all(|kind| *kind == "select"), "{actual:?}");
     }
+
+    #[test]
+    fn 문장_맨_앞의_kill은_쓰기이고_읽기_문장_안의_kill_열은_읽기다() {
+        // given
+        let writes = ["KILL 53", "kill 53;", "/* c */ KILL 53 WITH STATUSONLY"];
+        let reads = ["SELECT kill_count FROM stats", "SELECT 'KILL 53'"];
+
+        // when
+        let written: Vec<_> = writes.iter().map(|sql| classify_query_kind(sql)).collect();
+        let read: Vec<_> = reads.iter().map(|sql| classify_query_kind(sql)).collect();
+
+        // then
+        assert!(written.iter().all(|kind| *kind == "write"), "{written:?}");
+        assert!(read.iter().all(|kind| *kind == "select"), "{read:?}");
+    }
+
+    #[test]
+    fn 한_문장인지는_모든_따옴표_해석에서_같게_판단한다() {
+        // given
+        use crate::services::sql_classifier::is_single_statement;
+        let single = [
+            "SELECT 1",
+            "SELECT 1;",
+            "SELECT 1 ;  \n",
+            "SELECT 'a;b'",
+            "SELECT 1 -- ; DELETE FROM t",
+            "SELECT 1 /* ; DELETE FROM t */",
+        ];
+        let several = [
+            "",
+            "  ",
+            ";",
+            "-- only a comment",
+            "SELECT 1; SELECT 2",
+            "SELECT 1;; ",
+            "; SELECT 1",
+            "SELECT '\\'; DELETE FROM t; --'",
+            "SELECT [a']; DELETE FROM t; --",
+            "SELECT $$ x $$; DELETE FROM t",
+            "SELECT [a;b] FROM t",
+            "SELECT $$a; b$$",
+        ];
+
+        // when
+        let actual_single: Vec<bool> = single.iter().map(|sql| is_single_statement(sql)).collect();
+        let actual_several: Vec<bool> =
+            several.iter().map(|sql| is_single_statement(sql)).collect();
+
+        // then
+        assert!(actual_single.iter().all(|ok| *ok), "{actual_single:?}");
+        assert!(actual_several.iter().all(|ok| !*ok), "{actual_several:?}");
+    }
+
+    #[test]
+    fn 첫_키워드는_괄호와_공백과_주석을_건너뛰고_해석이_갈리면_없다() {
+        // given
+        use crate::services::sql_classifier::leading_keyword;
+        let cases = [
+            ("select 1", Some("SELECT")),
+            ("  (( with x as (select 1) select * from x", Some("WITH")),
+            ("/* c */ -- d\n DELETE FROM t", Some("DELETE")),
+            ("explain select 1", Some("EXPLAIN")),
+            ("", None),
+            ("123", None),
+            ("$$ SELECT $$ DELETE FROM t", None),
+        ];
+
+        // when
+        let actual: Vec<Option<String>> =
+            cases.iter().map(|(sql, _)| leading_keyword(sql)).collect();
+
+        // then
+        for ((sql, expected), actual) in cases.iter().zip(actual) {
+            assert_eq!(actual.as_deref(), *expected, "{sql:?}");
+        }
+    }
 }

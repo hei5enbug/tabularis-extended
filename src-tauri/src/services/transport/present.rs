@@ -384,6 +384,33 @@ fn list_result(
     Some(build(low))
 }
 
+/// An estimated plan, whole: the host already bounded its size, and sampling
+/// would cut the plan text.
+fn plan_result(
+    operation: Operation,
+    response: &ServiceResponse,
+    effective: Option<&Value>,
+) -> Option<Value> {
+    if operation != Operation::QueryExplain
+        || response.error.is_some()
+        || response.status != JobStatus::Succeeded
+    {
+        return None;
+    }
+    let output = render(
+        &summary(
+            operation,
+            response,
+            response.data.clone(),
+            false,
+            effective,
+            &response.page,
+        ),
+        false,
+    );
+    (!oversized(&output)).then_some(output)
+}
+
 pub(crate) fn tool_result(
     operation: Operation,
     response: &ServiceResponse,
@@ -406,6 +433,9 @@ pub(crate) fn tool_result_resuming(
     }
     if let Some(list) = list_result(operation, response, effective, offset) {
         return list;
+    }
+    if let Some(plan) = plan_result(operation, response, effective) {
+        return plan;
     }
     let is_error = response.error.is_some();
     // Arrays stay whole while the response fits; only then is a payload

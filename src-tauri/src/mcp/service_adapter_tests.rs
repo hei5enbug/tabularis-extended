@@ -19,7 +19,7 @@ async fn 기존_다섯_도구와_공통_도구가_같은_카탈로그에_존재�
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(tools.len(), 54);
+    assert_eq!(tools.len(), 57);
     assert_eq!(
         names[..5],
         [
@@ -31,7 +31,7 @@ async fn 기존_다섯_도구와_공통_도구가_같은_카탈로그에_존재�
         ]
     );
     let service = &names[5..];
-    assert_eq!(service.len(), 49);
+    assert_eq!(service.len(), 52);
     assert!(service.contains(&"table_preview") && service.contains(&"job_list"));
     assert!(!names.contains(&"credential_import") && !names.contains(&"connection_delete"));
     assert!(names.iter().all(|name| {

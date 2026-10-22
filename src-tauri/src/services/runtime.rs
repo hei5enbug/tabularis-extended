@@ -49,6 +49,7 @@ pub const SERVICE_OPERATIONS: &[Operation] = &[
     Operation::CatalogDescribe,
     Operation::QueryExecute,
     Operation::QueryNext,
+    Operation::QueryExplain,
     Operation::ResultGet,
     Operation::ResultRelease,
     Operation::RowInsert,
@@ -1417,6 +1418,13 @@ impl ServiceRuntime {
             Operation::ConnectionUpdate => {
                 super::security::reject_secret_fields(&request.input["patch"])?;
                 super::security::reject_secret_fields(&request.input["patch"]["settings"])?;
+            }
+            Operation::QueryExplain => {
+                if !super::sql_classifier::is_plannable_statement(
+                    request.input["sql"].as_str().unwrap_or(""),
+                ) {
+                    return Err(failure(ErrorCode::InvalidArgument));
+                }
             }
             _ => {}
         }

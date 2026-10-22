@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 mod azure_cli;
 mod driver_owned_entra;
+mod explain;
 mod lifecycle;
 mod newguiinput;
 mod oauth;
@@ -114,7 +115,7 @@ fn 모든_operation의_입력_스키마를_레지스트리에서_얻는다() {
         .collect();
 
     // then
-    assert_eq!(names.len(), 49);
+    assert_eq!(names.len(), 50);
     assert!(actual
         .iter()
         .all(|schema| schema["additionalProperties"] == false));

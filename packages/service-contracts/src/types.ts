@@ -12,6 +12,7 @@ export const operationNames = [
   "catalog.describe",
   "query.execute",
   "query.next",
+  "query.explain",
   "result.get",
   "result.release",
   "row.insert",
@@ -132,6 +133,7 @@ export interface OperationInputs {
   "catalog.describe": { "table": TableRef };
   "query.execute": { "text": string; "parameters": (QueryParameter)[]; "page_size": number; "mode"?: "exact"; "database"?: string; "schema"?: string; "container"?: string; "partition_key"?: PartitionKeyComponent[] | null; "ru_budget"?: number } & ({ "language": "sql"; "result_mode"?: never } | { "language": "cosmos_sql"; "result_mode"?: "json_values" | "documents" });
   "query.next": { "next_token": string };
+  "query.explain": { "sql": string; "database"?: string; "schema"?: string };
   "result.get": { "result_id": string; "result_set_index": number; "offset": number; "limit": number };
   "result.release": { "result_id": string };
   "row.insert": { "table": TableRef; "values": JsonObject };

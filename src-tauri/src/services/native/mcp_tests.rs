@@ -142,7 +142,7 @@ async fn 승인을_기다리는_동안에도_응답하고_제어_호출은_즉�
         .unwrap()
         .iter()
         .any(|entry| entry["job_id"] == summary(&reply)["job_id"]));
-    assert_eq!(catalog["tools"].as_array().unwrap().len(), 49);
+    assert_eq!(catalog["tools"].as_array().unwrap().len(), 52);
     assert!(summary(&cancelled)["error"].is_null());
     assert_eq!(summary(&ended)["data"]["cancel_state"], "confirmed");
     assert_eq!(h.state.executions.load(Ordering::SeqCst), 0);

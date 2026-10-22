@@ -108,6 +108,7 @@ pub async fn handle_line_with_scope(
         | "service_test"
         | "service_catalog"
         | "service_row"
+        | "service_explain"
         | "service_invalidate_auth" => {
             handlers::spatial::dispatch_with_scope(id, &params, &method, scope).await
         }

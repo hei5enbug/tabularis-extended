@@ -1,6 +1,7 @@
 mod mcp;
 mod present;
 mod request;
+mod server_tools;
 mod stdio;
 mod tool_call;
 pub mod tool_catalog;

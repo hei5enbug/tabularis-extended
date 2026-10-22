@@ -2,6 +2,63 @@
 //! common service layer. It depends on nothing outside `std` so the service
 //! contracts crate can compile it on its own.
 
+/// The four ways a statement's quoting can be read.
+const QUOTING_VARIANTS: [StripOptions; 4] = [
+    StripOptions::STANDARD,
+    StripOptions {
+        backslash_escapes: true,
+        ..StripOptions::STANDARD
+    },
+    StripOptions {
+        brackets: true,
+        ..StripOptions::STANDARD
+    },
+    StripOptions {
+        dollar_quotes: true,
+        ..StripOptions::STANDARD
+    },
+];
+
+/// True when `sql` holds exactly one statement under every quoting
+/// interpretation. A trailing `;` is allowed; text with nothing but comments
+/// or whitespace is not a statement.
+pub fn is_single_statement(sql: &str) -> bool {
+    QUOTING_VARIANTS.into_iter().all(|options| {
+        let stripped = strip_with(sql, options);
+        !stripped.trim().trim_matches(';').trim().is_empty() && !has_trailing_statements(&stripped)
+    })
+}
+
+/// Statements an estimated plan can be asked for.
+const PLANNABLE_KEYWORDS: &[&str] = &[
+    "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES", "TABLE",
+];
+
+/// True when `sql` is one statement, under every quoting interpretation, that
+/// starts with a keyword an estimated plan can be asked for. `EXPLAIN`, `SET`,
+/// `EXEC`, DDL, `USE` and transaction control are not among them.
+pub fn is_plannable_statement(sql: &str) -> bool {
+    is_single_statement(sql)
+        && leading_keyword(sql)
+            .is_some_and(|keyword| PLANNABLE_KEYWORDS.contains(&keyword.as_str()))
+}
+
+/// The upper-cased first keyword of `sql`, after leading `(` and whitespace,
+/// when every quoting interpretation reads the same one.
+pub fn leading_keyword(sql: &str) -> Option<String> {
+    let mut agreed: Option<String> = None;
+    for options in QUOTING_VARIANTS {
+        let stripped = strip_with(sql, options);
+        let peeled = stripped.trim_start_matches(|c: char| c == '(' || c.is_whitespace());
+        let keyword = first_keyword(&peeled.to_uppercase());
+        if keyword.is_empty() || agreed.as_ref().is_some_and(|previous| *previous != keyword) {
+            return None;
+        }
+        agreed = Some(keyword);
+    }
+    agreed
+}
+
 /// Classify the kind of SQL: `"select"`, `"write"`, `"ddl"`, or `"unknown"`.
 ///
 /// Conservative on purpose: only a statement proven to be a single read
@@ -16,21 +73,7 @@
 /// scanned under every interpretation and the result is kept only when all of
 /// them agree; any disagreement is `"unknown"`.
 pub fn classify_query_kind(sql: &str) -> &'static str {
-    const VARIANTS: [StripOptions; 4] = [
-        StripOptions::STANDARD,
-        StripOptions {
-            backslash_escapes: true,
-            ..StripOptions::STANDARD
-        },
-        StripOptions {
-            brackets: true,
-            ..StripOptions::STANDARD
-        },
-        StripOptions {
-            dollar_quotes: true,
-            ..StripOptions::STANDARD
-        },
-    ];
+    const VARIANTS: [StripOptions; 4] = QUOTING_VARIANTS;
     let mut agreed: Option<&'static str> = None;
     for options in VARIANTS {
         let kind = classify_stripped(&strip_with(sql, options));
@@ -178,7 +221,7 @@ fn classify_stripped(stripped: &str) -> &'static str {
         "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "PRAGMA" | "VALUES" => {
             read_unless_embedded_statement(&peeled_upper, &first)
         }
-        "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" => "write",
+        "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "REPLACE" | "KILL" => "write",
         "CREATE" | "DROP" | "ALTER" | "TRUNCATE" | "RENAME" | "GRANT" | "REVOKE" | "COMMENT" => {
             "ddl"
         }

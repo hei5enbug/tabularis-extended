@@ -42,6 +42,8 @@ pub(crate) struct DriverState {
     pub legacy: AtomicUsize,
     pub capability_error: Mutex<Option<ErrorCode>>,
     pub unknown_count: AtomicBool,
+    /// A driver that does not offer estimated plans.
+    pub explain_unsupported: AtomicBool,
     /// Databases the catalog lists; `fixture` when empty.
     pub databases: Mutex<Vec<String>>,
     /// The database each service call ran against.
@@ -72,6 +74,7 @@ impl Default for DriverState {
             legacy: Default::default(),
             capability_error: Default::default(),
             unknown_count: Default::default(),
+            explain_unsupported: Default::default(),
             databases: Default::default(),
             params_databases: Default::default(),
             executions: Default::default(),
@@ -341,6 +344,7 @@ impl DatabaseDriver for MockDriver {
             sessions: false,
             catalog: true,
             rows: true,
+            explain: !self.state.explain_unsupported.load(Ordering::SeqCst),
             exact_affected_rows: true,
             read_only: DriverServiceReadOnly::ReadOnlyTransaction,
         })
@@ -410,6 +414,13 @@ impl DatabaseDriver for MockDriver {
                 json!({"affected_rows":if self.state.unknown_count.load(Ordering::SeqCst){Value::Null}else{json!(1)}})
             }
             ServiceRpcMethod::Test => json!({"success":true}),
+            ServiceRpcMethod::Explain => {
+                if self.manifest.capabilities.sql_dialect == Some(SqlDialect::Mssql) {
+                    json!({"engine":"sqlserver","format":"sqlserver-showplan-xml","payload":"<ShowPlanXML xmlns=\"http://schemas.microsoft.com/sqlserver/2004/07/showplan\"><RelOp NodeId=\"0\" PhysicalOp=\"Table Scan\" EstimateRows=\"1000\" EstimatedTotalSubtreeCost=\"3.5\"><TableScan><Object Schema=\"[dbo]\" Table=\"[orders]\"/></TableScan></RelOp></ShowPlanXML>"})
+                } else {
+                    json!({"engine":"postgres","format":"postgres-json","payload":[{"Plan":{"Node Type":"Seq Scan","Relation Name":"orders","Total Cost":35.5,"Plan Rows":1000}}]})
+                }
+            }
             ServiceRpcMethod::InvalidateAuth => json!({}),
             _ => return Err(failure(ErrorCode::UnsupportedOperation)),
         })

@@ -101,9 +101,9 @@
     },
     {
       "path": "packages/service-contracts/fixtures/v1/validation.json",
-      "sha256": "3ebc000a867785a311be8078ddc9b31ff8b591f1f7e23442963792b335d08899",
-      "size": 295938,
-      "origin_sha256": "3ebc000a867785a311be8078ddc9b31ff8b591f1f7e23442963792b335d08899"
+      "sha256": "a33a9dcc27bb70bacebd095fd8c1433a4f7dbba2c9f9cadf18d557b9419222a2",
+      "size": 299967,
+      "origin_sha256": "a33a9dcc27bb70bacebd095fd8c1433a4f7dbba2c9f9cadf18d557b9419222a2"
     },
     {
       "path": "packages/service-contracts/package.json",
@@ -113,9 +113,9 @@
     },
     {
       "path": "packages/service-contracts/schema/v1/request.json",
-      "sha256": "4ddb65aceb9a4133281d840d531cb57a2816e9833e8f52c75101afbec03bc9ce",
-      "size": 55965,
-      "origin_sha256": "4ddb65aceb9a4133281d840d531cb57a2816e9833e8f52c75101afbec03bc9ce"
+      "sha256": "fb06e5834802c444efcde25cb1d4b5bc10184ece9e5f5259cbbd20a0f210c14f",
+      "size": 56777,
+      "origin_sha256": "fb06e5834802c444efcde25cb1d4b5bc10184ece9e5f5259cbbd20a0f210c14f"
     },
     {
       "path": "packages/service-contracts/schema/v1/response.json",
@@ -131,9 +131,9 @@
     },
     {
       "path": "packages/service-contracts/src/types.ts",
-      "sha256": "e0190a7c4b482467004d8b14c37206f95a7f4e93b5acef8775fc1025ead2759f",
-      "size": 9642,
-      "origin_sha256": "e0190a7c4b482467004d8b14c37206f95a7f4e93b5acef8775fc1025ead2759f"
+      "sha256": "27e1b760aca7f654f2036c23db7ef7bfb1fa216af66d66ca0c3f1c7cbb0bcb29",
+      "size": 9739,
+      "origin_sha256": "27e1b760aca7f654f2036c23db7ef7bfb1fa216af66d66ca0c3f1c7cbb0bcb29"
     },
     {
       "path": "packages/service-contracts/tsconfig.json",

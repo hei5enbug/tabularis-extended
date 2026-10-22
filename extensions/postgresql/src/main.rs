@@ -125,6 +125,7 @@ async fn run_reader(req_tx: mpsc::Sender<Request>, resp_tx: mpsc::UnboundedSende
                 | "service_test"
                 | "service_catalog"
                 | "service_row"
+                | "service_explain"
         ) {
             let context = request.as_ref().map(|r| &r["params"]["driver_context"]);
             match context

@@ -25,7 +25,7 @@ async fn 명시한_서비스_프로토콜에서만_고정_capabilities를_공개
     // then
     assert_eq!(
         result["result"]["service_capabilities"],
-        json!({"service_protocol":1,"exact_query":true,"spatial_v1":true,"sessions":true,"cancel_v1":true,"catalog":true,"rows":true,"readonly_guarantee":"read_only_transaction","exact_affected_rows":true})
+        json!({"service_protocol":1,"exact_query":true,"spatial_v1":true,"sessions":true,"cancel_v1":true,"catalog":true,"rows":true,"explain":true,"readonly_guarantee":"read_only_transaction","exact_affected_rows":true})
     );
     assert_eq!(crate::settings::pool_max_size(), 7);
 }
@@ -226,4 +226,34 @@ fn 고정_row는_사용자_sql_추가_필드를_받지_않는다() {
 }
 fn types_input_row(input: &Value) -> Result<(), crate::handlers::spatial::SpatialError> {
     super::handlers::spatial::types::input::<service::RowInput>(input).map(|_| ())
+}
+
+#[tokio::test]
+async fn 계획_요청은_쓰기_context면_연결하기_전에_거부한다() {
+    // given
+    let input = params(json!({"sql":"SELECT 1"}), false);
+    // when
+    let actual = crate::handlers::spatial::dispatch(json!(1), &input, "service_explain").await;
+    // then
+    assert_eq!(actual["error"]["data"]["code"], "WRITE_NOT_ALLOWED");
+}
+
+#[tokio::test]
+async fn 계획_요청은_분석_같은_추가_필드를_연결하기_전에_거부한다() {
+    // given
+    let input = params(json!({"sql":"SELECT 1","analyze":true}), true);
+    // when
+    let actual = crate::handlers::spatial::dispatch(json!(2), &input, "service_explain").await;
+    // then
+    assert_eq!(actual["error"]["data"]["code"], "INVALID_ARGUMENT");
+}
+
+#[tokio::test]
+async fn 계획_요청은_트랜잭션_제어_문장을_연결하기_전에_거부한다() {
+    // given
+    let input = params(json!({"sql":"COMMIT"}), true);
+    // when
+    let actual = crate::handlers::spatial::dispatch(json!(3), &input, "service_explain").await;
+    // then
+    assert_eq!(actual["error"]["data"]["code"], "UNSUPPORTED_OPERATION");
 }

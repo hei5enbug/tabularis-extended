@@ -35,6 +35,7 @@ pub enum ServiceRpcMethod {
     Catalog,
     Row,
     InvalidateAuth,
+    Explain,
     CosmosTest,
     CosmosDatabases,
     CosmosTables,
@@ -62,6 +63,7 @@ impl ServiceRpcMethod {
             Self::Catalog => "service_catalog",
             Self::Row => "service_row",
             Self::InvalidateAuth => "service_invalidate_auth",
+            Self::Explain => "service_explain",
             Self::CosmosTest => "test_connection",
             Self::CosmosDatabases => "get_databases",
             Self::CosmosTables => "get_tables",
@@ -96,6 +98,7 @@ pub struct DriverServiceCapabilities {
     pub sessions: bool,
     pub catalog: bool,
     pub rows: bool,
+    pub explain: bool,
     pub exact_affected_rows: bool,
     pub read_only: DriverServiceReadOnly,
 }
@@ -115,6 +118,7 @@ impl DriverServiceCapabilities {
             | ServiceRpcMethod::SessionDiscard => self.sessions,
             ServiceRpcMethod::Catalog => self.catalog && !self.documents,
             ServiceRpcMethod::Row => self.rows && !self.documents,
+            ServiceRpcMethod::Explain => self.explain && !self.documents,
             ServiceRpcMethod::Test => self.exact_query && !self.documents,
             ServiceRpcMethod::CosmosTest
             | ServiceRpcMethod::CosmosDatabases

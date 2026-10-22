@@ -27,6 +27,7 @@
         "catalog.describe",
         "query.execute",
         "query.next",
+        "query.explain",
         "result.get",
         "result.release",
         "row.insert",
@@ -312,6 +313,24 @@
         },
         "input": {
           "$ref": "#/definitions/input.query.next"
+        },
+        "connection_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "connection_id"
+      ]
+    },
+    {
+      "properties": {
+        "operation": {
+          "const": "query.explain"
+        },
+        "input": {
+          "$ref": "#/definitions/input.query.explain"
         },
         "connection_id": {
           "type": "string",
@@ -1750,6 +1769,27 @@
       },
       "required": [
         "next_token"
+      ],
+      "additionalProperties": false
+    },
+    "input.query.explain": {
+      "type": "object",
+      "properties": {
+        "sql": {
+          "type": "string",
+          "minLength": 1
+        },
+        "database": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "sql"
       ],
       "additionalProperties": false
     },

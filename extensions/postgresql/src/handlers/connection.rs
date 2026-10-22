@@ -23,7 +23,7 @@ pub async fn initialize(id: Value, params: &Value) -> Value {
             id,
             serde_json::json!({
                 "service_capabilities": {"service_protocol":1,"exact_query":true,"spatial_v1":true,
-                    "sessions":true,"cancel_v1":true,"catalog":true,"rows":true,
+                    "sessions":true,"cancel_v1":true,"catalog":true,"rows":true,"explain":true,
                     "readonly_guarantee":"read_only_transaction","exact_affected_rows":true}
             }),
         ),

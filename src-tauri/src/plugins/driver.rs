@@ -275,6 +275,7 @@ fn parse_service_capabilities(value: &Value) -> ServiceResult<DriverServiceCapab
         sessions: boolean(&["sessions", "sessions_v1"])?,
         catalog: boolean(&["catalog"])? || documents,
         rows: boolean(&["rows"])?,
+        explain: boolean(&["explain"])?,
         exact_affected_rows: boolean(&["exact_affected_rows"])?,
         read_only,
     })

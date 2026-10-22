@@ -1,6 +1,6 @@
 use crate::{
     driver::service::{
-        catalog, exact, pool,
+        catalog, exact, explain, pool,
         registry::{self, Scope},
         row, sessions, supervise,
         types::{self, DriverContext},
@@ -20,13 +20,14 @@ pub const METHODS: &[&str] = &[
     "service_test",
     "service_catalog",
     "service_row",
+    "service_explain",
     "cancel_request",
 ];
 pub fn is_method(method: &str) -> bool {
     METHODS.contains(&method)
 }
 pub fn capabilities() -> Value {
-    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel_v1":true,"cancel":true,"entra_token":false,"catalog":true,"rows":true})
+    json!({"service_protocol":1,"exact_query":true,"exact_affected_rows":false,"sessions":true,"cancel_v1":true,"cancel":true,"entra_token":false,"catalog":true,"rows":true,"explain":true})
 }
 pub fn prepare(params: &Value) -> Result<Scope, ServiceError> {
     let (context, _) = DriverContext::parse(params)?;
@@ -180,6 +181,10 @@ async fn run(
         return Ok(
             json!({"session_handle":handle,"in_transaction":false,"rollback_confirmed":!commit}),
         );
+    }
+    if method == "service_explain" {
+        let input: explain::Input = types::input(params)?;
+        return explain::estimated_plan(input, context, connection, scope).await;
     }
     let mut row_operation = None;
     let prepared = match method {

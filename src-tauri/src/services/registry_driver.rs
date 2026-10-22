@@ -314,6 +314,17 @@ impl DriverBackend for RegistryDriverBackend {
                 }
                 input
             }
+            ServiceRpcMethod::Explain => {
+                let sql = request.input["sql"].as_str().unwrap_or("");
+                if !crate::services::sql_classifier::is_plannable_statement(sql) {
+                    return Err(failure(ErrorCode::InvalidArgument));
+                }
+                let mut input = json!({"sql":sql});
+                if let Some(schema) = request.input["schema"].as_str() {
+                    input["schema"] = json!(schema);
+                }
+                input
+            }
             ServiceRpcMethod::Catalog | ServiceRpcMethod::Row => {
                 let mut input = request.input.clone();
                 input["operation"] = serde_json::to_value(request.operation)
@@ -334,6 +345,8 @@ impl DriverBackend for RegistryDriverBackend {
             .await?;
         let parsed = if method == ServiceRpcMethod::ExactQuery {
             sql_output(value)
+        } else if method == ServiceRpcMethod::Explain {
+            explain_output(value)
         } else {
             native_output(value, connection, &request.input)
         };
@@ -711,6 +724,7 @@ fn operation_method(operation: Operation, documents: bool) -> Option<ServiceRpcM
             }
         }
         Operation::QueryNext if documents => ServiceRpcMethod::CosmosQueryPage,
+        Operation::QueryExplain if !documents => ServiceRpcMethod::Explain,
         Operation::CatalogDatabases if documents => ServiceRpcMethod::CosmosDatabases,
         Operation::CatalogObjects if documents => ServiceRpcMethod::CosmosTables,
         Operation::CatalogDescribe if documents => ServiceRpcMethod::CosmosColumns,
@@ -909,6 +923,16 @@ fn sql_output(value: Value) -> ServiceResult<DriverOutput> {
         output.data = json!({"affected_rows":affected});
     }
     validate_output_metadata(&output)?;
+    Ok(output)
+}
+fn explain_output(value: Value) -> ServiceResult<DriverOutput> {
+    let plan = if value.get("payload").is_some() {
+        &value
+    } else {
+        value.get("data").unwrap_or(&value)
+    };
+    let mut output = empty_output();
+    output.data = crate::service_explain_summary::plan_reply(plan)?;
     Ok(output)
 }
 fn cosmos_columns(value: Value) -> ServiceResult<Value> {

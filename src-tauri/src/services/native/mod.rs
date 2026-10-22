@@ -8,6 +8,8 @@ mod renderer;
 #[cfg(test)]
 mod mcp_tests;
 #[cfg(test)]
+mod server_tools_tests;
+#[cfg(test)]
 pub(crate) mod tests;
 
 pub use artifacts::NativeArtifacts;
@@ -248,6 +250,9 @@ impl NativeCore {
                 if !caps.documents {
                     operations.push(Operation::CatalogSchemas);
                 }
+            }
+            if caps.explain {
+                operations.push(Operation::QueryExplain);
             }
             if caps.rows {
                 operations.extend([
