@@ -62,6 +62,7 @@ jobs:
               - '.github/workflows/packages.yml'
             plugin-api:
               - 'packages/plugin-api/**'
+              - 'packages/service-contracts/**' # plugin-api imports its types
               - 'src/pluginApi.ts'
             explain:
               - 'packages/explain/**'
@@ -127,6 +128,12 @@ jobs:
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+
+      # A package that imports another workspace package reads its built
+      # output, which a clean checkout does not have. `^...` selects only the
+      # dependencies, so packages without any run nothing here.
+      - name: Build workspace dependencies
+        run: pnpm --filter '${{ matrix.package.name }}^...' build
 
       - name: Run package scripts
         shell: bash
