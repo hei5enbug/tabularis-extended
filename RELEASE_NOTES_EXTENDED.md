@@ -1,7 +1,7 @@
 # Tabularis Extended 0.27.0+extended.1
 
 Tabularis Extended is a personal fork of Tabularis 0.27.0. It runs beside the official app and gives its MCP
-server the database features of the DataGrip MCP server.
+server the database features that coding agents expect from a database IDE.
 
 ## Coexistence with the official app
 

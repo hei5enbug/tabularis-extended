@@ -154,7 +154,7 @@ The audit compared the PostgreSQL driver against:
 - The MySQL driver (`src-tauri/src/drivers/mysql/mod.rs`) for feature parity baseline
 - PostgreSQL's own catalog (`pg_catalog`) and `information_schema` capabilities
 - Open GitHub issues tagged with PostgreSQL-related keywords
-- Professional database tool standards (pgAdmin, DBeaver, DataGrip)
+- Professional database tool standards (pgAdmin, DBeaver)
 
 **Source files reviewed:**
 

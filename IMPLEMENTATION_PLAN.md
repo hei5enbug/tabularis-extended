@@ -5,7 +5,7 @@ The coordinator owns this plan and every cross-component contract in this reposi
 
 ## Intent and scope
 
-Make Tabularis Extended's MCP server cover the database work that the DataGrip MCP server offers, while keeping
+Make Tabularis Extended's MCP server cover the database work that a database IDE's MCP server offers, while keeping
 the existing connections, authentication, and plugins working. All components live in this repository.
 
 | Item | Decision |
@@ -18,13 +18,13 @@ the existing connections, authentication, and plugins working. All components li
 | Current installed host | `0.26.0+local.1`, based on `5d7e27408907c0faafc8cc6b940725f4a1258f42` |
 | Driver companion plan | [SQL Server Plus plan](extensions/sqlserver-plus/IMPLEMENTATION_PLAN.md) |
 
-### DataGrip coverage target
+### Coverage target
 
-The DataGrip MCP server was connected on 2026-10-21 and listed these database tools.
+A reference database IDE's MCP server was connected on 2026-10-21 and listed these database tools.
 IDE tools such as file search, refactoring, run configurations, and builds are outside this plan.
 The new tools target PostgreSQL and SQL Server Plus connections. Cosmos uses its document tools.
 
-| DataGrip tool | Tabularis Extended tool after this plan |
+| Reference tool | Tabularis Extended tool after this plan |
 |---|---|
 | `list_database_connections` | `list_connections` (existing) |
 | `test_database_connection` | `connection_test` |
@@ -55,7 +55,7 @@ The new tools target PostgreSQL and SQL Server Plus connections. Cosmos uses its
 
 ### Non-goals
 
-- DataGrip IDE features: file editing, code search, refactoring, builds, and run configurations.
+- IDE features: file editing, code search, refactoring, builds, and run configurations.
 - Deleting connections or importing credentials through MCP, or delivering any secret through MCP arguments.
 - Service tools for MySQL and SQLite connections; they keep the five existing tools.
 - Service-principal or host-managed authentication for SQL Server, automatic privileged access, or new database
