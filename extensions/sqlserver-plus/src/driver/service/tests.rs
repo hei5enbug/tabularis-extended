@@ -339,6 +339,14 @@ fn plan_connection() -> ConnectionParams {
         ..Default::default()
     }
 }
+fn gated<F: std::future::Future>(future: F) -> F::Output {
+    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+}
 async fn plan_error(
     sql: &str,
     context: &DriverContext,
@@ -385,40 +393,43 @@ fn service_capabilities는_계획_기능과_메서드를_광고한다() {
     // then
     assert_eq!(actual, (json!(true), true));
 }
-#[tokio::test]
-async fn 계획_요청은_세션_제어_문장과_쓰기_context와_세션을_연결_전에_거부한다() {
-    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
-    // given
-    let connection = plan_connection();
-    let read = plan_context(true, None);
+#[test]
+fn 계획_요청은_세션_제어_문장과_쓰기_context와_세션을_연결_전에_거부한다() {
+    gated(async {
+        // given
+        let connection = plan_connection();
+        let read = plan_context(true, None);
 
-    // when
-    let control = plan_error("SET NOCOUNT ON", &read, &connection).await;
-    let transaction = plan_error("BEGIN TRANSACTION", &read, &connection).await;
-    let empty = plan_error("  ", &read, &connection).await;
-    let write = plan_error("SELECT 1", &plan_context(false, None), &connection).await;
-    let session = plan_error("SELECT 1", &plan_context(true, Some("handle")), &connection).await;
+        // when
+        let control = plan_error("SET NOCOUNT ON", &read, &connection).await;
+        let transaction = plan_error("BEGIN TRANSACTION", &read, &connection).await;
+        let empty = plan_error("  ", &read, &connection).await;
+        let write = plan_error("SELECT 1", &plan_context(false, None), &connection).await;
+        let session =
+            plan_error("SELECT 1", &plan_context(true, Some("handle")), &connection).await;
 
-    // then
-    assert_eq!(control, "UNSUPPORTED_OPERATION");
-    assert_eq!(transaction, "UNSUPPORTED_OPERATION");
-    assert_eq!(empty, "INVALID_ARGUMENT");
-    assert_eq!(write, "WRITE_NOT_ALLOWED");
-    assert_eq!(session, "INVALID_ARGUMENT");
+        // then
+        assert_eq!(control, "UNSUPPORTED_OPERATION");
+        assert_eq!(transaction, "UNSUPPORTED_OPERATION");
+        assert_eq!(empty, "INVALID_ARGUMENT");
+        assert_eq!(write, "WRITE_NOT_ALLOWED");
+        assert_eq!(session, "INVALID_ARGUMENT");
+    });
 }
-#[tokio::test]
-async fn 계획_요청은_일시_인증이_없으면_연결을_시도하기_전에_거부한다() {
-    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
-    // given
-    let connection = plan_connection();
-    let mut context = plan_context(true, None);
-    context.auth = None;
+#[test]
+fn 계획_요청은_일시_인증이_없으면_연결을_시도하기_전에_거부한다() {
+    gated(async {
+        // given
+        let connection = plan_connection();
+        let mut context = plan_context(true, None);
+        context.auth = None;
 
-    // when
-    let actual = plan_error("SELECT 1", &context, &connection).await;
+        // when
+        let actual = plan_error("SELECT 1", &context, &connection).await;
 
-    // then
-    assert_eq!(actual, "AUTH_REQUIRED");
+        // then
+        assert_eq!(actual, "AUTH_REQUIRED");
+    });
 }
 
 struct PlanDouble {
@@ -460,114 +471,120 @@ fn plan_double(reply: Vec<String>, hang_on_statement: bool) -> (PlanDouble, Plan
         (log, detached),
     )
 }
-#[tokio::test]
-async fn 계획은_켜기_문장_끄기를_각각_별도_배치로_보내고_연결을_분리한다() {
-    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
-    // given
-    let context = plan_context(true, None);
-    let scope = registry::Scope::reserve(&context).unwrap();
-    let (connection, (log, detached)) = plan_double(vec!["<ShowPlanXML/>".into()], false);
-
-    // when
-    let actual = explain::run_plan(connection, "SELECT * FROM orders", &scope)
-        .await
-        .unwrap();
-
-    // then
-    assert_eq!(
-        *log.lock().unwrap(),
-        [
-            "SET SHOWPLAN_XML ON",
-            "SELECT * FROM orders",
-            "SET SHOWPLAN_XML OFF"
-        ]
-    );
-    assert_eq!(
-        actual,
-        json!({"engine":"sqlserver","format":"sqlserver-showplan-xml","payload":"<ShowPlanXML/>"})
-    );
-    assert_eq!(detached.load(std::sync::atomic::Ordering::SeqCst), 1);
-}
-#[tokio::test]
-async fn 계획은_통계_xml이나_분석을_쓰지_않는다() {
-    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
-    // given
-    let context = plan_context(true, None);
-    let scope = registry::Scope::reserve(&context).unwrap();
-    let (connection, (log, _)) = plan_double(vec!["<ShowPlanXML/>".into()], false);
-
-    // when
-    explain::run_plan(connection, "SELECT 1", &scope)
-        .await
-        .unwrap();
-
-    // then
-    let sent = log.lock().unwrap().join("\n").to_ascii_uppercase();
-    assert!(!sent.contains("STATISTICS") && !sent.contains("ANALYZE"));
-    assert!(!explain::SHOWPLAN_ON
-        .to_ascii_uppercase()
-        .contains("STATISTICS"));
-}
-#[tokio::test]
-async fn 계획_문서가_없거나_둘이면_계획_실패로_답하고_연결을_분리한다() {
-    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
-    // given
-    let cases = [
-        vec![],
-        vec!["<ShowPlanXML/>".to_owned(), "<ShowPlanXML/>".to_owned()],
-    ];
-
-    // when
-    let mut actual = Vec::new();
-    for reply in cases {
+#[test]
+fn 계획은_켜기_문장_끄기를_각각_별도_배치로_보내고_연결을_분리한다() {
+    gated(async {
+        // given
         let context = plan_context(true, None);
         let scope = registry::Scope::reserve(&context).unwrap();
-        let (connection, (_, detached)) = plan_double(reply, false);
-        let error = explain::run_plan(connection, "SELECT 1", &scope)
+        let (connection, (log, detached)) = plan_double(vec!["<ShowPlanXML/>".into()], false);
+
+        // when
+        let actual = explain::run_plan(connection, "SELECT * FROM orders", &scope)
             .await
-            .unwrap_err();
-        actual.push((
-            error.code,
-            detached.load(std::sync::atomic::Ordering::SeqCst),
-        ));
-    }
+            .unwrap();
 
-    // then
-    assert_eq!(actual, [("DRIVER_EXITED", 1), ("DRIVER_EXITED", 1)]);
-}
-#[tokio::test]
-async fn 취소되면_끄기_배치를_보내지_않고_연결을_분리한다() {
-    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
-    // given
-    let context = plan_context(true, None);
-    let scope = registry::Scope::reserve(&context).unwrap();
-    let (connection, (log, detached)) = plan_double(Vec::new(), true);
-    let (connection_id, request_id) = (context.connection_id.clone(), context.request_id.clone());
-
-    // when
-    let (actual, _) = tokio::join!(explain::run_plan(connection, "SELECT 1", &scope), async {
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        registry::cancel(&connection_id, &request_id);
+        // then
+        assert_eq!(
+            *log.lock().unwrap(),
+            [
+                "SET SHOWPLAN_XML ON",
+                "SELECT * FROM orders",
+                "SET SHOWPLAN_XML OFF"
+            ]
+        );
+        assert_eq!(
+            actual,
+            json!({"engine":"sqlserver","format":"sqlserver-showplan-xml","payload":"<ShowPlanXML/>"})
+        );
+        assert_eq!(detached.load(std::sync::atomic::Ordering::SeqCst), 1);
     });
-
-    // then
-    assert_eq!(actual.unwrap_err().code, "CANCELLED");
-    assert_eq!(*log.lock().unwrap(), ["SET SHOWPLAN_XML ON", "SELECT 1"]);
-    assert_eq!(detached.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
-#[tokio::test]
-async fn 기한이_지나면_연결을_분리하고_기한초과로_답한다() {
-    let _gate = registry::SHUTDOWN_GATE.read().unwrap();
-    // given
-    let mut context = plan_context(true, None);
-    context.deadline_ms = 30;
-    let scope = registry::Scope::reserve(&context).unwrap();
-    let (connection, (_, detached)) = plan_double(Vec::new(), true);
+#[test]
+fn 계획은_통계_xml이나_분석을_쓰지_않는다() {
+    gated(async {
+        // given
+        let context = plan_context(true, None);
+        let scope = registry::Scope::reserve(&context).unwrap();
+        let (connection, (log, _)) = plan_double(vec!["<ShowPlanXML/>".into()], false);
 
-    // when
-    let actual = explain::run_plan(connection, "SELECT 1", &scope).await;
+        // when
+        explain::run_plan(connection, "SELECT 1", &scope)
+            .await
+            .unwrap();
 
-    // then
-    assert_eq!(actual.unwrap_err().code, "DEADLINE_EXCEEDED");
-    assert_eq!(detached.load(std::sync::atomic::Ordering::SeqCst), 1);
+        // then
+        let sent = log.lock().unwrap().join("\n").to_ascii_uppercase();
+        assert!(!sent.contains("STATISTICS") && !sent.contains("ANALYZE"));
+        assert!(!explain::SHOWPLAN_ON
+            .to_ascii_uppercase()
+            .contains("STATISTICS"));
+    });
+}
+#[test]
+fn 계획_문서가_없거나_둘이면_계획_실패로_답하고_연결을_분리한다() {
+    gated(async {
+        // given
+        let cases = [
+            vec![],
+            vec!["<ShowPlanXML/>".to_owned(), "<ShowPlanXML/>".to_owned()],
+        ];
+
+        // when
+        let mut actual = Vec::new();
+        for reply in cases {
+            let context = plan_context(true, None);
+            let scope = registry::Scope::reserve(&context).unwrap();
+            let (connection, (_, detached)) = plan_double(reply, false);
+            let error = explain::run_plan(connection, "SELECT 1", &scope)
+                .await
+                .unwrap_err();
+            actual.push((
+                error.code,
+                detached.load(std::sync::atomic::Ordering::SeqCst),
+            ));
+        }
+
+        // then
+        assert_eq!(actual, [("DRIVER_EXITED", 1), ("DRIVER_EXITED", 1)]);
+    });
+}
+#[test]
+fn 취소되면_끄기_배치를_보내지_않고_연결을_분리한다() {
+    gated(async {
+        // given
+        let context = plan_context(true, None);
+        let scope = registry::Scope::reserve(&context).unwrap();
+        let (connection, (log, detached)) = plan_double(Vec::new(), true);
+        let (connection_id, request_id) =
+            (context.connection_id.clone(), context.request_id.clone());
+
+        // when
+        let (actual, _) = tokio::join!(explain::run_plan(connection, "SELECT 1", &scope), async {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            registry::cancel(&connection_id, &request_id);
+        });
+
+        // then
+        assert_eq!(actual.unwrap_err().code, "CANCELLED");
+        assert_eq!(*log.lock().unwrap(), ["SET SHOWPLAN_XML ON", "SELECT 1"]);
+        assert_eq!(detached.load(std::sync::atomic::Ordering::SeqCst), 1);
+    });
+}
+#[test]
+fn 기한이_지나면_연결을_분리하고_기한초과로_답한다() {
+    gated(async {
+        // given
+        let mut context = plan_context(true, None);
+        context.deadline_ms = 30;
+        let scope = registry::Scope::reserve(&context).unwrap();
+        let (connection, (_, detached)) = plan_double(Vec::new(), true);
+
+        // when
+        let actual = explain::run_plan(connection, "SELECT 1", &scope).await;
+
+        // then
+        assert_eq!(actual.unwrap_err().code, "DEADLINE_EXCEEDED");
+        assert_eq!(detached.load(std::sync::atomic::Ordering::SeqCst), 1);
+    });
 }

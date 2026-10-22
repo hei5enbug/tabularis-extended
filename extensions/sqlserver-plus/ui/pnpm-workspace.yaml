@@ -1,0 +1,3 @@
+# Makes ui a standalone pnpm root so it installs from its own pnpm-lock.yaml
+# instead of the repository-root workspace.
+packages: []

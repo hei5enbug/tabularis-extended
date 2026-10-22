@@ -133,13 +133,25 @@ jobs:
           # pnpm 11.23 requires Node 22.13 or newer.
           node-version: "22.13"
 
+      # ui links @tabularis/plugin-api from the repository's packages/, which
+      # imports the types of @tabularis/service-contracts, so both need their
+      # workspace dependencies installed and the contracts built first. pnpm
+      # switches to the version each package.json pins as "packageManager".
+      - name: Prepare linked workspace packages for the UI
+        if: steps.ui.outputs.present == 'true'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          pnpm install --frozen-lockfile --filter '@tabularis/plugin-api...'
+          pnpm --filter @tabularis/service-contracts build
+
       - name: Build UI
         if: steps.ui.outputs.present == 'true'
         shell: bash
         working-directory: extensions/sqlserver-plus/ui
         run: |
-          npm ci --no-audit --no-fund
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Build EXPLAIN parser
         if: steps.explain.outputs.present == 'true'

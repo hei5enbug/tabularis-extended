@@ -5,11 +5,15 @@ on:
     branches: [main]
     paths:
       - "extensions/sqlserver-plus/**"
+      - "packages/plugin-api/**" # the ui job type-checks against these
+      - "packages/service-contracts/**"
       - ".github/workflows/ext-sqlserver-plus-ci.yml"
   pull_request:
     branches: [main]
     paths:
       - "extensions/sqlserver-plus/**"
+      - "packages/plugin-api/**" # the ui job type-checks against these
+      - "packages/service-contracts/**"
       - ".github/workflows/ext-sqlserver-plus-ci.yml"
     # Default types miss title-only edits. Label changes must also re-run the
     # version suggestion because the prerelease channel comes from a label.
@@ -91,26 +95,42 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # The ui package ships pnpm-lock.yaml only, so it installs with the pnpm
+      # version pinned by "packageManager" in ui/package.json.
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: extensions/sqlserver-plus/ui/package.json
+
       - name: Setup Node
         uses: actions/setup-node@v7
         with:
           node-version: "22.13"
 
+      # ui resolves @tabularis/plugin-api from the repository's own packages/
+      # (link:), which imports the types of @tabularis/service-contracts. Both
+      # need their workspace dependencies installed and the contracts built.
+      - name: Install and build linked workspace packages
+        working-directory: ${{ github.workspace }}
+        run: |
+          pnpm install --frozen-lockfile --filter '@tabularis/plugin-api...'
+          pnpm --filter @tabularis/service-contracts build
+
       - name: Install dependencies
         working-directory: extensions/sqlserver-plus/ui
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Typecheck
         working-directory: extensions/sqlserver-plus/ui
-        run: npm run typecheck
+        run: pnpm typecheck
 
       - name: Run tests
         working-directory: extensions/sqlserver-plus/ui
-        run: npm test
+        run: pnpm test
 
       - name: Build
         working-directory: extensions/sqlserver-plus/ui
-        run: npm run build
+        run: pnpm build
 
   validate-manifest:
     name: sqlserver-plus / Validate .tabularium manifest
@@ -119,10 +139,16 @@ jobs:
       - uses: actions/checkout@v7
 
       # registry.tabularis.dev serves the driver-kind schema including the
-      # additive explain_parsers field from core PR #688, so the whole
-      # manifest is validated against the live validator.
+      # additive explain_parsers field from core PR #688. The fork-only
+      # top-level service_protocol field is unknown to that public schema
+      # (additionalProperties is false), so the validator runs on a copy of the
+      # manifest with that one key removed. .tabularium itself is unchanged.
       - name: Validate manifest against the live registry schema
         run: |
+          copy_dir="$RUNNER_TEMP/tabularium-validate"
+          mkdir -p "$copy_dir"
+          jq 'del(.service_protocol)' .tabularium > "$copy_dir/.tabularium"
+          cd "$copy_dir"
           npx --yes @tabularium/cli validate .tabularium \
             --registry https://registry.tabularis.dev --kind driver
 

@@ -1537,25 +1537,57 @@ fn request_burst_is_bounded_and_slow_query_does_not_block_ping() {
         .map(|_| plugin.send("ping", json!({ "params": params })))
         .collect();
 
-    let first = plugin.read_response();
-    let first_id = first["id"].as_u64().expect("response id");
-    assert!(ping_ids.contains(&first_id), "a ping must finish first");
+    // The driver admits at most 64 pending legacy requests and answers any
+    // further request at once with RESOURCE_LIMIT instead of blocking its
+    // reader. The first 64 requests (the slow query and 63 pings) are
+    // therefore always admitted; later pings are admitted or rejected
+    // depending on how fast earlier ones finish.
+    const GUARANTEED_ADMITTED_PINGS: usize = 63;
+    let mut responses = Vec::new();
+    let mut first_success_id = None;
+    for _ in 0..=200 {
+        let response = plugin.read_response();
+        if first_success_id.is_none() && response.get("error").is_none() {
+            first_success_id = Some(response["id"].as_u64().expect("response id"));
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "the slow query blocked all JSON-RPC workers"
+            );
+        }
+        responses.push(response);
+    }
+    let first_success_id = first_success_id.expect("at least one response succeeded");
     assert!(
-        started.elapsed() < std::time::Duration::from_secs(2),
-        "the slow query blocked all JSON-RPC workers"
+        ping_ids.contains(&first_success_id),
+        "a ping must finish first"
     );
 
-    let mut seen = BTreeSet::from([first_id]);
-    for _ in 0..200 {
-        let response = plugin.read_response();
-        assert!(
-            response.get("error").is_none(),
-            "burst response: {response}"
-        );
-        seen.insert(response["id"].as_u64().expect("response id"));
+    let mut seen = BTreeSet::new();
+    let mut admitted_pings = 0;
+    for response in &responses {
+        let id = response["id"].as_u64().expect("response id");
+        assert!(seen.insert(id), "duplicate response: {response}");
+        if id == slow_id {
+            assert!(response.get("error").is_none(), "slow query: {response}");
+        } else if let Some(error) = response.get("error") {
+            assert_eq!(
+                error["data"]["code"], "RESOURCE_LIMIT",
+                "burst response: {response}"
+            );
+            assert_eq!(
+                error["data"]["outcome"], "not_applied",
+                "burst response: {response}"
+            );
+        } else {
+            admitted_pings += 1;
+        }
     }
     assert!(seen.contains(&slow_id));
     assert!(ping_ids.iter().all(|id| seen.contains(id)));
+    assert!(
+        admitted_pings >= GUARANTEED_ADMITTED_PINGS,
+        "only {admitted_pings} pings were admitted"
+    );
 }
 
 #[test]
