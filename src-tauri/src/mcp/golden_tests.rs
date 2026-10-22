@@ -16,7 +16,9 @@ struct Fixture {
 }
 impl Fixture {
     async fn new() -> Self {
-        let directory = std::path::PathBuf::from("/private/tmp")
+        let directory = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
             .join(format!("g-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&directory).unwrap();
         let database = directory

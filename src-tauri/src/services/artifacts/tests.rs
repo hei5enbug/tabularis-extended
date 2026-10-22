@@ -9,7 +9,7 @@ struct Temporary(PathBuf);
 impl Temporary {
     fn new() -> Self {
         #[cfg(unix)]
-        let parent = PathBuf::from("/private/tmp");
+        let parent = std::env::temp_dir().canonicalize().unwrap();
         #[cfg(not(unix))]
         let parent = std::env::temp_dir();
         let root = parent.join(format!("tabularis-h3c1-{}", uuid::Uuid::new_v4()));
