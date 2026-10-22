@@ -146,7 +146,8 @@ preflight:
     Write-Host "preflight ok: $($m.id) $($m.version), runtime >= $($m.min_runtime_version), executable $($m.executable)"
 
 # The archive root holds exactly what the host loads: the executable,
-# .tabularium, assets, ui/dist/index.js and explain/dist/index.iife.js.
+# .tabularium, assets, ui/dist/index.js and explain/dist/index.iife.js, plus the LICENSE that Apache-2.0
+# requires with every binary copy.
 #
 # Build the release package for this host into OUT and write its SHA-256 file.
 [unix]
@@ -161,6 +162,7 @@ package out="dist": release preflight
     trap 'rm -rf "$stage"' EXIT
     cp "target/release/{{ binary }}" "$stage/"
     cp .tabularium "$stage/"
+    cp LICENSE "$stage/"
     if [ -d assets ]; then cp -R assets "$stage/assets"; fi
     for bundle in ui/dist/index.js explain/dist/index.iife.js; do
         [ -f "$bundle" ] || { echo "missing $bundle" >&2; exit 1; }
@@ -186,6 +188,7 @@ package out="dist": release preflight
     try { \
         Copy-Item "target\release\{{ binary }}.exe" $stage; \
         Copy-Item ".tabularium" $stage; \
+        Copy-Item "LICENSE" $stage; \
         if (Test-Path "assets") { Copy-Item -Recurse "assets" (Join-Path $stage "assets") }; \
         foreach ($bundle in "ui\dist\index.js", "explain\dist\index.iife.js") { \
             if (-not (Test-Path $bundle -PathType Leaf)) { throw "missing $bundle" }; \

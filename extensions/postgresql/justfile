@@ -88,7 +88,8 @@ preflight:
     if ($m.id -ne '{{ plugin_id }}' -or $m.name -ne 'PostgreSQL Plus' -or $m.version -ne $cargo -or $m.executable -ne '{{ binary }}') { throw '.tabularium identity check failed' }; \
     Write-Host "preflight ok: $($m.id) $($m.version), runtime >= $($m.min_runtime_version), executable $($m.executable)"
 
-# The archive root holds exactly what the host loads: the executable and .tabularium.
+# The archive root holds what the host loads, the executable and .tabularium, and the LICENSE that
+# Apache-2.0 requires with every binary copy.
 #
 # Build the release package for this host into OUT and write its SHA-256 file.
 [unix]
@@ -103,6 +104,7 @@ package out="dist": release preflight
     trap 'rm -rf "$stage"' EXIT
     cp "target/release/{{ binary }}" "$stage/"
     cp .tabularium "$stage/"
+    cp LICENSE "$stage/"
     rel=$(jq -r .executable "$stage/.tabularium")
     case "$rel" in /*|*..*) echo "unsafe manifest path: $rel" >&2; exit 1 ;; esac
     if [ ! -f "$stage/$rel" ] || [ -L "$stage/$rel" ]; then echo "package lacks regular file $rel" >&2; exit 1; fi
@@ -121,6 +123,7 @@ package out="dist": release preflight
     try { \
         Copy-Item "target\release\{{ binary }}.exe" $stage; \
         Copy-Item ".tabularium" $stage; \
+        Copy-Item "LICENSE" $stage; \
         $archive = Join-Path $out "{{ plugin_id }}-win-x64.zip"; \
         if (Test-Path $archive) { Remove-Item -Force $archive }; \
         Compress-Archive -Path "$stage\*" -DestinationPath $archive; \

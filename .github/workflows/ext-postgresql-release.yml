@@ -88,6 +88,7 @@ jobs:
           mkdir -p "$STAGE"
           cp target/${{ matrix.target }}/release/postgresql-plugin${{ matrix.binary-suffix }} "$STAGE/"
           cp .tabularium "$STAGE/"
+          cp LICENSE "$STAGE/"
           (cd "$STAGE" && zip -r ../postgresql-plugin-${{ matrix.platform-label }}.zip .)
 
       - name: Package (windows)
@@ -98,6 +99,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item "target\${{ matrix.target }}\release\postgresql-plugin${{ matrix.binary-suffix }}" $stage
           Copy-Item ".tabularium" $stage
+          Copy-Item "LICENSE" $stage
           Compress-Archive -Path "$stage\*" -DestinationPath "postgresql-plugin-${{ matrix.platform-label }}.zip"
 
       # linux-arm64 is cross-compiled via `cross` on an x86_64 runner — that
