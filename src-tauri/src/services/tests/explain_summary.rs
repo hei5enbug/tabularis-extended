@@ -206,6 +206,23 @@ fn 읽을_수_없는_계획은_읽은_만큼만_요약하고_원문을_그대로
 }
 
 #[test]
+fn 세미콜론_없이_이어진_두_문장의_showplan은_잘못된_인자로_거부한다() {
+    // given
+    let two = SHOWPLAN.replace(
+        "</StmtSimple>\n </Statements>",
+        "</StmtSimple>\n  <StmtSimple StatementText=\"SELECT 2\" StatementSubTreeCost=\"0.1\"/>\n </Statements>",
+    );
+    assert_ne!(two, SHOWPLAN);
+    let raw = json!({"engine":"sqlserver","format":"sqlserver-showplan-xml","payload":two});
+
+    // when
+    let actual = plan_reply(&raw).err().map(|error| error.code);
+
+    // then
+    assert_eq!(actual, Some(ErrorCode::InvalidArgument));
+}
+
+#[test]
 fn 알_수_없는_형식이나_엔진_누락은_잘못된_인자로_거부한다() {
     // given
     let cases = [

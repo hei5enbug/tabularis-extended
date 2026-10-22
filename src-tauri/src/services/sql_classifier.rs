@@ -11,10 +11,12 @@ const QUOTING_VARIANTS: [StripOptions; 4] = [
     },
     StripOptions {
         brackets: true,
+        nested_comments: true,
         ..StripOptions::STANDARD
     },
     StripOptions {
         dollar_quotes: true,
+        nested_comments: true,
         ..StripOptions::STANDARD
     },
 ];
@@ -84,33 +86,79 @@ pub fn classify_query_kind(sql: &str) -> &'static str {
         }
     }
     match agreed {
+        // MySQL runs the text of `/*! … */` and `/*M! … */` comments, which
+        // every variant blanks, so a read cannot be proven around them.
+        Some(_) if has_executable_comment(sql) => "unknown",
         Some("select") if calls_side_effect_function(sql, &VARIANTS) => "write",
         Some(kind) => kind,
         None => "unknown",
     }
 }
 
+fn has_executable_comment(sql: &str) -> bool {
+    let upper = sql.to_ascii_uppercase();
+    upper.contains("/*!") || upper.contains("/*M!")
+}
+
 /// Functions that change server, session or sequence state even when called
 /// from a `SELECT`: backend signals, settings, sequences, advisory locks, large
 /// objects, files, replication, notifications and remote SQL.
 const SIDE_EFFECT_FUNCTIONS: &[&str] = &[
-    "PG_CANCEL_BACKEND", "PG_TERMINATE_BACKEND", "PG_RELOAD_CONF", "PG_ROTATE_LOGFILE",
-    "PG_SWITCH_WAL", "PG_SWITCH_XLOG", "PG_CREATE_RESTORE_POINT", "PG_PROMOTE",
-    "PG_WAL_REPLAY_PAUSE", "PG_WAL_REPLAY_RESUME", "PG_BACKUP_START", "PG_BACKUP_STOP",
-    "PG_START_BACKUP", "PG_STOP_BACKUP", "PG_LOG_BACKEND_MEMORY_CONTEXTS", "PG_NOTIFY",
-    "PG_LOGICAL_EMIT_MESSAGE", "PG_IMPORT_SYSTEM_COLLATIONS", "PG_FILE_WRITE", "PG_FILE_RENAME",
-    "PG_FILE_UNLINK", "PG_FILE_SYNC", "PG_CREATE_PHYSICAL_REPLICATION_SLOT",
-    "PG_CREATE_LOGICAL_REPLICATION_SLOT", "PG_DROP_REPLICATION_SLOT",
-    "PG_COPY_PHYSICAL_REPLICATION_SLOT", "PG_COPY_LOGICAL_REPLICATION_SLOT",
-    "PG_REPLICATION_SLOT_ADVANCE", "PG_LOGICAL_SLOT_GET_CHANGES",
-    "PG_LOGICAL_SLOT_GET_BINARY_CHANGES", "SET_CONFIG", "NEXTVAL", "SETVAL", "LO_IMPORT",
-    "LO_EXPORT", "LO_UNLINK", "LO_CREATE", "LO_CREAT", "LO_FROM_BYTEA", "LO_PUT", "LO_TRUNCATE",
-    "LO_TRUNCATE64", "LOWRITE", "GET_LOCK", "RELEASE_LOCK", "RELEASE_ALL_LOCKS",
+    "PG_CANCEL_BACKEND",
+    "PG_TERMINATE_BACKEND",
+    "PG_RELOAD_CONF",
+    "PG_ROTATE_LOGFILE",
+    "PG_SWITCH_WAL",
+    "PG_SWITCH_XLOG",
+    "PG_CREATE_RESTORE_POINT",
+    "PG_PROMOTE",
+    "PG_WAL_REPLAY_PAUSE",
+    "PG_WAL_REPLAY_RESUME",
+    "PG_BACKUP_START",
+    "PG_BACKUP_STOP",
+    "PG_START_BACKUP",
+    "PG_STOP_BACKUP",
+    "PG_LOG_BACKEND_MEMORY_CONTEXTS",
+    "PG_NOTIFY",
+    "PG_LOGICAL_EMIT_MESSAGE",
+    "PG_IMPORT_SYSTEM_COLLATIONS",
+    "PG_FILE_WRITE",
+    "PG_FILE_RENAME",
+    "PG_FILE_UNLINK",
+    "PG_FILE_SYNC",
+    "PG_CREATE_PHYSICAL_REPLICATION_SLOT",
+    "PG_CREATE_LOGICAL_REPLICATION_SLOT",
+    "PG_DROP_REPLICATION_SLOT",
+    "PG_COPY_PHYSICAL_REPLICATION_SLOT",
+    "PG_COPY_LOGICAL_REPLICATION_SLOT",
+    "PG_REPLICATION_SLOT_ADVANCE",
+    "PG_LOGICAL_SLOT_GET_CHANGES",
+    "PG_LOGICAL_SLOT_GET_BINARY_CHANGES",
+    "SET_CONFIG",
+    "NEXTVAL",
+    "SETVAL",
+    "LO_IMPORT",
+    "LO_EXPORT",
+    "LO_UNLINK",
+    "LO_CREATE",
+    "LO_CREAT",
+    "LO_FROM_BYTEA",
+    "LO_PUT",
+    "LO_TRUNCATE",
+    "LO_TRUNCATE64",
+    "LOWRITE",
+    "GET_LOCK",
+    "RELEASE_LOCK",
+    "RELEASE_ALL_LOCKS",
 ];
 
 const SIDE_EFFECT_FUNCTION_PREFIXES: &[&str] = &[
-    "PG_ADVISORY_", "PG_TRY_ADVISORY_", "PG_STAT_RESET", "PG_STAT_STATEMENTS_RESET",
-    "PG_REPLICATION_ORIGIN_", "DBLINK",
+    "PG_ADVISORY_",
+    "PG_TRY_ADVISORY_",
+    "PG_STAT_RESET",
+    "PG_STAT_STATEMENTS_RESET",
+    "PG_REPLICATION_ORIGIN_",
+    "DBLINK",
 ];
 
 /// True when `sql` calls a function from [`SIDE_EFFECT_FUNCTIONS`], also as a
@@ -320,11 +368,52 @@ pub(crate) fn has_trailing_statements(stripped: &str) -> bool {
 /// (`SELECT 1 DELETE FROM t`), so a read is only proven when none of these
 /// appear after the leading keyword.
 const STATEMENT_STARTERS: &[&str] = &[
-    "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "REPLACE", "TRUNCATE", "CREATE", "ALTER",
-    "DROP", "RENAME", "GRANT", "REVOKE", "DENY", "EXEC", "EXECUTE", "CALL", "DECLARE", "SET",
-    "BEGIN", "COMMIT", "ROLLBACK", "SAVE", "USE", "BACKUP", "RESTORE", "DBCC", "KILL", "SHUTDOWN",
-    "RECONFIGURE", "BULK", "OPENROWSET", "OPENDATASOURCE", "OPENQUERY", "WAITFOR", "GO", "COPY",
-    "VACUUM", "LOCK", "LOAD", "ATTACH", "DETACH", "PRAGMA", "HANDLER", "IMPORT", "INTO",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "MERGE",
+    "UPSERT",
+    "REPLACE",
+    "TRUNCATE",
+    "CREATE",
+    "ALTER",
+    "DROP",
+    "RENAME",
+    "GRANT",
+    "REVOKE",
+    "DENY",
+    "EXEC",
+    "EXECUTE",
+    "CALL",
+    "DECLARE",
+    "SET",
+    "BEGIN",
+    "COMMIT",
+    "ROLLBACK",
+    "SAVE",
+    "USE",
+    "BACKUP",
+    "RESTORE",
+    "DBCC",
+    "KILL",
+    "SHUTDOWN",
+    "RECONFIGURE",
+    "BULK",
+    "OPENROWSET",
+    "OPENDATASOURCE",
+    "OPENQUERY",
+    "WAITFOR",
+    "GO",
+    "COPY",
+    "VACUUM",
+    "LOCK",
+    "LOAD",
+    "ATTACH",
+    "DETACH",
+    "PRAGMA",
+    "HANDLER",
+    "IMPORT",
+    "INTO",
 ];
 
 /// String functions that share a name with a statement keyword.
@@ -535,6 +624,8 @@ struct StripOptions {
     /// Keep the letters, digits and `_` of quoted identifiers instead of
     /// blanking them, so a quoted function name stays visible.
     keep_identifiers: bool,
+    /// `/* /* … */ */` nests, as in PostgreSQL and SQL Server.
+    nested_comments: bool,
 }
 impl StripOptions {
     const STANDARD: Self = Self {
@@ -542,6 +633,7 @@ impl StripOptions {
         brackets: false,
         dollar_quotes: false,
         keep_identifiers: false,
+        nested_comments: false,
     };
 }
 
@@ -637,21 +729,23 @@ fn strip_with(sql: &str, options: StripOptions) -> String {
             }
             continue;
         }
-        // Block comment (non-nesting; sufficient for classification)
-        if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-            out.push(b' ');
-            out.push(b' ');
-            i += 2;
-            while i + 1 < bytes.len() && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
-                out.push(b' ');
-                i += 1;
-            }
-            if i + 1 < bytes.len() {
-                out.push(b' ');
-                out.push(b' ');
-                i += 2;
-            } else {
-                while i < bytes.len() {
+        // Block comment; it nests only under `nested_comments`.
+        if c == b'/' && bytes.get(i + 1) == Some(&b'*') {
+            let mut depth = 0usize;
+            while i < bytes.len() {
+                let opens = bytes[i] == b'/' && bytes.get(i + 1) == Some(&b'*');
+                if opens && (depth == 0 || options.nested_comments) {
+                    depth += 1;
+                    out.extend_from_slice(b"  ");
+                    i += 2;
+                } else if bytes[i] == b'*' && bytes.get(i + 1) == Some(&b'/') {
+                    depth -= 1;
+                    out.extend_from_slice(b"  ");
+                    i += 2;
+                    if depth == 0 {
+                        break;
+                    }
+                } else {
                     out.push(b' ');
                     i += 1;
                 }

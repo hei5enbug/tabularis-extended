@@ -157,7 +157,11 @@ pub fn plan_reply(raw: &Value) -> ServiceResult<Value> {
         }
         SQLSERVER_FORMAT => {
             if let Value::String(xml) = payload {
-                showplan(xml, &mut summary);
+                // T-SQL needs no `;` between statements, so a batch that planned
+                // more than one statement was not the single statement asked for.
+                if showplan(xml, &mut summary) > 1 {
+                    return Err(failure(ErrorCode::InvalidArgument));
+                }
             }
             ("sqlserver_estimated_subtree_cost", payload.clone())
         }
@@ -282,13 +286,25 @@ fn nested_too_deep(xml: &str) -> bool {
     false
 }
 
-fn showplan(xml: &str, summary: &mut Summary) {
+/// Fills `summary` from a SHOWPLAN XML document and returns how many
+/// statements its batch holds.
+fn showplan(xml: &str, summary: &mut Summary) -> usize {
     if xml.len() > MAX_XML_BYTES || nested_too_deep(xml) {
-        return;
+        return 0;
     }
     let Ok(document) = Document::parse(xml) else {
-        return;
+        return 0;
     };
+    let statements = document
+        .descendants()
+        .filter(|node| {
+            node.has_tag_name("Statements")
+                && node
+                    .parent()
+                    .is_some_and(|parent| parent.has_tag_name("Batch"))
+        })
+        .flat_map(|node| node.children().filter(Node::is_element))
+        .count();
     for operator in document
         .descendants()
         .filter(|node| node.has_tag_name("RelOp"))
@@ -355,6 +371,7 @@ fn showplan(xml: &str, summary: &mut Summary) {
             _ => {}
         }
     }
+    statements
 }
 
 fn describe_warning(warning: Node) -> String {

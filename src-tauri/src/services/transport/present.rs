@@ -328,7 +328,9 @@ fn list_result(
     }
     let object = response.data.as_object()?;
     let items = object.get(field)?.as_array()?;
-    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(items.len());
+    let start = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(items.len());
     let mut other = Map::new();
     let mut other_truncated = false;
     for (key, value) in object.iter().filter(|(key, _)| key.as_str() != field) {
@@ -348,11 +350,19 @@ fn list_result(
         let next = start + kept;
         data.insert(
             field.into(),
-            Value::Array(sanitized[..kept].iter().map(|(item, _)| item.clone()).collect()),
+            Value::Array(
+                sanitized[..kept]
+                    .iter()
+                    .map(|(item, _)| item.clone())
+                    .collect(),
+            ),
         );
         data.insert("offset".into(), json!(start));
         data.insert("total_count".into(), json!(items.len()));
-        data.insert("next_offset".into(), json!((next < items.len()).then_some(next)));
+        data.insert(
+            "next_offset".into(),
+            json!((next < items.len()).then_some(next)),
+        );
         data.insert("has_more".into(), json!(next < items.len()));
         let truncated = other_truncated
             || next < items.len()
@@ -397,17 +407,22 @@ fn plan_result(
     {
         return None;
     }
-    let output = render(
-        &summary(
-            operation,
-            response,
-            response.data.clone(),
+    let rendered = |data: Value| {
+        render(
+            &summary(operation, response, data, false, effective, &response.page),
             false,
-            effective,
-            &response.page,
-        ),
-        false,
-    );
+        )
+    };
+    let output = rendered(response.data.clone());
+    if !oversized(&output) {
+        return Some(output);
+    }
+    // A plan that does not fit is left out whole rather than cut mid-document.
+    let mut data = response.data.clone();
+    let object = data.as_object_mut()?;
+    object.remove("plan")?;
+    object.insert("plan_omitted".into(), Value::Bool(true));
+    let output = rendered(data);
     (!oversized(&output)).then_some(output)
 }
 

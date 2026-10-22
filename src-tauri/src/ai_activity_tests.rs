@@ -1159,4 +1159,33 @@ mod tests {
             assert_eq!(actual.as_deref(), *expected, "{sql:?}");
         }
     }
+
+    #[test]
+    fn 중첩_주석이나_mysql_실행_주석에_숨긴_부작용_함수는_읽기가_아니다() {
+        // given
+        let statements = [
+            "SELECT /* outer /* inner */ ' */ pg_cancel_backend(4242) --'",
+            "SELECT /* a /* b */ c */ pg_terminate_backend(1)",
+            "SELECT /*! GET_LOCK('review-lock',0), */ 1",
+            "SELECT /*M!100000 GET_LOCK('a', 0), */ 1",
+        ];
+        // when
+        let actual: Vec<_> = statements.iter().map(|sql| classify_query_kind(sql)).collect();
+        // then
+        assert!(actual.iter().all(|kind| *kind != "select"), "{actual:?}");
+    }
+
+    #[test]
+    fn 중첩_주석만_있는_읽기는_계속_읽기다() {
+        // given
+        let statements = [
+            "SELECT /* a /* b */ c */ 1",
+            "SELECT 1 /* note */",
+            "SELECT 1 /*+ hint */",
+        ];
+        // when
+        let actual: Vec<_> = statements.iter().map(|sql| classify_query_kind(sql)).collect();
+        // then
+        assert!(actual.iter().all(|kind| *kind == "select"), "{actual:?}");
+    }
 }

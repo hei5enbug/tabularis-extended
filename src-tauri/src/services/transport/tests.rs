@@ -448,6 +448,25 @@ fn 일반_문서의_challenge_필드는_인증정보로_오판하지_않는다()
     );
 }
 #[test]
+fn 화면_예산을_넘는_실행_계획은_자르지_않고_통째로_빼고_생략을_알린다() {
+    // given
+    let request = support::query("select");
+    let mut response = ServiceResponse::failure(&request, ErrorCode::InvalidArgument, "fixed");
+    response.error = None;
+    response.status = JobStatus::Succeeded;
+    let plan = format!("<ShowPlanXML>{}</ShowPlanXML>", "x".repeat(32_700));
+    response.data = json!({"engine":"sqlserver","format":"sqlserver-showplan-xml","executed":false,
+        "summary":{"total_cost":1.5,"nodes":[]},"plan":plan});
+    // when
+    let actual = present::tool_result(Operation::QueryExplain, &response, None);
+    // then
+    let data = &actual["structuredContent"]["data"];
+    assert!(data.get("plan").is_none(), "{data}");
+    assert_eq!(data["plan_omitted"], true);
+    assert_eq!(data["summary"]["total_cost"], 1.5);
+    assert!(serde_json::to_vec(&actual).unwrap().len() <= 64 * 1024);
+}
+#[test]
 fn 일반_목록은_응답이_맞으면_전부_싣고_진단_배열만_다섯개로_줄인다() {
     // given
     let request = support::query("select");
