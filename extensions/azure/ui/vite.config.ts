@@ -4,6 +4,8 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
   plugins: [react()],
   test: { environment: "jsdom", include: ["tests/**/*.test.tsx"] },
+  // An empty inline config stops Vite from searching up to the host app's postcss.config.js.
+  css: { postcss: {} },
   build: {
     lib: { entry: "src/index.tsx", formats: ["iife"], name: "__tabularis_plugin__", fileName: () => "index.js", cssFileName: "style" },
     rollupOptions: {
