@@ -18,7 +18,7 @@ use super::{
     results::{CursorBinding, NextPage, ResultStore, StoredPage},
     security::{sanitized_settings, validate_settings, value_hash},
     sessions::SessionManager,
-    sql_classifier::classify_query_kind,
+    sql_classifier::{prove_read, read_dialect, ReadDialect},
     storage::now_ms,
 };
 use async_trait::async_trait;
@@ -315,8 +315,17 @@ impl ServiceRuntime {
                     }
                     None => false,
                 };
-                let read =
-                    classify_query_kind(request.input["text"].as_str().unwrap_or("")) == "select";
+                let text = request.input["text"].as_str().unwrap_or("");
+                let in_session = request.session_id.is_some();
+                let read = if is_proven_read(text, None, in_session) {
+                    true
+                } else {
+                    let driver = match request.connection_id.as_deref() {
+                        Some(id) => self.connections.get(id).await.ok().map(|c| c.driver),
+                        None => None,
+                    };
+                    is_proven_read(text, driver.as_deref(), in_session)
+                };
                 match (session_write, read, intent) {
                     (true, _, true) => true,
                     (true, _, false) => return Err(failure(ErrorCode::WriteIntentRequired)),
@@ -782,7 +791,11 @@ impl ServiceRuntime {
             let guarantee = self.driver.read_only_guarantee(&connection).await?;
             if guarantee == ReadOnlyGuarantee::Unavailable
                 && request.operation == Operation::QueryExecute
-                && classify_query_kind(request.input["text"].as_str().unwrap_or("")) != "select"
+                && !is_proven_read(
+                    request.input["text"].as_str().unwrap_or(""),
+                    Some(&connection.driver),
+                    request.session_id.is_some(),
+                )
             {
                 return Err(failure(ErrorCode::WriteNotAllowed));
             }
@@ -1748,6 +1761,15 @@ impl ServiceHandler for ServiceRuntime {
     }
 }
 
+/// Whether a query without write intent is a proven read. A PostgreSQL
+/// wrapper does not count inside a session, whose transaction the caller
+/// controls; only a plain read does.
+fn is_proven_read(text: &str, driver: Option<&str>, in_session: bool) -> bool {
+    let dialect = driver
+        .and_then(read_dialect)
+        .filter(|dialect| !(in_session && *dialect == ReadDialect::Postgres));
+    prove_read(text, dialect).is_some()
+}
 fn success(request: &ServiceRequest, data: Value) -> ServiceResponse {
     ServiceResponse {
         protocol_version: 1,

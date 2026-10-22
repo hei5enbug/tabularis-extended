@@ -18,6 +18,8 @@ pub struct ExactInput {
     pub max_bytes: usize,
     #[serde(default)]
     pub schema: Option<String>,
+    #[serde(default)]
+    pub settings: Vec<Setting>,
 }
 fn max_rows() -> usize {
     10_000
@@ -30,6 +32,60 @@ fn max_bytes() -> usize {
 pub struct Parameter {
     pub name: String,
     pub value: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Setting {
+    pub name: String,
+    pub value: String,
+}
+
+const ALLOWED_SETTINGS: &[&str] = &[
+    "statement_timeout",
+    "lock_timeout",
+    "idle_in_transaction_session_timeout",
+    "plan_cache_mode",
+    "work_mem",
+    "search_path",
+    "jit",
+    "random_page_cost",
+    "max_parallel_workers_per_gather",
+    "enable_seqscan",
+    "enable_indexscan",
+    "enable_indexonlyscan",
+    "enable_bitmapscan",
+    "enable_nestloop",
+    "enable_hashjoin",
+    "enable_mergejoin",
+];
+
+pub fn validate_settings(
+    settings: &[Setting],
+    read_only: bool,
+    reserved: bool,
+) -> Result<(), SpatialError> {
+    if settings.is_empty() {
+        return Ok(());
+    }
+    if !read_only || reserved {
+        return Err(SpatialError::argument(
+            "Settings are accepted only for read jobs outside a session",
+        ));
+    }
+    for setting in settings {
+        if !ALLOWED_SETTINGS.contains(&setting.name.to_ascii_lowercase().as_str()) {
+            return Err(SpatialError::argument(
+                "Setting name is not in the supported list",
+            ));
+        }
+        if setting.value.contains('\0') {
+            return Err(SpatialError::argument(
+                "Setting values must not contain NUL characters",
+            ));
+        }
+    }
+    Ok(())
 }
 
 pub fn search_path_statement(schema: Option<&str>) -> Result<Option<String>, SpatialError> {
@@ -209,6 +265,7 @@ pub async fn execute(
 ) -> Result<Value, SpatialError> {
     validate_text(&input.text)?;
     let search_path = search_path_statement(input.schema.as_deref())?;
+    validate_settings(&input.settings, read_only, reserved)?;
     if input.max_rows == 0
         || input.max_rows > max_rows()
         || input.max_bytes == 0
@@ -247,6 +304,15 @@ pub async fn execute(
         }
         None => None,
     };
+    for setting in &input.settings {
+        client
+            .query_one(
+                "SELECT pg_catalog.set_config($1,$2,true)",
+                &[&setting.name.to_ascii_lowercase(), &setting.value],
+            )
+            .await
+            .map_err(SpatialError::database)?;
+    }
     let statement = client
         .prepare(&input.text)
         .await

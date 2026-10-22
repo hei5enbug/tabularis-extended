@@ -36,6 +36,9 @@ fn max_bytes() -> usize {
     32 * 1024 * 1024
 }
 pub fn validate_text(text: &str) -> Result<(), ServiceError> {
+    validate_text_for(text, false)
+}
+pub fn validate_text_for(text: &str, read_only: bool) -> Result<(), ServiceError> {
     let bytes = text.as_bytes();
     let mut index = 0;
     loop {
@@ -86,11 +89,11 @@ pub fn validate_text(text: &str) -> Result<(), ServiceError> {
             | "SAVE"
             | "SAVEPOINT"
             | "RELEASE"
-            | "SET"
             | "RESET"
             | "DISCARD"
             | "USE"
-    ) {
+    ) || (word == "SET" && !read_only)
+    {
         return Err(ServiceError::new(
             "UNSUPPORTED_OPERATION",
             "Transaction and session control requires service session RPCs",
@@ -161,7 +164,7 @@ pub fn value_type(value: &Value) -> Result<SqlType, ServiceError> {
         _ => return Err(unsupported()),
     })
 }
-pub fn validate(input: &ExactInput) -> Result<Vec<RpcParameter>, ServiceError> {
+pub fn validate(input: &ExactInput, read_only: bool) -> Result<Vec<RpcParameter>, ServiceError> {
     if input
         .schema
         .as_deref()
@@ -172,7 +175,7 @@ pub fn validate(input: &ExactInput) -> Result<Vec<RpcParameter>, ServiceError> {
             "SQL Server has no per-session default schema; names must be schema-qualified",
         ));
     }
-    validate_text(&input.text)?;
+    validate_text_for(&input.text, read_only)?;
     if input.max_rows == 0
         || input.max_rows > max_rows()
         || input.max_bytes == 0

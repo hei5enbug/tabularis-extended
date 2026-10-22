@@ -309,6 +309,45 @@ fn 빈_select와_추가_result_set의_metadata를_유지한다() {
 }
 
 #[test]
+fn 읽기_batch의_앞선_set_옵션과_declare도_모든_result_set을_반환한다() {
+    // given
+    let fixture = Fixture::new();
+    let mut plugin = Plugin::new();
+    let request = fixture.exact(
+        "SET NOCOUNT ON; DECLARE @n int = 2; SELECT @n AS n; SELECT 1 AS one;",
+        &fixture.reader,
+        true,
+        "set-read",
+    );
+    // when
+    let actual = plugin.call(&request);
+    // then
+    assert!(actual.get("error").is_none(), "{actual}");
+    assert_eq!(actual["result"]["columns"], json!(["n"]));
+    assert_eq!(actual["result"]["rows"], json!([[2]]));
+    assert_eq!(
+        actual["result"]["additional_results"][0]["columns"],
+        json!(["one"])
+    );
+    assert_eq!(
+        actual["result"]["additional_results"][0]["rows"],
+        json!([[1]])
+    );
+}
+
+#[test]
+fn 쓰기_작업의_앞선_set은_실행_전에_거부한다() {
+    // given
+    let fixture = Fixture::new();
+    let mut plugin = Plugin::new();
+    let request = fixture.exact("SET NOCOUNT ON; SELECT 1 AS one", "sa", false, "set-write");
+    // when
+    let actual = plugin.call(&request);
+    // then
+    assert_eq!(actual["error"]["data"]["code"], "UNSUPPORTED_OPERATION");
+}
+
+#[test]
 fn 읽기_취소는_attention을_보내고_physical_connection을_폐기한다() {
     // given
     let fixture = Fixture::new();

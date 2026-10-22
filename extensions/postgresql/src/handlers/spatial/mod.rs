@@ -75,6 +75,11 @@ async fn run(
             let input = types::input::<exact::ExactInput>(params)?;
             exact::validate_text(&input.text)?;
             exact::search_path_statement(input.schema.as_deref())?;
+            exact::validate_settings(
+                &input.settings,
+                context.read_only,
+                context.session_handle.is_some(),
+            )?;
             None
         }
         "spatial_transform_values" => {

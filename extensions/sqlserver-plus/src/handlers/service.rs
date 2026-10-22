@@ -190,7 +190,7 @@ async fn run(
     let prepared = match method {
         "execute_query_exact" => {
             let input: exact::ExactInput = types::input(params)?;
-            let bindings = exact::validate(&input)?;
+            let bindings = exact::validate(&input, context.read_only)?;
             (
                 input.text,
                 bindings,

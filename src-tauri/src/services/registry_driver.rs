@@ -10,6 +10,7 @@ use crate::services::{
         MAX_RESULT_ROWS,
     },
     security::value_hash,
+    sql_classifier::{prove_read, read_dialect, ReadDialect},
 };
 use crate::{
     drivers::{
@@ -311,6 +312,24 @@ impl DriverBackend for RegistryDriverBackend {
                 let mut input = json!({"text":request.input["text"],"parameters":request.input["parameters"],"max_rows":10000,"max_bytes":16*1024*1024-64*1024});
                 if let Some(schema) = request.input["schema"].as_str() {
                     input["schema"] = json!(schema);
+                }
+                if context.read_only
+                    && request.session_id.is_none()
+                    && read_dialect(&connection.driver) == Some(ReadDialect::Postgres)
+                {
+                    let text = request.input["text"].as_str().unwrap_or("");
+                    let proven = prove_read(text, Some(ReadDialect::Postgres))
+                        .ok_or_else(|| failure(ErrorCode::WriteNotAllowed))?;
+                    if !proven.settings.is_empty() || proven.text != text {
+                        input["text"] = json!(proven.text);
+                        if !proven.settings.is_empty() {
+                            input["settings"] = proven
+                                .settings
+                                .iter()
+                                .map(|(name, value)| json!({"name":name,"value":value}))
+                                .collect();
+                        }
+                    }
                 }
                 input
             }

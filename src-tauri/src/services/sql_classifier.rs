@@ -89,6 +89,8 @@ pub fn classify_query_kind(sql: &str) -> &'static str {
         // MySQL runs the text of `/*! … */` and `/*M! … */` comments, which
         // every variant blanks, so a read cannot be proven around them.
         Some(_) if has_executable_comment(sql) => "unknown",
+        Some("select") if has_lone_carriage_return(sql) => "unknown",
+        Some("select") if leading_keyword_token(sql, false).is_none() => "unknown",
         Some("select") if calls_side_effect_function(sql, &VARIANTS) => "write",
         Some(kind) => kind,
         None => "unknown",
@@ -98,6 +100,562 @@ pub fn classify_query_kind(sql: &str) -> &'static str {
 fn has_executable_comment(sql: &str) -> bool {
     let upper = sql.to_ascii_uppercase();
     upper.contains("/*!") || upper.contains("/*M!")
+}
+
+/// SQL Server and PostgreSQL end a `--` comment at a carriage return, which the
+/// scanner reads as part of the comment, so text after a lone `\r` is unseen.
+fn has_lone_carriage_return(sql: &str) -> bool {
+    let bytes = sql.as_bytes();
+    (0..bytes.len()).any(|index| bytes[index] == b'\r' && bytes.get(index + 1) != Some(&b'\n'))
+}
+
+/// The first word of `sql` after whitespace, comments, `(` and, with
+/// `semicolons`, `;`, when it is a plain keyword. T-SQL runs a leading name as
+/// a procedure, so a quoted name (`"sp_updatestats"`) or a word that goes on
+/// with `$`, `#`, `@`, a digit, `_` or a non-ASCII letter (`PRINT$wipe`) is not
+/// one.
+fn leading_keyword_token(sql: &str, semicolons: bool) -> Option<&str> {
+    let mut rest = sql;
+    loop {
+        rest = skip_trivia(rest)?;
+        match rest.as_bytes().first() {
+            Some(b'(') => rest = &rest[1..],
+            Some(b';') if semicolons => rest = &rest[1..],
+            _ => break,
+        }
+    }
+    let length = rest.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let continues = rest.as_bytes().get(length).is_some_and(|byte| {
+        !byte.is_ascii()
+            || byte.is_ascii_alphanumeric()
+            || matches!(byte, b'_' | b'$' | b'#' | b'@')
+    });
+    (length > 0 && !continues).then(|| &rest[..length])
+}
+
+/// Drivers whose read batches can be proven beyond a single `SELECT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReadDialect {
+    Postgres,
+    SqlServer,
+}
+
+/// A read the host proved safe to run without write intent. `text` is what the
+/// driver must run and `settings` are session settings, in statement order, it
+/// must apply first.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvenRead {
+    pub text: String,
+    pub settings: Vec<(String, String)>,
+}
+
+/// The read dialect of a saved connection's driver id.
+pub fn read_dialect(driver: &str) -> Option<ReadDialect> {
+    match driver {
+        "postgresql-plus" => Some(ReadDialect::Postgres),
+        "sqlserver-plus" => Some(ReadDialect::SqlServer),
+        _ => None,
+    }
+}
+
+/// Prove `sql` is a read. A single read that [`classify_query_kind`] calls
+/// `"select"` is proven for every dialect. With a dialect, one read wrapped in
+/// a transaction and listed `SET` statements (PostgreSQL), or a T-SQL batch
+/// that only reads (SQL Server), is proven too. Any doubt is `None`.
+pub fn prove_read(sql: &str, dialect: Option<ReadDialect>) -> Option<ProvenRead> {
+    match classify_query_kind(sql) {
+        "select" => {
+            return Some(ProvenRead {
+                text: sql.to_owned(),
+                settings: Vec::new(),
+            })
+        }
+        "write" | "ddl" => return None,
+        _ if has_lone_carriage_return(sql) => return None,
+        _ => {}
+    }
+    match dialect? {
+        ReadDialect::Postgres => prove_postgres_wrapper(sql),
+        ReadDialect::SqlServer => prove_sql_server_batch(sql).then(|| ProvenRead {
+            text: sql.to_owned(),
+            settings: Vec::new(),
+        }),
+    }
+}
+
+/// Session settings a proven PostgreSQL read may carry.
+const PG_FORWARDED_SETTINGS: &[&str] = &[
+    "statement_timeout",
+    "lock_timeout",
+    "idle_in_transaction_session_timeout",
+    "plan_cache_mode",
+    "work_mem",
+    "search_path",
+    "jit",
+    "random_page_cost",
+    "max_parallel_workers_per_gather",
+    "enable_seqscan",
+    "enable_indexscan",
+    "enable_indexonlyscan",
+    "enable_bitmapscan",
+    "enable_nestloop",
+    "enable_hashjoin",
+    "enable_mergejoin",
+];
+
+/// Settings a read already runs under, so asking for them is accepted and
+/// dropped when the value keeps the transaction read-only.
+const PG_READ_ONLY_SETTINGS: &[&str] = &["transaction_read_only", "default_transaction_read_only"];
+
+enum PgToken {
+    Word(String),
+    Text(String),
+    Quoted(String),
+    Number(String),
+    Comma,
+    Equals,
+}
+
+impl PgToken {
+    fn is_word(&self, expected: &str) -> bool {
+        matches!(self, Self::Word(word) if word.eq_ignore_ascii_case(expected))
+    }
+}
+
+enum PgPiece<'a> {
+    Begin,
+    End,
+    Drop,
+    Setting(String, String),
+    Read(&'a str),
+}
+
+/// Byte offsets of every `;` that is a statement separator, when every quoting
+/// interpretation finds the same ones.
+fn agreed_semicolons(sql: &str) -> Option<Vec<usize>> {
+    let mut agreed: Option<Vec<usize>> = None;
+    for options in QUOTING_VARIANTS {
+        let stripped = strip_with(sql, options);
+        if stripped.len() != sql.len() {
+            return None;
+        }
+        let positions: Vec<usize> = stripped
+            .bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b';')
+            .map(|(index, _)| index)
+            .collect();
+        match &agreed {
+            None => agreed = Some(positions),
+            Some(previous) if *previous != positions => return None,
+            Some(_) => {}
+        }
+    }
+    agreed
+}
+
+/// `text` without leading whitespace and comments. Nested or unterminated
+/// block comments are read differently by different dialects, so they fail.
+fn skip_trivia(mut text: &str) -> Option<&str> {
+    loop {
+        text = text.trim_start();
+        if text.starts_with("--") {
+            text = text.find('\n').map_or("", |index| &text[index + 1..]);
+        } else if let Some(body) = text.strip_prefix("/*") {
+            let end = body.find("*/")?;
+            if body[..end].contains("/*") || body.starts_with('/') || body[..end].ends_with('/') {
+                return None;
+            }
+            text = &body[end + 2..];
+        } else {
+            return Some(text);
+        }
+    }
+}
+
+fn pg_tokens(piece: &str) -> Option<Vec<PgToken>> {
+    let mut tokens = Vec::new();
+    let mut rest = skip_trivia(piece)?;
+    while let Some(&first) = rest.as_bytes().first() {
+        let (token, length) = match first {
+            b',' => (PgToken::Comma, 1),
+            b'=' => (PgToken::Equals, 1),
+            b'\'' => {
+                let mut value = String::new();
+                let mut index = 1;
+                loop {
+                    let end = rest[index..].find('\'')?;
+                    value.push_str(&rest[index..index + end]);
+                    index += end + 1;
+                    if rest[index..].starts_with('\'') {
+                        value.push('\'');
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if value.contains('\0') {
+                    return None;
+                }
+                (PgToken::Text(value), index)
+            }
+            b'"' => {
+                let end = rest[1..].find('"')?;
+                let body = &rest[1..1 + end];
+                if body.is_empty() || body.contains('\0') || rest[end + 2..].starts_with('"') {
+                    return None;
+                }
+                (PgToken::Quoted(rest[..end + 2].to_owned()), end + 2)
+            }
+            b'0'..=b'9' => {
+                let bytes = rest.as_bytes();
+                let mut index = 0;
+                while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                    index += 1;
+                }
+                if bytes.get(index) == Some(&b'.')
+                    && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)
+                {
+                    index += 1;
+                    while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+                        index += 1;
+                    }
+                }
+                while bytes.get(index).is_some_and(u8::is_ascii_alphabetic) {
+                    index += 1;
+                }
+                if bytes
+                    .get(index)
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                {
+                    return None;
+                }
+                (PgToken::Number(rest[..index].to_owned()), index)
+            }
+            b'A'..=b'Z' | b'a'..=b'z' | b'_' => {
+                let length = rest
+                    .bytes()
+                    .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                    .count();
+                (PgToken::Word(rest[..length].to_owned()), length)
+            }
+            _ => return None,
+        };
+        tokens.push(token);
+        rest = skip_trivia(&rest[length..])?;
+    }
+    Some(tokens)
+}
+
+fn leading_word(text: &str) -> &str {
+    let length = text
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    &text[..length]
+}
+
+fn pg_piece(piece: &str) -> Option<Option<PgPiece<'_>>> {
+    let rest = skip_trivia(piece)?;
+    if rest.is_empty() {
+        return Some(None);
+    }
+    let first = leading_word(rest).to_ascii_uppercase();
+    Some(Some(match first.as_str() {
+        "BEGIN" | "START" => {
+            let tokens = pg_tokens(rest)?;
+            let mut tail = &tokens[1..];
+            let mode = tail
+                .first()
+                .is_some_and(|token| token.is_word("TRANSACTION"));
+            let work = tail.first().is_some_and(|token| token.is_word("WORK"));
+            if mode || (work && first == "BEGIN") {
+                tail = &tail[1..];
+            } else if first == "START" {
+                return None;
+            }
+            if let [read, only] = tail {
+                if read.is_word("READ") && only.is_word("ONLY") {
+                    tail = &[];
+                }
+            }
+            if !tail.is_empty() {
+                return None;
+            }
+            PgPiece::Begin
+        }
+        "COMMIT" | "ROLLBACK" | "END" | "ABORT" => {
+            let tokens = pg_tokens(rest)?;
+            match &tokens[1..] {
+                [] => {}
+                [word] if word.is_word("WORK") || word.is_word("TRANSACTION") => {}
+                _ => return None,
+            }
+            PgPiece::End
+        }
+        "SET" => pg_set(&pg_tokens(rest)?[1..])?,
+        _ => PgPiece::Read(piece),
+    }))
+}
+
+fn pg_set(tokens: &[PgToken]) -> Option<PgPiece<'static>> {
+    if let [transaction, read, only] = tokens {
+        if transaction.is_word("TRANSACTION") && read.is_word("READ") && only.is_word("ONLY") {
+            return Some(PgPiece::Drop);
+        }
+    }
+    let tokens = match tokens.first() {
+        Some(scope) if scope.is_word("LOCAL") || scope.is_word("SESSION") => &tokens[1..],
+        _ => tokens,
+    };
+    let (PgToken::Word(name), separator, value) = (tokens.first()?, tokens.get(1)?, &tokens[2..])
+    else {
+        return None;
+    };
+    if !(matches!(separator, PgToken::Equals) || separator.is_word("TO")) {
+        return None;
+    }
+    let name = name.to_ascii_lowercase();
+    let read_only = PG_READ_ONLY_SETTINGS.contains(&name.as_str());
+    if !read_only && !PG_FORWARDED_SETTINGS.contains(&name.as_str()) {
+        return None;
+    }
+    let mut items = Vec::new();
+    for (index, token) in value.iter().enumerate() {
+        if index % 2 == 1 {
+            if !matches!(token, PgToken::Comma) {
+                return None;
+            }
+            continue;
+        }
+        items.push(match token {
+            PgToken::Text(text) => (text.clone(), false),
+            PgToken::Number(number) => (number.clone(), false),
+            PgToken::Word(word) if !word.eq_ignore_ascii_case("DEFAULT") => (word.clone(), false),
+            PgToken::Quoted(quoted) => (quoted.clone(), true),
+            _ => return None,
+        });
+    }
+    if value.len() % 2 == 0 || items.is_empty() {
+        return None;
+    }
+    if read_only {
+        let [(value, false)] = items.as_slice() else {
+            return None;
+        };
+        return ["on", "true", "yes", "1"]
+            .contains(&value.to_ascii_lowercase().as_str())
+            .then_some(PgPiece::Drop);
+    }
+    if name != "search_path" && (items.len() != 1 || items[0].1) {
+        return None;
+    }
+    let joined: Vec<String> = items.into_iter().map(|(item, _)| item).collect();
+    Some(PgPiece::Setting(name, joined.join(", ")))
+}
+
+/// One read statement inside `BEGIN`, listed `SET` statements and a closing
+/// `COMMIT` or `ROLLBACK`, with the settings the driver has to apply.
+fn prove_postgres_wrapper(sql: &str) -> Option<ProvenRead> {
+    if has_executable_comment(sql) {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    let mut start = 0;
+    for end in agreed_semicolons(sql)?.into_iter().chain([sql.len()]) {
+        if let Some(piece) = pg_piece(&sql[start..end])? {
+            pieces.push(piece);
+        }
+        start = end + 1;
+    }
+    let last = pieces.len().checked_sub(1)?;
+    let mut read = None;
+    let mut settings = Vec::new();
+    let mut wrapped = false;
+    for (index, piece) in pieces.into_iter().enumerate() {
+        match piece {
+            PgPiece::Begin if index == 0 => wrapped = true,
+            PgPiece::End if index == last => wrapped = true,
+            PgPiece::Begin | PgPiece::End => return None,
+            // The driver applies settings before the read, so one written
+            // after it would change what the read sees.
+            PgPiece::Drop | PgPiece::Setting(..) if read.is_some() => return None,
+            PgPiece::Drop => wrapped = true,
+            PgPiece::Setting(name, value) => {
+                wrapped = true;
+                settings.push((name, value));
+            }
+            PgPiece::Read(text) => {
+                if read.replace(text).is_some() {
+                    return None;
+                }
+            }
+        }
+    }
+    let text = read?.trim();
+    (wrapped && classify_query_kind(text) == "select").then(|| ProvenRead {
+        text: text.to_owned(),
+        settings,
+    })
+}
+
+/// Words that open a T-SQL batch the scanner can follow. In T-SQL only the
+/// first statement of a batch may call a procedure without `EXEC`, so any other
+/// first word fails.
+const TSQL_BATCH_STARTERS: &[&str] = &[
+    "SELECT",
+    "WITH",
+    "DECLARE",
+    "SET",
+    "IF",
+    "WHILE",
+    "PRINT",
+    "THROW",
+    "RAISERROR",
+    "WAITFOR",
+];
+
+/// T-SQL statement words beyond [`STATEMENT_STARTERS`] that a read batch must
+/// not use.
+const TSQL_EXTRA_STARTERS: &[&str] = &[
+    "CHECKPOINT",
+    "WRITETEXT",
+    "UPDATETEXT",
+    "SETUSER",
+    "REVERT",
+    "RECEIVE",
+    "SEND",
+    "OPEN",
+    "FETCH",
+    "CLOSE",
+    "DEALLOCATE",
+    "CURSOR",
+    "ENABLE",
+    "DISABLE",
+    "MOVE",
+    "CONVERSATION",
+];
+
+/// Session options a read batch may set.
+const TSQL_SET_OPTIONS: &[&str] = &[
+    "NOCOUNT",
+    "XACT_ABORT",
+    "ANSI_NULLS",
+    "ANSI_WARNINGS",
+    "ANSI_PADDING",
+    "ANSI_NULL_DFLT_ON",
+    "ANSI_NULL_DFLT_OFF",
+    "ARITHABORT",
+    "ARITHIGNORE",
+    "CONCAT_NULL_YIELDS_NULL",
+    "NUMERIC_ROUNDABORT",
+    "QUOTED_IDENTIFIER",
+    "DATEFIRST",
+    "DATEFORMAT",
+    "LANGUAGE",
+    "LOCK_TIMEOUT",
+    "DEADLOCK_PRIORITY",
+    "ROWCOUNT",
+    "TEXTSIZE",
+    "QUERY_GOVERNOR_COST_LIMIT",
+];
+
+/// True when `sql` is a T-SQL batch that only reads, under every quoting
+/// interpretation.
+fn prove_sql_server_batch(sql: &str) -> bool {
+    leading_keyword_token(sql, true)
+        .is_some_and(|word| TSQL_BATCH_STARTERS.contains(&word.to_ascii_uppercase().as_str()))
+        && !has_executable_comment(sql)
+        && !calls_side_effect_function(sql, &QUOTING_VARIANTS)
+        && QUOTING_VARIANTS
+            .into_iter()
+            .all(|options| tsql_batch_reads(&strip_with(sql, options).to_ascii_uppercase()))
+}
+
+fn tsql_batch_reads(upper: &str) -> bool {
+    let peeled = upper.trim_start_matches(|c: char| c == '(' || c == ';' || c.is_whitespace());
+    if !TSQL_BATCH_STARTERS.contains(&leading_word(peeled)) {
+        return false;
+    }
+    let bytes = upper.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut cursor = 0;
+    let mut previous_word = "";
+    while cursor < bytes.len() {
+        if !is_word(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && is_word(bytes[cursor]) {
+            cursor += 1;
+        }
+        let token = &upper[start..cursor];
+        if hidden_starter(token, TSQL_EXTRA_STARTERS) {
+            return false;
+        }
+        let previous = std::mem::replace(&mut previous_word, token);
+        // `@name` is a variable, never a keyword.
+        if start > 0 && bytes[start - 1] == b'@' {
+            continue;
+        }
+        let rest = upper[cursor..].trim_start();
+        let bracketed = start > 0 && bytes[start - 1] == b'[' && bytes.get(cursor) == Some(&b']');
+        if token == "LOG" {
+            if !rest.starts_with('(') && !bracketed {
+                return false;
+            }
+            continue;
+        }
+        if !STATEMENT_STARTERS.contains(&token) && !TSQL_EXTRA_STARTERS.contains(&token) {
+            continue;
+        }
+        // `OFFSET n ROWS FETCH NEXT m ROWS ONLY` pages a read.
+        let paging = token == "FETCH" && matches!(previous, "ROW" | "ROWS");
+        let function_call = FUNCTION_LIKE_STARTERS.contains(&token) && rest.starts_with('(');
+        if !bracketed && !function_call && !paging && !tsql_allowed_use(token, rest) {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when `token` starts with a digit and ends in a statement word. T-SQL
+/// ends a number literal where a letter begins, so `SELECT 1DELETE FROM t`
+/// runs `SELECT 1` and then `DELETE FROM t`, and `0xFFUPDATE` reads as `0xFF`
+/// and `UPDATE`.
+fn hidden_starter(token: &str, extra: &[&str]) -> bool {
+    let bytes = token.as_bytes();
+    bytes.first().is_some_and(u8::is_ascii_digit)
+        && (1..bytes.len())
+            .filter(|&index| bytes[index].is_ascii_alphabetic())
+            .any(|index| {
+                let suffix = &token[index..];
+                STATEMENT_STARTERS.contains(&suffix) || extra.contains(&suffix)
+            })
+}
+
+/// Whether the statement word `token`, followed by `rest`, is one a read batch
+/// may use.
+fn tsql_allowed_use(token: &str, rest: &str) -> bool {
+    let next = leading_word(rest);
+    let after = leading_word(rest[next.len()..].trim_start());
+    match token {
+        "SET" => {
+            rest.starts_with('@')
+                || TSQL_SET_OPTIONS.contains(&next)
+                || (next == "TRANSACTION" && after == "ISOLATION")
+                || (next == "STATISTICS" && ["IO", "TIME", "XML", "PROFILE"].contains(&after))
+        }
+        "DECLARE" => rest.starts_with('@'),
+        "BEGIN" => !["TRAN", "TRANSACTION", "DISTRIBUTED", "DIALOG"].contains(&next),
+        "WAITFOR" => ["DELAY", "TIME"].contains(&next),
+        "USE" => {
+            ["INDEX", "KEY", "PLAN"].contains(&next)
+                || (next == "HINT" && rest[next.len()..].trim_start().starts_with('('))
+        }
+        _ => false,
+    }
 }
 
 /// Functions that change server, session or sequence state even when called
@@ -446,6 +1004,9 @@ fn has_embedded_statement(upper: &str, first: &str) -> bool {
         }
         let token = &upper[start..cursor];
         let was_first = std::mem::replace(&mut first_token, false);
+        if hidden_starter(token, &[]) {
+            return true;
+        }
         if !STATEMENT_STARTERS.contains(&token) {
             continue;
         }

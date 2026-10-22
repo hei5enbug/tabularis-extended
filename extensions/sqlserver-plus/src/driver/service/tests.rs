@@ -242,12 +242,96 @@ fn 앞의_중첩_주석으로_transaction_control_검사를_우회하지_못한�
     assert_eq!(actual.unwrap_err().code, "UNSUPPORTED_OPERATION");
 }
 #[test]
+fn 읽기_작업은_앞의_set_세션_옵션을_허용한다() {
+    // given
+    let text = "SET NOCOUNT ON; SELECT 1";
+    // when
+    let actual = exact::validate_text_for(text, true);
+    // then
+    assert!(actual.is_ok());
+}
+#[test]
+fn 읽기_작업은_주석_뒤의_소문자_set도_허용한다() {
+    // given
+    let text = "/* 옵션 */ -- 줄 주석\n set nocount on; DECLARE @n int = 1; SELECT @n";
+    // when
+    let actual = exact::validate_text_for(text, true);
+    // then
+    assert!(actual.is_ok());
+}
+#[test]
+fn 쓰기_작업은_앞의_set을_계속_거부한다() {
+    // given
+    let text = "SET NOCOUNT ON; SELECT 1";
+    // when
+    let actual = exact::validate_text_for(text, false);
+    // then
+    assert_eq!(actual.unwrap_err().code, "UNSUPPORTED_OPERATION");
+}
+#[test]
+fn 읽기_작업도_set_이외의_앞선_제어_단어는_계속_거부한다() {
+    // given
+    let words = [
+        "BEGIN",
+        "START",
+        "COMMIT",
+        "END",
+        "ROLLBACK",
+        "ABORT",
+        "SAVE",
+        "SAVEPOINT",
+        "RELEASE",
+        "RESET",
+        "DISCARD",
+        "USE",
+    ];
+    // when
+    let actual = words.map(|word| exact::validate_text_for(&format!("{word} x"), true));
+    // then
+    assert!(actual
+        .iter()
+        .all(|result| result.as_ref().unwrap_err().code == "UNSUPPORTED_OPERATION"));
+}
+#[test]
+fn 엄격한_validate_text는_앞의_set을_거부한다() {
+    // given
+    let text = "SET NOCOUNT ON; SELECT 1";
+    // when
+    let actual = exact::validate_text(text);
+    // then
+    assert_eq!(actual.unwrap_err().code, "UNSUPPORTED_OPERATION");
+}
+#[test]
+fn 정확_쿼리_검증은_읽기_작업에만_앞의_set을_허용한다() {
+    // given
+    let input: exact::ExactInput =
+        serde_json::from_value(json!({"text":"SET NOCOUNT ON; SELECT 1"})).unwrap();
+    // when
+    let actual = (
+        exact::validate(&input, true),
+        exact::validate(&input, false),
+    );
+    // then
+    assert!(actual.0.is_ok());
+    assert_eq!(actual.1.unwrap_err().code, "UNSUPPORTED_OPERATION");
+}
+#[test]
+fn explain_검증은_앞의_set을_계속_거부한다() {
+    // given
+    let input: explain::Input =
+        serde_json::from_value(json!({"sql":"SET NOCOUNT ON; SELECT 1"})).unwrap();
+    // when
+    let actual = explain::validate(&input);
+    // then
+    assert_eq!(actual.unwrap_err().code, "UNSUPPORTED_OPERATION");
+}
+#[test]
 fn 비어_있지_않은_schema는_실행_전에_지원하지_않는_작업_오류로_거부한다() {
     // given
     let input: exact::ExactInput =
         serde_json::from_value(json!({"text":"SELECT 1","schema":"sales"})).unwrap();
     // when
-    let actual = exact::validate(&input);
+    let actual = exact::validate(&input, false);
     // then
     let error = actual.unwrap_err();
     assert_eq!(error.code, "UNSUPPORTED_OPERATION");
@@ -263,7 +347,10 @@ fn schema가_없거나_비어_있으면_기존처럼_통과한다() {
     let empty: exact::ExactInput =
         serde_json::from_value(json!({"text":"SELECT 1","schema":""})).unwrap();
     // when
-    let actual = [exact::validate(&absent), exact::validate(&empty)];
+    let actual = [
+        exact::validate(&absent, false),
+        exact::validate(&empty, false),
+    ];
     // then
     assert!(actual.iter().all(|result| result.is_ok()));
 }

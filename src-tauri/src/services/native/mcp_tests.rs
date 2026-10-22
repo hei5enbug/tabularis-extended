@@ -1107,3 +1107,85 @@ async fn 서비스가_스스로_시작한_조회_작업은_이력과_작업목�
         .is_some_and(|text| text.contains("LIMIT 10"))));
     assert_eq!(summary(&after_preview)["data"]["returned"], 2);
 }
+
+/// One harness per fixed driver id: the registry is shared by every test, so
+/// each of these ids is registered by exactly one test.
+async fn executed_inputs(h: &Harness, texts: &[&str]) -> (Vec<Value>, Vec<Value>) {
+    let mut replies = Vec::new();
+    for text in texts {
+        replies.push(
+            call(
+                h,
+                "query_execute",
+                json!({"connection_id":h.id,"text":text}),
+            )
+            .await,
+        );
+    }
+    let inputs = h
+        .state
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.0 == ServiceRpcMethod::ExactQuery)
+        .map(|call| call.1.clone())
+        .collect();
+    (replies, inputs)
+}
+
+#[tokio::test]
+async fn postgresql_plus는_읽기_래퍼를_벗겨_문장과_설정으로_나누어_드라이버에_보낸다() {
+    // given
+    let h = Harness::with_manifest(|manifest| manifest.id = "postgresql-plus".into()).await;
+    let wrapper = "BEGIN; SET LOCAL statement_timeout = '30s'; SET LOCAL transaction_read_only = on; SELECT 1; ROLLBACK;";
+    let plain = "select 1";
+    // when
+    let (replies, inputs) = executed_inputs(&h, &[wrapper, plain]).await;
+    // then
+    assert_eq!(summary(&replies[0])["status"], "succeeded");
+    assert_eq!(summary(&replies[1])["status"], "succeeded");
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0]["text"], "SELECT 1");
+    assert_eq!(
+        inputs[0]["settings"],
+        json!([{"name":"statement_timeout","value":"30s"}])
+    );
+    assert_eq!(inputs[1]["text"], plain);
+    assert!(inputs[1].get("settings").is_none());
+}
+
+#[tokio::test]
+async fn sqlserver_plus는_읽기_보장이_없어도_읽기_배치를_그대로_드라이버에_보낸다() {
+    // given
+    let h = Harness::with_manifest(|manifest| {
+        manifest.id = "sqlserver-plus".into();
+        manifest.capabilities.sql_dialect = Some(SqlDialect::Mssql);
+    })
+    .await;
+    h.state.read_only_unavailable.store(true, Ordering::SeqCst);
+    use crate::services::backend::ConnectionBackend as _;
+    let saved = h.core.platform.connections.get(&h.id).await.unwrap();
+    h.core
+        .platform
+        .connections
+        .update(
+            &h.id,
+            saved.version,
+            json!({"settings":{"host":"127.0.0.1","database":"fixture","extra":{"auth_mode":"integrated"}}}),
+        )
+        .await
+        .unwrap();
+    let batch = "SET NOCOUNT ON; DECLARE @n int = 10; SELECT TOP (@n) 1 AS a OPTION (MAXDOP 1);";
+    // when
+    let (replies, inputs) = executed_inputs(&h, &[batch]).await;
+    // then
+    assert_eq!(summary(&replies[0])["status"], "succeeded");
+    assert_eq!(
+        summary(&replies[0])["data"]["readonly_guarantee"],
+        "classification_only"
+    );
+    assert_eq!(inputs.len(), 1);
+    assert_eq!(inputs[0]["text"], batch);
+    assert!(inputs[0].get("settings").is_none());
+}

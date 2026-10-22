@@ -70,6 +70,19 @@ impl Fixture {
         )
         .await
     }
+    async fn exact_with_settings(&self, text: &str, settings: Value, read_only: bool) -> Value {
+        self.call(
+            "execute_query_exact",
+            json!({"text":text,"parameters":[],"settings":settings}),
+            read_only,
+        )
+        .await
+    }
+    async fn settings_then_plain(&self, text: &str, settings: Value) -> (Value, Value) {
+        let with_settings = self.exact_with_settings(text, settings, true).await;
+        let plain = self.exact(text.to_string()).await;
+        (with_settings, plain)
+    }
     async fn catalog_all(&self) -> (Vec<Value>, i64) {
         let mut values = Vec::new();
         for input in [
@@ -802,4 +815,85 @@ async fn 취소한_native_row는_rollback을_확인하고_자동_재실행하지
     assert_eq!(response["error"]["data"]["code"], "CANCELLED");
     assert_eq!(response["error"]["data"]["outcome"], "not_applied");
     assert_eq!(label, "seed");
+}
+
+const SETTING_PROBE: &str =
+    "SELECT current_setting('statement_timeout') AS st, current_setting('lock_timeout') AS lt";
+
+#[tokio::test]
+async fn 읽기_작업의_settings는_작업_안에서_적용된다() {
+    // given
+    let fixture = Fixture::new("postgres").await;
+    let settings =
+        json!([{"name":"statement_timeout","value":"1500ms"},{"name":"lock_timeout","value":"1s"}]);
+
+    // when
+    let response = fixture
+        .exact_with_settings(SETTING_PROBE, settings, true)
+        .await;
+
+    // then
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"]["rows"][0], json!(["1500ms", "1s"]));
+}
+
+#[tokio::test]
+async fn 읽기_작업의_settings는_다음_작업으로_새지_않는다() {
+    // given
+    let fixture = Fixture::new("postgres").await;
+    let settings =
+        json!([{"name":"statement_timeout","value":"1500ms"},{"name":"lock_timeout","value":"1s"}]);
+
+    // when
+    let (applied, following) = fixture.settings_then_plain(SETTING_PROBE, settings).await;
+
+    // then
+    assert_eq!(applied["result"]["rows"][0], json!(["1500ms", "1s"]));
+    assert!(following.get("error").is_none(), "{following}");
+    assert_eq!(following["result"]["rows"][0], json!(["5s", "0"]));
+}
+
+#[tokio::test]
+async fn statement_timeout_settings를_넘는_쿼리는_실패한다() {
+    // given
+    let fixture = Fixture::new("postgres").await;
+    let settings = json!([{"name":"statement_timeout","value":"1s"}]);
+
+    // when
+    let response = fixture
+        .exact_with_settings("SELECT pg_sleep(3)", settings, true)
+        .await;
+
+    // then
+    assert_eq!(response["error"]["data"]["code"], "DEADLINE_EXCEEDED");
+}
+
+#[tokio::test]
+async fn 쓰기_context의_settings는_데이터베이스_실행_전에_거부한다() {
+    // given
+    let fixture = Fixture::new("postgres").await;
+    let settings = json!([{"name":"statement_timeout","value":"1s"}]);
+
+    // when
+    let response = fixture
+        .exact_with_settings("SELECT 1", settings, false)
+        .await;
+
+    // then
+    assert_eq!(response["error"]["data"]["code"], "INVALID_ARGUMENT");
+}
+
+#[tokio::test]
+async fn 허용되지_않은_setting은_읽기_작업에서도_거부한다() {
+    // given
+    let fixture = Fixture::new("postgres").await;
+    let settings = json!([{"name":"transaction_read_only","value":"off"}]);
+
+    // when
+    let response = fixture
+        .exact_with_settings("SELECT 1", settings, true)
+        .await;
+
+    // then
+    assert_eq!(response["error"]["data"]["code"], "INVALID_ARGUMENT");
 }

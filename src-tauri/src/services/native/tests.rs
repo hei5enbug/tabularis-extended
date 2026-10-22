@@ -44,6 +44,8 @@ pub(crate) struct DriverState {
     pub unknown_count: AtomicBool,
     /// A driver that does not offer estimated plans.
     pub explain_unsupported: AtomicBool,
+    /// A driver whose database gives no read-only guarantee.
+    pub read_only_unavailable: AtomicBool,
     /// Databases the catalog lists; `fixture` when empty.
     pub databases: Mutex<Vec<String>>,
     /// The database each service call ran against.
@@ -75,6 +77,7 @@ impl Default for DriverState {
             capability_error: Default::default(),
             unknown_count: Default::default(),
             explain_unsupported: Default::default(),
+            read_only_unavailable: Default::default(),
             databases: Default::default(),
             params_databases: Default::default(),
             executions: Default::default(),
@@ -346,7 +349,11 @@ impl DatabaseDriver for MockDriver {
             rows: true,
             explain: !self.state.explain_unsupported.load(Ordering::SeqCst),
             exact_affected_rows: true,
-            read_only: DriverServiceReadOnly::ReadOnlyTransaction,
+            read_only: if self.state.read_only_unavailable.load(Ordering::SeqCst) {
+                DriverServiceReadOnly::Unavailable
+            } else {
+                DriverServiceReadOnly::ReadOnlyTransaction
+            },
         })
     }
     async fn service_call(

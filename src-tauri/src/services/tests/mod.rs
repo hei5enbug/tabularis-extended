@@ -11,6 +11,7 @@ mod oauth;
 mod platform;
 mod platform_mutations;
 mod policy;
+mod read_batch;
 mod regressions;
 mod results;
 mod runtime;
