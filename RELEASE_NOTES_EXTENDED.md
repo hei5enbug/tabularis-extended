@@ -26,6 +26,8 @@ The fork never reads or writes the official app's profile, keychain entries, or 
    macOS asks to allow access to each official keychain item.
 5. Restart when the result screen asks. After a verified Plus package is installed, `postgresql` connections move
    to `postgresql-plus`, and `sqlserver` and `sqlserver-entra` connections move to `sqlserver-plus`.
+6. On each start, the fork adds every verified Plus driver that a connection uses to `activeExternalDrivers`, so
+   the imported driver list cannot leave those drivers stopped.
 
 The import refuses to run when the fork profile already holds data. The backup encryption password of the backup
 feature is not copied.
@@ -39,6 +41,10 @@ feature is not copied.
 
 SQL Server Plus acquires Entra tokens itself with `az` for each new physical connection. Run `az login` outside the
 app. The host never handles Entra tokens for this driver.
+
+A SQL Server Plus connection without `auth_mode` uses SQL password authentication, or integrated authentication
+when `integrated_auth` is on. The host then sends the saved keychain password, the same way it does for an
+explicit `sql_password`.
 
 ## MCP server
 
@@ -69,14 +75,27 @@ app. The host never handles Entra tokens for this driver.
 
 ## Verification status
 
-Automated checks passed on 2026-10-21 on macOS arm64 with deterministic fake drivers and fixtures:
+Automated checks ran on macOS arm64 with deterministic fake drivers and fixtures. The host Rust library tests ran
+on 2026-10-22; the other suites ran on 2026-10-21.
 
-- Host: 2,132 Rust library tests and 5,380 frontend tests.
+- Host: 2,137 Rust library tests and 5,380 frontend tests. In one full parallel run, the Spatial test
+  `명시_export는_원본32mib이하_snapshot을_전체32mib이상_geojson으로_스트리밍한다` failed once. It passed in three
+  runs on its own, so the failure is likely a timeout under load.
 - Contracts: 447 Node tests and 268 Rust tests.
 - PostgreSQL Plus: 415 tests. SQL Server Plus: 325 driver tests, 3 conformance tests, and 33 offline harness tests.
 - Spatial: 68 Rust, 124 UI, and 128 install tests. Azure: 26, 646, 14, and 126 tests in its suites.
 - A locked release build produced the macOS app bundle.
 
-Not yet verified against real systems: the official profile import, `SELECT 1` on saved connections, Entra login
-through Azure CLI, server-side query cancellation, the new routine and trigger catalog queries, Windows bundles,
-and install and rollback of the packaged plugins.
+Checks against real systems on 2026-10-22, macOS arm64, read-only:
+
+| Check | Scope | Result |
+|---|---|---|
+| Official profile import | 14 connections | Imported with keychain passwords; 6 moved to `postgresql-plus`, 8 to `sqlserver-plus` |
+| `connection_test` and `SELECT 1` | 7 nonproduction connections: 3 PostgreSQL Plus, 4 SQL Server Plus | All succeeded |
+| Entra login through Azure CLI | The 4 SQL Server Plus connections above | Succeeded |
+| `readonly_guarantee` | Same 7 connections | `read_only_transaction` on PostgreSQL Plus, `classification_only` on SQL Server Plus |
+| Routine and trigger catalog | Same 7 connections | PostgreSQL counts match `pg_proc` and `pg_trigger` in `public`, without extension functions |
+| Server-side cancellation | Local Docker PostgreSQL 16 and SQL Server 2022 | `job_cancel` returned `cancelled`, and the server no longer listed the query |
+
+The production connections were not used. Not yet verified: Windows bundles, install and rollback of the packaged
+plugins through the plugin manager, and any write path on a real database.
