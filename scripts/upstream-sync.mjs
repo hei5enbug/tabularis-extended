@@ -26,8 +26,11 @@ function fetchUpstreamTags(root) {
   const result = git(root, ["fetch", "--no-tags", "upstream", "refs/tags/v*:refs/tags/v*"], { allowFail: true });
   if (result.status === 0) return;
   if (/clobber|rejected/.test(result.stderr)) {
-    console.error(`Some local tags differ from upstream and were kept as they are:\n${result.stderr.trim()}`);
-    return;
+    fail(
+      `Some local release tags point somewhere else than the same upstream tags, so the release to merge cannot be trusted.\n` +
+        `Check them with 'git show-ref --tags' and 'git ls-remote --tags upstream', fix or delete the wrong local tags yourself, then run again:\n` +
+        result.stderr.trim(),
+    );
   }
   fail(`Cannot fetch upstream tags:\n${result.stderr.trim()}`);
 }
@@ -44,12 +47,41 @@ function isAncestor(root, ref, of) {
 
 const CONFLICT_HUNK = /^<{7}[^\r\n]*\r?\n([\s\S]*?)^\|{7}[^\r\n]*\r?\n([\s\S]*?)^={7}\r?\n([\s\S]*?)^>{7}[^\r\n]*\r?\n/gm;
 
-// A hunk is safe to settle only when upstream changed nothing there but its own release version
-// (for example 0.27.0 to 0.28.0): keep the fork side, and finish writes the new fork version.
-function resolveVersionHunks(text, fromCore, toCore) {
-  const onlyReleaseBump = (base, theirs) =>
-    Boolean(fromCore && toCore) && base.includes(fromCore) && theirs !== base && theirs === base.split(fromCore).join(toCore);
-  const resolved = text.replace(CONFLICT_HUNK, (hunk, ours, base, theirs) => (onlyReleaseBump(base, theirs) ? ours : hunk));
+// The line that holds the application version in each version file, and what must surround it.
+const APP_VERSION_LINES = {
+  "package.json": { line: /^ {2}"version": "/ },
+  "src-tauri/tauri.conf.json": { line: /^ {2}"version": "/ },
+  "src/version.ts": { line: /APP_VERSION\s*=/ },
+  "src-tauri/Cargo.toml": { line: /^version = "/, owner: /^\[(.+)\]\s*$/, expected: ["package"] },
+  "src-tauri/Cargo.lock": { line: /^version = "/, owner: /^name = "(.+)"\s*$/, expected: ["tabularis", "tabularis-extended"] },
+};
+
+function isAppVersionLine(file, before, line) {
+  const rule = APP_VERSION_LINES[file];
+  if (!rule || !rule.line.test(line)) return false;
+  if (!rule.owner) return true;
+  const owner = before.split("\n").reverse().map((text) => rule.owner.exec(text)).find(Boolean);
+  return Boolean(owner) && rule.expected.includes(owner[1]);
+}
+
+// A hunk is safe to settle only when every line upstream changed there is the application version line, moved
+// from its old release to the new one (for example 0.27.0 to 0.28.0): keep the fork side, and finish writes the
+// new fork version. Anything else, such as a dependency version, stays a conflict.
+function resolveVersionHunks(text, fromCore, toCore, file) {
+  const onlyReleaseBump = (base, theirs, offset) => {
+    if (!fromCore || !toCore || base === theirs) return false;
+    const baseLines = base.split("\n");
+    const theirLines = theirs.split("\n");
+    if (baseLines.length !== theirLines.length) return false;
+    return baseLines.every((line, index) => {
+      if (line === theirLines[index]) return true;
+      const before = `${text.slice(0, offset)}${baseLines.slice(0, index).join("\n")}`;
+      return theirLines[index] === line.split(fromCore).join(toCore) && line.includes(fromCore) && isAppVersionLine(file, before, line);
+    });
+  };
+  const resolved = text.replace(CONFLICT_HUNK, (hunk, ours, base, theirs, offset) =>
+    onlyReleaseBump(base, theirs, offset) ? ours : hunk,
+  );
   return { text: resolved, changed: resolved !== text, remaining: (resolved.match(/^<{7}( |\r?$)/gm) ?? []).length };
 }
 
@@ -70,7 +102,7 @@ function previewMerge(root, tag, base) {
   const autoResolved = [];
   for (const file of files) {
     const blob = versionFiles.has(file) ? git(root, ["show", `${tree}:${file}`], { allowFail: true }) : null;
-    if (blob && blob.status === 0 && resolveVersionHunks(blob.stdout, base?.slice(1), tag.slice(1)).remaining === 0) autoResolved.push(file);
+    if (blob && blob.status === 0 && resolveVersionHunks(blob.stdout, base?.slice(1), tag.slice(1), file).remaining === 0) autoResolved.push(file);
     else conflicts.push(file);
   }
   return { conflicts, autoResolved };
@@ -158,7 +190,7 @@ function settleVersionConflicts(root, fromCore, toCore) {
   for (const file of unmergedFiles(root).filter((name) => versionFiles.has(name))) {
     const path = join(root, file);
     if (!existsSync(path)) continue;
-    const result = resolveVersionHunks(readFileSync(path, "utf8"), fromCore, toCore);
+    const result = resolveVersionHunks(readFileSync(path, "utf8"), fromCore, toCore, file);
     if (!result.changed) continue;
     writeFileSync(path, result.text);
     if (result.remaining === 0) git(root, ["add", "--", file]);

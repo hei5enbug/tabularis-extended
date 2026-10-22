@@ -260,6 +260,48 @@ describe("upstream sync merge", () => {
     expect(read(fork, "src-tauri/Cargo.lock")).toContain('version = "1.0.5"');
   });
 
+  it("앱 버전과 같은 값이라도 의존성 버전 충돌은 자동으로 풀지 않는다", () => {
+    // given
+    const upstream = tempDirectory();
+    git(upstream, "init", "-q", "-b", "main");
+    const withDependency = (files: Files, version: string, dependency: string) => ({
+      ...files,
+      "src-tauri/Cargo.toml": files["src-tauri/Cargo.toml"].replace('serde = "1"', `serde = "1"\nshared = "${dependency}"`),
+    });
+    write(upstream, withDependency(upstreamFiles("1.0.0"), "1.0.0", "1.0.0"));
+    commitAll(upstream, "release 1.0.0");
+    git(upstream, "tag", "v1.0.0");
+    write(upstream, withDependency(upstreamFiles("1.1.0"), "1.1.0", "1.1.0"));
+    commitAll(upstream, "release 1.1.0");
+    git(upstream, "tag", "v1.1.0");
+    const fork = makeFork(upstream);
+    write(fork, { "src-tauri/Cargo.toml": read(fork, "src-tauri/Cargo.toml").replace('serde = "1"', 'serde = "1"\nshared = "1.0.1"') });
+    commitAll(fork, "chore: pin shared in the fork");
+
+    // when
+    const result = sync(fork, upstream, "sync");
+
+    // then
+    expect(result.status).not.toBe(0);
+    expect(git(fork, "diff", "--name-only", "--diff-filter=U")).toBe("src-tauri/Cargo.toml");
+    expect(read(fork, "src-tauri/Cargo.toml")).toContain('shared = "1.1.0"');
+  });
+
+  it("로컬 릴리스 태그가 업스트림의 같은 태그와 다르면 병합하지 않고 멈춘다", () => {
+    // given
+    const upstream = makeUpstream(false);
+    const fork = makeFork(upstream);
+    git(fork, "tag", "v1.1.0", "HEAD");
+
+    // when
+    const result = sync(fork, upstream, "sync");
+
+    // then
+    expect(result.status).not.toBe(0);
+    expect(result.out).toContain("cannot be trusted");
+    expect(git(fork, "branch", "--list", "sync/*")).toBe("");
+  });
+
   it("충돌을 직접 풀고 finish를 실행하면 버전 커밋까지 끝난다", () => {
     // given
     const upstream = makeUpstream(true);

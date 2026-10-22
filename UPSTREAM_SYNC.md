@@ -22,6 +22,9 @@ Run them from the repository root, on the branch you want to update, with a clea
 | `node scripts/upstream-sync.mjs sync [<tag>]` | Refuses a dirty tree or a merge in progress. Creates `sync/upstream-<tag>` from the current branch, turns on `rerere`, and merges the tag with `--no-ff`. The default tag is the newest stable one. A clean merge runs `finish` for you. |
 | `node scripts/upstream-sync.mjs finish` | Sets the version to `<X.Y.Z>+extended.1` in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src/version.ts`. Then it runs the identity check and commits only those files. |
 
+If a local `vX.Y.Z` tag points somewhere else than the upstream tag with the same name, `status` and `sync` stop
+and name the tags. Fix or delete the wrong local tag yourself; the scripts never overwrite tags.
+
 The scripts never push, never force, and never delete branches or tags. The remote URL can be changed with the
 `UPSTREAM_URL` environment variable. The `origin` remote is never touched.
 
@@ -42,9 +45,9 @@ To give up, run `git merge --abort`. The `sync/upstream-<tag>` branch stays, so 
 - The preview in `status` uses `git merge-tree --write-tree`. It builds the merge in memory, so your work tree and
   index stay untouched. You see the conflicting files before you start.
 - Upstream bumps the version lines that the fork also edits, so those files would always conflict. When upstream
-  changed nothing in a conflicting block except its release version (for example `0.27.0` to `0.28.0`), `sync` keeps
-  the fork side and `finish` sets the new version. Any other change in that block, such as a dependency version, stays
-  a conflict for you to resolve. `status` shows the settled files as version-only conflicts.
+  changed nothing in a conflicting block except the application version line (for example `0.27.0` to `0.28.0`),
+  `sync` keeps the fork side and `finish` sets the new version. Any other change in that block, such as a dependency
+  version, stays a conflict for you to resolve. `status` shows the settled files as version-only conflicts.
 - `rerere` is turned on in this repository's local git config. Git records how you resolved a conflict and reuses
   the answer when the same conflict appears again. Because `rerere.autoupdate` is on, reused answers are staged.
   Check them in `git diff --cached` before you continue.
