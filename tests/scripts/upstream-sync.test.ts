@@ -74,6 +74,7 @@ function upstreamFiles(version: string): Files {
     "src-tauri/src/updater.rs": "const OFFICIAL_UPDATE_FEED_ENABLED: bool = true;\n",
     "src-tauri/linux/tabularis.desktop": "[Desktop Entry]\nName=Tabularis\n",
     "src/app.ts": "export const greeting = 'hello';\n",
+    "README.md": "# Tabularis\n",
   };
 }
 
@@ -100,6 +101,7 @@ function forkFiles(): Files {
     "src-tauri/src/mcp/install.rs": 'pub(crate) const MCP_SERVER_KEY: &str = "tabularis-extended";\n',
     "src-tauri/src/updater.rs": "const OFFICIAL_UPDATE_FEED_ENABLED: bool = false;\n",
     "src-tauri/linux/tabularis-extended.desktop": "[Desktop Entry]\nName=Tabularis Extended\n",
+    "README.md": "# Tabularis Extended\n",
   };
 }
 
@@ -108,7 +110,7 @@ function commitAll(root: string, message: string) {
   git(root, "commit", "-q", "-m", message);
 }
 
-function makeUpstream(conflictingChange: boolean, lockBump = false): string {
+function makeUpstream(conflictingChange: boolean, lockBump = false, readmeChange = false): string {
   const root = tempDirectory();
   git(root, "init", "-q", "-b", "main");
   write(root, upstreamFiles("1.0.0"));
@@ -116,6 +118,7 @@ function makeUpstream(conflictingChange: boolean, lockBump = false): string {
   git(root, "tag", "v1.0.0");
   write(root, { ...upstreamFiles("1.1.0"), "src/feature.ts": "export const feature = true;\n" });
   if (conflictingChange) write(root, { "src/app.ts": "export const greeting = 'hello from upstream';\n" });
+  if (readmeChange) write(root, { "README.md": "# Tabularis 1.1.0\n\nNew upstream text.\n" });
   if (lockBump) {
     write(root, { "src-tauri/Cargo.lock": read(root, "src-tauri/Cargo.lock").replace('version = "1.0.0"', 'version = "1.0.5"') });
   }
@@ -285,6 +288,21 @@ describe("upstream sync merge", () => {
     expect(result.status).not.toBe(0);
     expect(git(fork, "diff", "--name-only", "--diff-filter=U")).toBe("src-tauri/Cargo.toml");
     expect(read(fork, "src-tauri/Cargo.toml")).toContain('shared = "1.1.0"');
+  });
+
+  it("업스트림이 포크가 쓴 README를 바꿔도 충돌로 멈추지 않고 포크의 README를 지킨다", () => {
+    // given
+    const upstream = makeUpstream(false, false, true);
+    const fork = makeFork(upstream);
+
+    // when
+    const result = sync(fork, upstream, "sync");
+
+    // then
+    expect(result.status, result.out).toBe(0);
+    expect(read(fork, "README.md")).toBe("# Tabularis Extended\n");
+    expect(git(fork, "status", "--porcelain")).toBe("");
+    expect(git(fork, "merge-base", "--is-ancestor", "v1.1.0", "HEAD")).toBe("");
   });
 
   it("로컬 릴리스 태그가 업스트림의 같은 태그와 다르면 병합하지 않고 멈춘다", () => {

@@ -47,7 +47,8 @@ To give up, run `git merge --abort`. The `sync/upstream-<tag>` branch stays, so 
 - Upstream bumps the version lines that the fork also edits, so those files would always conflict. When upstream
   changed nothing in a conflicting block except the application version line (for example `0.27.0` to `0.28.0`),
   `sync` keeps the fork side and `finish` sets the new version. Any other change in that block, such as a dependency
-  version, stays a conflict for you to resolve. `status` shows the settled files as version-only conflicts.
+  version, stays a conflict for you to resolve. `status` shows the settled files as conflicts that `sync` settles by itself.
+- `README.md` belongs to the fork. If upstream changed it too, `sync` keeps the fork's version.
 - `rerere` is turned on in this repository's local git config. Git records how you resolved a conflict and reuses
   the answer when the same conflict appears again. Because `rerere.autoupdate` is on, reused answers are staged.
   Check them in `git diff --cached` before you continue.
@@ -88,8 +89,8 @@ pnpm typecheck
 - a line the fork added since the merged upstream tag names the other IDE product. Lines added by upstream are
   allowed.
 
-`scripts/sync-version.js` is not used here. It also rewrites README release links, and the fork keeps those
-identical to upstream.
+`scripts/sync-version.js` is not used here. It rewrites the upstream release links in the README files, and the fork
+README does not carry them.
 
 ## Scheduled watch and checks
 

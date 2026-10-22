@@ -86,6 +86,8 @@ function resolveVersionHunks(text, fromCore, toCore, file) {
 }
 
 const versionFiles = new Set(versionSources.map((source) => source.file));
+// Files the fork writes itself: an upstream change to them never matters here, so the fork side always wins.
+const forkOwnedFiles = new Set(["README.md"]);
 
 function previewMerge(root, tag, base) {
   const result = git(
@@ -101,6 +103,10 @@ function previewMerge(root, tag, base) {
   const conflicts = [];
   const autoResolved = [];
   for (const file of files) {
+    if (forkOwnedFiles.has(file)) {
+      autoResolved.push(file);
+      continue;
+    }
     const blob = versionFiles.has(file) ? git(root, ["show", `${tree}:${file}`], { allowFail: true }) : null;
     if (blob && blob.status === 0 && resolveVersionHunks(blob.stdout, base?.slice(1), tag.slice(1), file).remaining === 0) autoResolved.push(file);
     else conflicts.push(file);
@@ -151,7 +157,7 @@ function printStatus(status) {
   }
   console.log(`Commits behind:  ${status.behind}`);
   if (status.autoResolved.length > 0) {
-    console.log(`Version-only conflicts that "sync" settles by itself:\n${status.autoResolved.map((file) => `  ${file}`).join("\n")}`);
+    console.log(`Conflicts that "sync" settles by itself (version lines and fork-owned files):\n${status.autoResolved.map((file) => `  ${file}`).join("\n")}`);
   }
   if (status.conflicts.length === 0) console.log("Predicted conflicts: none. Run: node scripts/upstream-sync.mjs sync");
   else {
@@ -184,6 +190,13 @@ function assertReady(root, { untracked }) {
 
 function unmergedFiles(root) {
   return git(root, ["diff", "--name-only", "--diff-filter=U"]).stdout.split("\n").filter(Boolean);
+}
+
+function settleForkOwnedConflicts(root) {
+  for (const file of unmergedFiles(root).filter((name) => forkOwnedFiles.has(name))) {
+    git(root, ["checkout", "--ours", "--", file]);
+    git(root, ["add", "--", file]);
+  }
 }
 
 function settleVersionConflicts(root, fromCore, toCore) {
@@ -265,11 +278,12 @@ function sync(root, requested) {
     fail(`The merge could not start:\n${(merge.stderr || merge.stdout).trim()}\nYou are on ${branch}. Go back with: git switch ${origin || "-"}`);
   }
 
+  settleForkOwnedConflicts(root);
   settleVersionConflicts(root, base?.slice(1), tag.slice(1));
   const left = unmergedFiles(root);
   if (left.length === 0) {
     git(root, ["commit", "--no-edit", "--cleanup=strip"]);
-    console.log("Only version conflicts were found and they are settled.");
+    console.log("Only version and fork-owned file conflicts were found and they are settled.");
     finish(root);
     return;
   }
