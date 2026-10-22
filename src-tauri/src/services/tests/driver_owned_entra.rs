@@ -4,7 +4,7 @@ use super::{
         azure_cli,
         backend::{CancellationSignal, TransientAuth},
         contracts::ErrorCode,
-        credentials::{Secret, SessionSecretStore},
+        credentials::{Secret, SecretSlot, SecretStore, SessionSecretStore},
         error::{failure, ServiceResult},
         oauth::OAuthProvider,
         runtime::validate_connection_configuration,
@@ -215,4 +215,48 @@ fn sqlserver_plus_설정은_client_id_없이_보안_검증을_통과한다() {
     let secure = super::super::security::validate_settings(&settings);
     // then
     assert!(secure.is_ok());
+}
+
+#[tokio::test]
+async fn auth_mode가_없는_sqlserver_plus_연결은_저장된_비밀번호를_sql_인증으로_전달한다() {
+    // given
+    let mut sql = connection("conn-sql");
+    sql.driver = "sqlserver-plus".into();
+    sql.settings =
+        json!({"host": "db.example.invalid", "database": "main", "username": "sa", "extra": {}});
+    let mut integrated = sql.clone();
+    integrated.id = "conn-integrated".into();
+    integrated.settings["extra"]["integrated_auth"] = json!(" On ");
+    let mut other_driver = sql.clone();
+    other_driver.id = "conn-other".into();
+    other_driver.driver = "sqlserver".into();
+    let persistent = Arc::new(SessionSecretStore::default());
+    for id in ["conn-sql", "conn-integrated", "conn-other"] {
+        persistent
+            .set(
+                id,
+                SecretSlot::DbPassword,
+                Secret::new(b"pw".to_vec()).unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    let manager = AuthManager::new(
+        Arc::new(CountingOAuth::default()),
+        persistent,
+        Arc::new(SessionSecretStore::default()),
+        Arc::new(TestLifecycle(Default::default())),
+    );
+    // when
+    let sql_context = manager.context(&sql, 30_000).await.unwrap();
+    let integrated_context = manager.context(&integrated, 30_000).await.unwrap();
+    let other_context = manager.context(&other_driver, 30_000).await.unwrap();
+    // then
+    assert!(matches!(
+        sql_context,
+        Some(TransientAuth::DbPassword { ref password, ref identity })
+            if password.expose() == "pw" && *identity == sql.auth_revision
+    ));
+    assert!(integrated_context.is_none());
+    assert!(other_context.is_none());
 }

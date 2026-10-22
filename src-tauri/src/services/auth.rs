@@ -24,6 +24,21 @@ pub const REFRESH_MARGIN_MS: u64 = 5 * 60 * 1000;
 const MAX_AUTH_IDENTITIES: usize = 256;
 const MAX_AUTH_JOBS: usize = 64;
 
+/// SQL Server Plus, like its connection form, reads a missing `auth_mode` as
+/// SQL password authentication unless `integrated_auth` is on.
+fn implied_auth_mode(connection: &SavedConnection, settings: &Value) -> Option<&'static str> {
+    if connection.driver != DRIVER_OWNED_ENTRA_DRIVER {
+        return None;
+    }
+    let integrated = settings["integrated_auth"].as_str().is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    });
+    (!integrated).then_some("sql_password")
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct AuthConfig {
     pub connection_id: String,
@@ -287,7 +302,10 @@ impl AuthManager {
                     .settings
                     .get("extra")
                     .unwrap_or(&connection.settings);
-                return match settings["auth_mode"].as_str() {
+                let mode = settings["auth_mode"]
+                    .as_str()
+                    .or_else(|| implied_auth_mode(connection, settings));
+                return match mode {
                     Some("account_key") => {
                         let (key, _) = self
                             .secret(&connection.id, SecretSlot::CosmosAccountKey)
