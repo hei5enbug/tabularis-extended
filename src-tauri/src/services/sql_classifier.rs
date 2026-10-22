@@ -40,7 +40,94 @@ pub fn classify_query_kind(sql: &str) -> &'static str {
             Some(_) => {}
         }
     }
-    agreed.unwrap_or("unknown")
+    match agreed {
+        Some("select") if calls_side_effect_function(sql, &VARIANTS) => "write",
+        Some(kind) => kind,
+        None => "unknown",
+    }
+}
+
+/// Functions that change server, session or sequence state even when called
+/// from a `SELECT`: backend signals, settings, sequences, advisory locks, large
+/// objects, files, replication, notifications and remote SQL.
+const SIDE_EFFECT_FUNCTIONS: &[&str] = &[
+    "PG_CANCEL_BACKEND", "PG_TERMINATE_BACKEND", "PG_RELOAD_CONF", "PG_ROTATE_LOGFILE",
+    "PG_SWITCH_WAL", "PG_SWITCH_XLOG", "PG_CREATE_RESTORE_POINT", "PG_PROMOTE",
+    "PG_WAL_REPLAY_PAUSE", "PG_WAL_REPLAY_RESUME", "PG_BACKUP_START", "PG_BACKUP_STOP",
+    "PG_START_BACKUP", "PG_STOP_BACKUP", "PG_LOG_BACKEND_MEMORY_CONTEXTS", "PG_NOTIFY",
+    "PG_LOGICAL_EMIT_MESSAGE", "PG_IMPORT_SYSTEM_COLLATIONS", "PG_FILE_WRITE", "PG_FILE_RENAME",
+    "PG_FILE_UNLINK", "PG_FILE_SYNC", "PG_CREATE_PHYSICAL_REPLICATION_SLOT",
+    "PG_CREATE_LOGICAL_REPLICATION_SLOT", "PG_DROP_REPLICATION_SLOT",
+    "PG_COPY_PHYSICAL_REPLICATION_SLOT", "PG_COPY_LOGICAL_REPLICATION_SLOT",
+    "PG_REPLICATION_SLOT_ADVANCE", "PG_LOGICAL_SLOT_GET_CHANGES",
+    "PG_LOGICAL_SLOT_GET_BINARY_CHANGES", "SET_CONFIG", "NEXTVAL", "SETVAL", "LO_IMPORT",
+    "LO_EXPORT", "LO_UNLINK", "LO_CREATE", "LO_CREAT", "LO_FROM_BYTEA", "LO_PUT", "LO_TRUNCATE",
+    "LO_TRUNCATE64", "LOWRITE", "GET_LOCK", "RELEASE_LOCK", "RELEASE_ALL_LOCKS",
+];
+
+const SIDE_EFFECT_FUNCTION_PREFIXES: &[&str] = &[
+    "PG_ADVISORY_", "PG_TRY_ADVISORY_", "PG_STAT_RESET", "PG_STAT_STATEMENTS_RESET",
+    "PG_REPLICATION_ORIGIN_", "DBLINK",
+];
+
+/// True when `sql` calls a function from [`SIDE_EFFECT_FUNCTIONS`], also as a
+/// schema-qualified or quoted name, or takes a sequence value with
+/// `NEXT VALUE FOR`. Quoted identifiers keep their name here, and a Unicode
+/// escaped identifier (`U&"…"`) fails closed because its name cannot be read
+/// without decoding it. Every quoting interpretation is checked and any match
+/// counts, so a call hidden by one dialect's quoting rules is still found.
+fn calls_side_effect_function(sql: &str, variants: &[StripOptions]) -> bool {
+    if sql.to_ascii_uppercase().contains("U&\"") {
+        return true;
+    }
+    variants.iter().any(|options| {
+        let kept = strip_with(
+            sql,
+            StripOptions {
+                keep_identifiers: true,
+                ..*options
+            },
+        )
+        .to_ascii_uppercase();
+        has_side_effect_call(&kept) || has_next_value_for(&kept)
+    })
+}
+
+fn has_side_effect_call(upper: &str) -> bool {
+    let bytes = upper.as_bytes();
+    let is_word = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut cursor = 0;
+    while cursor < bytes.len() {
+        if !is_word(bytes[cursor]) {
+            cursor += 1;
+            continue;
+        }
+        let start = cursor;
+        while cursor < bytes.len() && is_word(bytes[cursor]) {
+            cursor += 1;
+        }
+        let token = &upper[start..cursor];
+        let listed = SIDE_EFFECT_FUNCTIONS.contains(&token)
+            || SIDE_EFFECT_FUNCTION_PREFIXES
+                .iter()
+                .any(|prefix| token.starts_with(prefix));
+        if listed && upper[cursor..].trim_start().starts_with('(') {
+            return true;
+        }
+    }
+    false
+}
+
+fn has_next_value_for(upper: &str) -> bool {
+    let mut words = upper
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .filter(|word| !word.is_empty());
+    let mut previous = ["", ""];
+    words.any(|word| {
+        let found = previous == ["NEXT", "VALUE"] && word == "FOR";
+        previous = [previous[1], word];
+        found
+    })
 }
 
 fn classify_stripped(stripped: &str) -> &'static str {
@@ -402,13 +489,25 @@ struct StripOptions {
     brackets: bool,
     /// `$tag$ … $tag$` is a string literal (PostgreSQL).
     dollar_quotes: bool,
+    /// Keep the letters, digits and `_` of quoted identifiers instead of
+    /// blanking them, so a quoted function name stays visible.
+    keep_identifiers: bool,
 }
 impl StripOptions {
     const STANDARD: Self = Self {
         backslash_escapes: false,
         brackets: false,
         dollar_quotes: false,
+        keep_identifiers: false,
     };
+}
+
+fn identifier_byte(byte: u8, options: StripOptions) -> u8 {
+    if options.keep_identifiers && (byte.is_ascii_alphanumeric() || byte == b'_') {
+        byte
+    } else {
+        b' '
+    }
 }
 
 fn strip_impl(sql: &str, backslash_escapes: bool) -> String {
@@ -481,7 +580,7 @@ fn strip_with(sql: &str, options: StripOptions) -> String {
                     i += 1;
                     break;
                 } else {
-                    out.push(b' ');
+                    out.push(identifier_byte(bytes[i], options));
                     i += 1;
                 }
             }
@@ -547,7 +646,7 @@ fn strip_with(sql: &str, options: StripOptions) -> String {
             out.push(b' ');
             i += 1;
             while i < bytes.len() && bytes[i] != b'"' {
-                out.push(b' ');
+                out.push(identifier_byte(bytes[i], options));
                 i += 1;
             }
             if i < bytes.len() {
@@ -561,7 +660,7 @@ fn strip_with(sql: &str, options: StripOptions) -> String {
             out.push(b' ');
             i += 1;
             while i < bytes.len() && bytes[i] != b'`' {
-                out.push(b' ');
+                out.push(identifier_byte(bytes[i], options));
                 i += 1;
             }
             if i < bytes.len() {

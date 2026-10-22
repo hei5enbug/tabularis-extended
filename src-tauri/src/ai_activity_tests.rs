@@ -1038,4 +1038,49 @@ mod tests {
         // then
         assert!(actual.iter().all(|kind| *kind != "select"), "{actual:?}");
     }
+
+    #[test]
+    fn 서버나_세션_상태를_바꾸는_함수를_부르는_select는_쓰기다() {
+        // given
+        let statements = [
+            "SELECT pg_cancel_backend(123)",
+            "SELECT pg_terminate_backend (1)",
+            "SELECT pg_catalog.pg_cancel_backend(pid) FROM pg_stat_activity",
+            "SELECT \"pg_catalog\".\"pg_terminate_backend\"(1)",
+            "SELECT pg_cancel_backend/* c */(1)",
+            "SELECT set_config('search_path', 'x', false)",
+            "SELECT nextval('s')",
+            "SELECT setval('s', 1)",
+            "SELECT pg_advisory_lock(1)",
+            "SELECT pg_try_advisory_xact_lock(1)",
+            "SELECT pg_stat_reset()",
+            "SELECT lo_unlink(1)",
+            "SELECT * FROM dblink_exec('dbname=x', 'DELETE FROM t')",
+            "SELECT GET_LOCK('a', 1)",
+            "SELECT NEXT VALUE FOR dbo.s",
+            "WITH x AS (SELECT 1) SELECT pg_reload_conf() FROM x",
+            "EXPLAIN ANALYZE SELECT pg_cancel_backend(1)",
+            "SELECT U&\"pg\\0063ancel_backend\"(1)",
+        ];
+        // when
+        let actual: Vec<_> = statements.iter().map(|sql| classify_query_kind(sql)).collect();
+        // then
+        assert!(actual.iter().all(|kind| *kind == "write"), "{actual:?}");
+    }
+
+    #[test]
+    fn 부작용_함수_이름이_값이나_컬럼이나_주석에만_있으면_읽기다() {
+        // given
+        let statements = [
+            "SELECT 'pg_cancel_backend(1)'",
+            "SELECT pid AS pg_cancel_backend FROM pg_stat_activity",
+            "SELECT 1 -- pg_terminate_backend(1)",
+            "SELECT nextval_count FROM stats",
+            "SELECT pid, query FROM pg_stat_activity WHERE state <> 'idle'",
+        ];
+        // when
+        let actual: Vec<_> = statements.iter().map(|sql| classify_query_kind(sql)).collect();
+        // then
+        assert!(actual.iter().all(|kind| *kind == "select"), "{actual:?}");
+    }
 }
