@@ -136,11 +136,14 @@ fn rpc_id(raw: &Value) -> ServiceResult<Option<Value>> {
     }
 }
 
+/// MCP lets every request carry a `_meta` object in its params (Claude Code
+/// sends one with each tool call); it is accepted and ignored.
 fn only_keys(value: &Value, keys: &[&str]) -> ServiceResult<()> {
-    if value
-        .as_object()
-        .is_none_or(|object| object.keys().any(|key| !keys.contains(&key.as_str())))
-    {
+    if value.as_object().is_none_or(|object| {
+        object.iter().any(|(key, field)| {
+            !(keys.contains(&key.as_str()) || (key == "_meta" && field.is_object()))
+        })
+    }) {
         return Err(failure(ErrorCode::InvalidArgument));
     }
     Ok(())

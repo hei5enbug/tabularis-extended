@@ -693,6 +693,24 @@ async fn MCP_초기화는_지원버전을_보존하고_알림에는_응답하지
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
+async fn MCP_params의_meta_객체는_무시하고_요청을_처리한다() {
+    // given
+    let h = Harness::new();
+    let frames = vec![
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"progressToken":1}}}),
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"query_execute","arguments":{"connection_id":"conn-a","text":"select 1"},"_meta":{"claudecode/toolUseId":"toolu_1"}}}),
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"query_execute","arguments":{"connection_id":"conn-a","text":"select 1"},"_meta":"not-an-object"}}),
+    ];
+    // when
+    let actual = stream(&h, frames, Mode::Mcp).await;
+    // then
+    let by_id = |id: i64| actual.1.iter().find(|value| value["id"] == id).unwrap();
+    assert!(by_id(1)["result"]["tools"].is_array());
+    assert!(by_id(2).get("result").is_some());
+    assert_eq!(by_id(3)["error"]["data"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(h.driver.calls.load(Ordering::SeqCst), 1);
+}
+#[tokio::test]
 async fn MCP_안전하지_않은_정수_ID는_실행_전에_거부한다() {
     // given
     let h = Harness::new();
