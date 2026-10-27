@@ -128,13 +128,14 @@ impl NativeLegacyMcp {
 impl LegacyMcpBackend for NativeLegacyMcp {
     fn tools(&self) -> Value {
         super::handle_list_tools(&crate::config::AppConfig::default())
+            .map(super::service_route::advertise_timeout)
             .unwrap_or_else(|_| json!({"tools":[]}))
     }
     async fn call(
         &self,
         name: &str,
         arguments: Value,
-        _caller: &CallerContext,
+        caller: &CallerContext,
     ) -> Option<Result<Value, LegacyFailure>> {
         if !matches!(
             name,
@@ -142,10 +143,16 @@ impl LegacyMcpBackend for NativeLegacyMcp {
         ) {
             return None;
         }
-        Some(
-            self.legacy("tools/call", json!({"name":name,"arguments":arguments}))
-                .await,
-        )
+        let call = self.legacy("tools/call", json!({"name":name,"arguments":arguments}));
+        let route = self
+            .core()
+            .ok()
+            .filter(|_| name == "run_query")
+            .map(|core| super::service_route::Route::new(core, caller.clone()));
+        Some(match route {
+            Some(route) => super::service_route::scope(route, call).await,
+            None => call.await,
+        })
     }
     fn client_connected(&self, name: &str) {
         crate::ai_activity::set_client_hint(Some(name.to_string()));

@@ -206,6 +206,62 @@ async fn 구조화된_검증_오류는_전송후에도_not_started와_안전한_
         .contains("SECRET_CANARY"));
 }
 
+fn remote_failure(data: Value) -> NativeFailure {
+    NativeFailure {
+        error: PluginCallError::Remote(crate::plugins::rpc::JsonRpcError {
+            code: -32000,
+            message: "Driver operation failed".into(),
+            data: Some(data),
+        }),
+        attempted: true,
+    }
+}
+
+#[test]
+fn 플러그인이_보고한_database_error는_코드를_유지한_채_문구까지_전달한다() {
+    // given
+    let text =
+        "SQL Server error 241: Conversion failed [statement failure; severity 16; state 1; line 1]";
+    let failure = remote_failure(json!({
+        "code": "DRIVER_EXITED",
+        "message": "SQL Server execution failed",
+        "retryable": false,
+        "outcome": "not_applied",
+        "details": {"database_error": {"engine":"sqlserver","message":text,"errors":[{"number":241,"severity":16,"state":1,"line":1}]}}
+    }));
+
+    // when
+    let actual = native_failure(failure);
+
+    // then
+    assert_eq!(actual.code, ErrorCode::DriverExited);
+    assert_eq!(actual.outcome, Outcome::NotApplied);
+    assert_eq!(actual.message, text);
+    assert_eq!(actual.details["database_error"]["engine"], "sqlserver");
+}
+
+#[test]
+fn database_error가_없는_플러그인_오류는_고정_문구로_가린다() {
+    // given
+    let failure = remote_failure(json!({
+        "code": "DRIVER_EXITED",
+        "message": "SECRET_CANARY_REMOTE",
+        "retryable": false,
+        "outcome": "not_applied",
+        "details": {"secret": "SECRET_CANARY_REMOTE"}
+    }));
+
+    // when
+    let actual = native_failure(failure);
+
+    // then
+    assert_eq!(
+        actual.message,
+        crate::services::error::failure(ErrorCode::DriverExited).message
+    );
+    assert_eq!(actual.details, Value::Null);
+}
+
 async fn transport_failures() -> Vec<ServiceError> {
     let mut failures = vec![];
     for kind in ["eof", "utf8", "malformed", "oversized"] {

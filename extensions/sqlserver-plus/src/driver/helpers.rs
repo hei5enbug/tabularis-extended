@@ -379,22 +379,46 @@ pub fn build_paginated_query(query: &str, page_size: u32, page: u32) -> String {
     let normalized = query.trim().trim_end_matches(';').trim_end();
     let offset = page.saturating_sub(1).saturating_mul(page_size);
     let fetch = page_size.saturating_add(1);
-    let has_order_by = contains_top_level_order_by(normalized);
-    let order_by = if has_order_by {
-        ""
+    let words = top_level_words(&code_mask(normalized));
+    let has_order_by = words_contain_order_by(&words);
+    if has_order_by {
+        return format!("{normalized} OFFSET {offset} ROWS FETCH NEXT {fetch} ROWS ONLY");
+    }
+    // SQL Server rejects `ORDER BY (SELECT NULL)` directly after a set
+    // operator, so the whole statement becomes a derived table.
+    let source = if words_contain_set_operator(&words) {
+        format!("SELECT * FROM ({normalized}) AS [tabularis_page]")
     } else {
-        " ORDER BY (SELECT NULL)"
+        normalized.to_string()
     };
 
-    format!("{normalized}{order_by} OFFSET {offset} ROWS FETCH NEXT {fetch} ROWS ONLY")
+    format!("{source} ORDER BY (SELECT NULL) OFFSET {offset} ROWS FETCH NEXT {fetch} ROWS ONLY")
+}
+
+fn words_contain_set_operator(words: &[String]) -> bool {
+    words
+        .iter()
+        .any(|word| matches!(word.as_str(), "UNION" | "INTERSECT" | "EXCEPT"))
+}
+
+fn words_contain_order_by(words: &[String]) -> bool {
+    words
+        .windows(2)
+        .any(|pair| pair[0] == "ORDER" && pair[1] == "BY")
 }
 
 fn statement_can_be_paginated(statement: &str) -> bool {
     let words = top_level_words(statement);
     statement_operation(&words).is_some_and(|(operation_index, operation)| match operation {
         "SELECT" => {
+            // A set operation behind a CTE cannot be wrapped in a derived
+            // table, and without ORDER BY it cannot take OFFSET directly.
+            let unwrappable_set_operation = words.first().is_some_and(|word| word == "WITH")
+                && words_contain_set_operator(&words)
+                && !words_contain_order_by(&words);
             !select_has_top_level_into(&words, operation_index)
                 && !select_has_top_level_row_limit(&words, operation_index)
+                && !unwrappable_set_operation
         }
         "VALUES" => true,
         _ => false,
@@ -615,13 +639,6 @@ fn code_mask(query: &str) -> String {
         position += 1;
     }
     masked
-}
-
-fn contains_top_level_order_by(query: &str) -> bool {
-    let words = top_level_words(&code_mask(query));
-    words
-        .windows(2)
-        .any(|pair| pair[0] == "ORDER" && pair[1] == "BY")
 }
 
 #[cfg(test)]

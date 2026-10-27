@@ -24,6 +24,7 @@ mod output;
 pub mod preflight;
 pub mod protocol;
 pub mod service_adapter;
+mod service_route;
 use cooldown::{DISABLE_CHECK_COOLDOWN, RELOAD_COOLDOWN};
 use output::{OutputFormatError, ToolOutputFormat};
 use protocol::*;
@@ -505,7 +506,8 @@ async fn handle_request(req: JsonRpcRequest) -> Option<JsonRpcResponse> {
         "initialize" => handle_initialize(req.params),
         "resources/list" => handle_list_resources().await,
         "resources/read" => handle_read_resource(req.params).await,
-        "tools/list" => handle_list_tools(&config::load_config_from_disk()),
+        "tools/list" => handle_list_tools(&config::load_config_from_disk())
+            .map(service_route::advertise_timeout),
         "tools/call" => handle_call_tool(req.params).await,
         _ => Err(JsonRpcError {
             code: -32601,
@@ -1227,10 +1229,9 @@ async fn tool_run_query(
             data: None,
         })?;
 
-    let max_rows = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(100) as u32;
+    let timeout_ms = service_route::timeout_ms(args)?;
+    let requested_limit = args.get("limit").and_then(|v| v.as_u64()).unwrap_or(100);
+    let max_rows = requested_limit as u32;
 
     audit.connection_id = Some(conn_id.to_string());
     audit.query = Some(query.to_string());
@@ -1241,6 +1242,32 @@ async fn tool_run_query(
     let (conn, mut db_params, driver) =
         resolve_db_driver(conn_id, config.active_external_drivers.as_deref()).await?;
     audit.connection_name = Some(conn.name.clone());
+
+    if approval_mode_of(config) != "all" {
+        let request = service_route::Request {
+            connection: &conn.id,
+            query,
+            limit: requested_limit,
+            timeout_ms,
+            args,
+        };
+        match service_route::run(&request).await {
+            Ok(Some(executed)) => {
+                audit.effective_database =
+                    executed.database.or_else(|| effective_database(&db_params));
+                audit.effective_schema = schema.map(str::to_owned);
+                audit.rows = Some(executed.result.rows.len());
+                return tool_result(&executed.result, format);
+            }
+            Ok(None) => {}
+            Err(failed) => {
+                audit.status = failed.status.to_string();
+                audit.error = Some(failed.error.message.clone());
+                return Err(failed.error);
+            }
+        }
+    }
+
     select_database(args, &driver, &mut db_params).await?;
     audit.effective_database = effective_database(&db_params);
     audit.effective_schema = schema.map(str::to_owned);
@@ -1417,14 +1444,21 @@ async fn tool_run_query(
         }
     }
 
-    let result = driver
-        .execute_query(&db_params, &effective_query, Some(max_rows), 1, schema)
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: e,
-            data: None,
-        })?;
+    let execution = driver.execute_query(&db_params, &effective_query, Some(max_rows), 1, schema);
+    let result = match timeout_ms {
+        Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms), execution)
+            .await
+            .map_err(|_| {
+                audit.status = "timeout".to_string();
+                service_route::stopped_waiting(ms)
+            })?,
+        None => execution.await,
+    }
+    .map_err(|e| JsonRpcError {
+        code: -32000,
+        message: e,
+        data: None,
+    })?;
 
     audit.rows = Some(result.rows.len());
 

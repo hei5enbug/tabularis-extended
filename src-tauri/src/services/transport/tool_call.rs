@@ -22,7 +22,10 @@ use serde_json::{json, Map, Value};
 use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 
+mod query_run;
 mod server_calls;
+
+pub(crate) use query_run::{ReadOutcome, ReadQuery};
 
 const POLL_MS: u64 = 25;
 

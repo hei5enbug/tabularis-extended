@@ -87,3 +87,64 @@ async fn call_without_timeout_never_sends_a_cancel() {
         "no cancel expected, got {lines_later:?}"
     );
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn 응답을_기다리다_취소된_호출은_플러그인에_같은_아이디의_취소를_보낸다() {
+    // given
+    let dir = tempfile::tempdir().unwrap();
+    let (process, log) = silent_recording_plugin(dir.path()).await;
+    let process = Arc::new(process);
+    let call = tokio::spawn({
+        let process = process.clone();
+        async move {
+            process
+                .send_request("execute_query", json!({ "query": "SELECT 1" }), None)
+                .await
+        }
+    });
+    wait_for_lines(&log, 1, Duration::from_secs(5)).await;
+    // when
+    call.abort();
+    let lines = wait_for_lines(&log, 2, Duration::from_secs(5)).await;
+    process.shutdown().await;
+    // then
+    assert_eq!(lines.len(), 2, "expected request + cancel, got {lines:?}");
+    let id = lines[0]["id"].as_u64().unwrap();
+    assert_eq!(
+        lines[1],
+        json!({ "jsonrpc": "2.0", "method": "cancel", "params": { "id": id } })
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn 시간제한이_있는_호출도_중단되면_취소를_한번만_보낸다() {
+    // given
+    let dir = tempfile::tempdir().unwrap();
+    let (process, log) = silent_recording_plugin(dir.path()).await;
+    let process = Arc::new(process);
+    let call = tokio::spawn({
+        let process = process.clone();
+        async move {
+            process
+                .send_request(
+                    "execute_query",
+                    json!({ "query": "SELECT 1" }),
+                    Some(Duration::from_secs(60)),
+                )
+                .await
+        }
+    });
+    wait_for_lines(&log, 1, Duration::from_secs(5)).await;
+    // when
+    call.abort();
+    let lines = wait_for_lines(&log, 3, Duration::from_millis(500)).await;
+    process.shutdown().await;
+    // then
+    let cancels = lines
+        .iter()
+        .filter(|line| line["method"] == "cancel")
+        .count();
+    assert_eq!(cancels, 1, "got {lines:?}");
+}

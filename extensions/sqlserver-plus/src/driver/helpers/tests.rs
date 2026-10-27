@@ -538,3 +538,121 @@ fn paginated_query_ignores_order_words_in_literals_and_comments() {
         );
     }
 }
+
+#[test]
+fn 집합_연산자가_있는_순서_없는_쿼리는_파생_테이블로_감싸서_페이지네이션한다() {
+    // given
+    let query = "SELECT [id] FROM [a] UNION ALL SELECT [id] FROM [b]";
+
+    // when
+    let paginated = build_paginated_query(query, 25, 2);
+
+    // then
+    assert_eq!(
+        paginated,
+        "SELECT * FROM (SELECT [id] FROM [a] UNION ALL SELECT [id] FROM [b]) AS [tabularis_page] \
+         ORDER BY (SELECT NULL) OFFSET 25 ROWS FETCH NEXT 26 ROWS ONLY"
+    );
+}
+
+#[test]
+fn union_intersect_except_쿼리는_모두_파생_테이블로_감싼다() {
+    for operator in ["UNION", "intersect", "Except"] {
+        // given
+        let query = format!("SELECT [id] FROM [a] {operator} SELECT [id] FROM [b]");
+
+        // when
+        let paginated = build_paginated_query(&query, 10, 1);
+
+        // then
+        assert_eq!(
+            paginated,
+            format!(
+                "SELECT * FROM ({query}) AS [tabularis_page] \
+                 ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 11 ROWS ONLY"
+            )
+        );
+    }
+}
+
+#[test]
+fn 후행_세미콜론과_공백은_파생_테이블_안에_넣지_않는다() {
+    // given
+    let query = "  SELECT 1 UNION SELECT 2 ;\n";
+
+    // when
+    let paginated = build_paginated_query(query, 5, 1);
+
+    // then
+    assert_eq!(
+        paginated,
+        "SELECT * FROM (SELECT 1 UNION SELECT 2) AS [tabularis_page] \
+         ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 6 ROWS ONLY"
+    );
+}
+
+#[test]
+fn 집합_연산자가_괄호_문자열_주석_대괄호_안에만_있으면_감싸지_않는다() {
+    for query in [
+        "SELECT * FROM (SELECT 1 AS [x] UNION SELECT 2) AS [t]",
+        "SELECT 'a UNION b' AS [label]",
+        "SELECT 1 -- UNION SELECT 2",
+        "SELECT 1 /* EXCEPT SELECT 2 */",
+        "SELECT [UNION] FROM [t]",
+    ] {
+        // given
+        let expected =
+            format!("{query} ORDER BY (SELECT NULL) OFFSET 0 ROWS FETCH NEXT 11 ROWS ONLY");
+
+        // when
+        let paginated = build_paginated_query(query, 10, 1);
+
+        // then
+        assert_eq!(paginated, expected);
+    }
+}
+
+#[test]
+fn 최상위_order_by가_있는_집합_연산_쿼리는_감싸지_않고_offset만_붙인다() {
+    // given
+    let query = "SELECT [id] FROM [a] UNION SELECT [id] FROM [b] ORDER BY 1";
+
+    // when
+    let paginated = build_paginated_query(query, 10, 1);
+
+    // then
+    assert_eq!(
+        paginated,
+        "SELECT [id] FROM [a] UNION SELECT [id] FROM [b] ORDER BY 1 OFFSET 0 ROWS FETCH NEXT 11 ROWS ONLY"
+    );
+}
+
+#[test]
+fn cte로_시작하는_집합_연산_쿼리는_페이지네이션_대상이_아니다() {
+    // given
+    let without_order = "WITH [c] AS (SELECT 1 AS [x]) SELECT [x] FROM [c] UNION SELECT 2";
+    let with_order = "WITH [c] AS (SELECT 1 AS [x]) SELECT [x] FROM [c] UNION SELECT 2 ORDER BY 1";
+    let cte_union_only_inside = "WITH [c] AS (SELECT 1 AS [x] UNION SELECT 2) SELECT [x] FROM [c]";
+
+    // when
+    let unordered = query_can_be_paginated(without_order);
+    let ordered = query_can_be_paginated(with_order);
+    let nested = query_can_be_paginated(cte_union_only_inside);
+
+    // then
+    assert!(!unordered);
+    assert!(ordered);
+    assert!(nested);
+}
+
+#[test]
+fn cte_없는_집합_연산_쿼리는_페이지네이션_대상이다() {
+    // given
+    let query = "SELECT 1 UNION ALL SELECT 2;";
+
+    // when
+    let paginatable = query_can_be_paginated(query);
+
+    // then
+    assert!(paginatable);
+}

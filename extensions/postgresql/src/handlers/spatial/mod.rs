@@ -1,6 +1,7 @@
 pub mod catalog;
 pub mod catalog_objects;
 pub mod connection;
+pub mod database_error;
 pub mod ewkb;
 pub mod exact;
 pub mod explain;
@@ -236,7 +237,7 @@ async fn run(
             error.outcome = "unknown".into();
         }
         if context.session_handle.is_some() {
-            error.details = json!({"session_closed":true});
+            error.close_session();
         }
         return Err(error);
     }
@@ -246,7 +247,7 @@ async fn run(
             "Request was cancelled; transaction rollback was confirmed",
         );
         if context.session_handle.is_some() {
-            error.details = json!({"session_closed":true});
+            error.close_session();
         }
         return Err(error);
     }
@@ -255,7 +256,7 @@ async fn run(
             error.code = "DEADLINE_EXCEEDED".into();
         }
         if context.session_handle.is_some() {
-            error.details = json!({"session_closed":true});
+            error.close_session();
         }
         error
     })
@@ -285,8 +286,8 @@ impl SpatialError {
     pub fn unsupported(message: &str) -> Self {
         Self::new("UNSUPPORTED_TYPE", message)
     }
-    pub fn database(error: tokio_postgres::Error) -> Self {
-        let code = match error.code().map(|c| c.code()) {
+    pub fn database(source: tokio_postgres::Error) -> Self {
+        let code = match source.code().map(|c| c.code()) {
             Some("57014") => "CANCELLED",
             Some("25006") => "WRITE_NOT_ALLOWED",
             Some("42501") => "PERMISSION_DENIED",
@@ -301,7 +302,19 @@ impl SpatialError {
             "INVALID_GEOMETRY" => "PostGIS rejected the geometry or coordinate transformation",
             _ => "Database operation failed",
         };
-        Self::new(code, message)
+        let mut error = Self::new(code, message);
+        if let Some(database_error) = database_error::details(&source) {
+            error.details = json!({"database_error": database_error});
+        }
+        error
+    }
+    pub fn close_session(&mut self) {
+        match &mut self.details {
+            Value::Object(details) => {
+                details.insert("session_closed".into(), json!(true));
+            }
+            details => *details = json!({"session_closed":true}),
+        }
     }
     pub fn response(&self, id: Value) -> Value {
         json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000,

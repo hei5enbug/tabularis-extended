@@ -531,6 +531,182 @@ fn 안전한_버전_필드도_음수와_문자열과_js_정수_상한을_넘으�
     assert_eq!(actual.details, Value::Null);
 }
 
+fn driver_exited(details: Value) -> ServiceError {
+    let mut error = super::super::error::failure(ErrorCode::DriverExited);
+    error.details = details;
+    error
+}
+
+#[test]
+fn 올바른_sqlserver_database_error는_보존하고_그_문구를_메시지로_쓴다() {
+    // given
+    let text =
+        "SQL Server error 241: Conversion failed [statement failure; severity 16; state 1; line 1]";
+    let error = driver_exited(json!({
+        "session_closed": true,
+        "database_error": {
+            "engine": "sqlserver",
+            "message": text,
+            "errors": [{"number":241,"severity":16,"state":1,"line":1}],
+            "server_name": "private-host"
+        },
+        "access_token": "synthetic-private"
+    }));
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    assert_eq!(actual.code, ErrorCode::DriverExited);
+    assert_eq!(actual.message, text);
+    assert_eq!(
+        actual.details,
+        json!({
+            "session_closed": true,
+            "database_error": {
+                "engine": "sqlserver",
+                "message": text,
+                "errors": [{"number":241,"severity":16,"state":1,"line":1}]
+            }
+        })
+    );
+}
+
+#[test]
+fn 올바른_postgresql_database_error는_알려진_필드만_보존한다() {
+    // given
+    let error = driver_exited(json!({
+        "database_error": {
+            "engine": "postgresql",
+            "message": "ERROR: division by zero",
+            "sqlstate": "22012",
+            "detail": "row 1",
+            "hint": "check the divisor",
+            "position": 8,
+            "errors": [{"number":1}],
+            "file": "int.c"
+        }
+    }));
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    assert_eq!(actual.message, "ERROR: division by zero");
+    assert_eq!(
+        actual.details,
+        json!({
+            "database_error": {
+                "engine": "postgresql",
+                "message": "ERROR: division by zero",
+                "sqlstate": "22012",
+                "detail": "row 1",
+                "hint": "check the divisor",
+                "position": 8
+            }
+        })
+    );
+}
+
+#[test]
+fn database_error의_문구는_제어_문자를_지우고_사천_바이트로_글자_경계에서_자른다() {
+    // given
+    let long = format!("a\u{0}b\u{1b}[31m\tc\nd{}", "가".repeat(2000));
+    let error = driver_exited(json!({"database_error":{"engine":"postgresql","message":long}}));
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    assert!(actual.message.starts_with("ab[31m\tc\nd가"));
+    assert!(!actual.message.contains('\u{0}'));
+    assert!(!actual.message.contains('\u{1b}'));
+    assert!(actual.message.len() <= 4000);
+    assert!(actual.message.len() > 3990);
+}
+
+#[test]
+fn sqlserver_database_error의_구조화_오류는_여덟_개와_정수_필드만_보존한다() {
+    // given
+    let errors: Vec<Value> = (0..10)
+        .map(|number| json!({"number":number,"severity":"16","state":-1,"line":2.5}))
+        .collect();
+    let mut with_integer = errors.clone();
+    with_integer[0] = json!({"number":50000,"severity":16,"state":1});
+    let error = driver_exited(
+        json!({"database_error":{"engine":"sqlserver","message":"failed","errors":with_integer}}),
+    );
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    let kept = actual.details["database_error"]["errors"]
+        .as_array()
+        .unwrap();
+    assert_eq!(kept.len(), 8);
+    assert_eq!(kept[0], json!({"number":50000,"severity":16,"state":1}));
+    assert!(kept[1..]
+        .iter()
+        .all(|error| error.as_object().unwrap().len() == 1));
+}
+
+#[test]
+fn 잘못된_database_error는_통째로_버리고_기존_고정_문구를_쓴다() {
+    for database_error in [
+        json!("failed"),
+        json!([]),
+        json!({"engine":"mysql","message":"failed"}),
+        json!({"engine":"sqlserver"}),
+        json!({"engine":"sqlserver","message":7}),
+        json!({"engine":"postgresql","message":"  \u{0}\n"}),
+    ] {
+        // given
+        let error = driver_exited(json!({"database_error": database_error.clone()}));
+
+        // when
+        let actual = super::super::error::redact_error(error);
+
+        // then
+        assert_eq!(actual.details, Value::Null, "{database_error}");
+        assert_eq!(
+            actual.message,
+            super::super::error::failure(ErrorCode::DriverExited).message
+        );
+    }
+}
+
+#[test]
+fn database_error가_없는_오류는_계속_고정_문구로_가리고_알_수_없는_details를_버린다() {
+    // given
+    let mut error = driver_exited(json!({"query":"SELECT secret","password":"synthetic-private"}));
+    error.message = "synthetic-private-password".into();
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    assert_eq!(actual.details, Value::Null);
+    assert_eq!(
+        actual.message,
+        super::super::error::failure(ErrorCode::DriverExited).message
+    );
+}
+
+#[test]
+fn 이미_가려진_database_error를_다시_가려도_같다() {
+    // given
+    let once = super::super::error::redact_error(driver_exited(
+        json!({"database_error":{"engine":"sqlserver","message":"failed","errors":[{"number":1}]}}),
+    ));
+
+    // when
+    let twice = super::super::error::redact_error(once.clone());
+
+    // then
+    assert_eq!(twice, once);
+}
+
 struct PolicyAccess;
 #[async_trait::async_trait]
 impl super::super::policy::AccessBackend for PolicyAccess {

@@ -3,6 +3,7 @@
 use deadpool::managed::{PoolError, TimeoutType};
 use mssql_tds::error::{Error as TdsError, SqlErrorInfo};
 use mssql_tiberius_bridge::Error as BridgeError;
+use serde_json::{json, Value};
 
 use crate::models::ConnectionParams;
 
@@ -124,6 +125,58 @@ pub fn bridge_error_requires_discard(error: &BridgeError) -> bool {
     }
 }
 
+/// Login and connection failures that never come from running a statement.
+const NON_STATEMENT_ERRORS: [u32; 8] = [18456, 18452, 4060, 40613, 40615, 40532, 40197, 40501];
+const MAX_DATABASE_MESSAGE_BYTES: usize = 4000;
+const MAX_DATABASE_ERRORS: usize = 8;
+
+/// The error text the server raised while executing a statement, worded as
+/// the legacy path words it, with the structured fields of each error.
+/// `None` for anything else, such as a login or transport failure.
+pub fn statement_error_details(error: &TdsError) -> Option<Value> {
+    let TdsError::SqlServerError { errors } = error else {
+        return None;
+    };
+    if errors.is_empty()
+        || errors
+            .iter()
+            .any(|error| NON_STATEMENT_ERRORS.contains(&error.number))
+    {
+        return None;
+    }
+    let structured: Vec<Value> = errors
+        .iter()
+        .take(MAX_DATABASE_ERRORS)
+        .map(|error| {
+            let mut fields = json!({
+                "number": error.number,
+                "severity": error.class,
+                "state": error.state,
+            });
+            if let Some(line) = error.line_number.filter(|line| *line > 0) {
+                fields["line"] = json!(line);
+            }
+            fields
+        })
+        .collect();
+    Some(json!({
+        "engine": "sqlserver",
+        "message": bounded(format_server_errors(errors), MAX_DATABASE_MESSAGE_BYTES),
+        "errors": structured,
+    }))
+}
+
+fn bounded(mut text: String, max_bytes: usize) -> String {
+    if text.len() > max_bytes {
+        let mut end = max_bytes;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    text
+}
+
 fn format_server_errors(errors: &[SqlErrorInfo]) -> String {
     if errors.is_empty() {
         return "SQL Server error: no server error details were returned".to_string();
@@ -228,6 +281,99 @@ mod tests {
                 "error {number}"
             );
         }
+    }
+
+    fn statement_error(number: u32, message: &str, line: Option<i32>) -> SqlErrorInfo {
+        SqlErrorInfo {
+            message: message.into(),
+            state: 1,
+            class: 16,
+            number,
+            server_name: None,
+            proc_name: None,
+            line_number: line,
+        }
+    }
+
+    #[test]
+    fn 구문_오류는_레거시와_같은_문구와_구조화_필드를_담는다() {
+        // given
+        let errors = vec![
+            statement_error(241, " Conversion failed. ", Some(1)),
+            statement_error(8114, "Second failure", None),
+        ];
+        let error = TdsError::SqlServerError {
+            errors: errors.clone(),
+        };
+
+        // when
+        let actual = statement_error_details(&error).unwrap();
+
+        // then
+        assert_eq!(actual["message"], format_tds_error(&error, None).as_str());
+        assert_eq!(
+            actual["message"],
+            "SQL Server error 241: Conversion failed. [statement failure; severity 16; state 1; line 1]; SQL Server error 8114: Second failure [statement failure; severity 16; state 1]"
+        );
+        assert_eq!(actual["engine"], "sqlserver");
+        assert_eq!(
+            actual["errors"],
+            json!([
+                {"number":241,"severity":16,"state":1,"line":1},
+                {"number":8114,"severity":16,"state":1}
+            ])
+        );
+    }
+
+    #[test]
+    fn 로그인과_연결_오류_번호는_구문_오류로_싣지_않는다() {
+        for number in NON_STATEMENT_ERRORS {
+            // given
+            let error = TdsError::SqlServerError {
+                errors: vec![statement_error(number, "refused", None)],
+            };
+
+            // when
+            let actual = statement_error_details(&error);
+
+            // then
+            assert!(actual.is_none(), "error {number}");
+        }
+    }
+
+    #[test]
+    fn 서버_오류가_아닌_실패는_구문_오류로_싣지_않는다() {
+        // given
+        let errors = [
+            TdsError::ConnectionError("down".into()),
+            TdsError::CertificateMismatch,
+            TdsError::SqlServerError { errors: vec![] },
+        ];
+
+        // when
+        let actual: Vec<_> = errors.iter().map(statement_error_details).collect();
+
+        // then
+        assert!(actual.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn 구조화_오류는_여덟_개까지만_싣고_문구는_사천_바이트로_글자_경계에서_자른다() {
+        // given
+        let errors = (0..10)
+            .map(|index| statement_error(50000 + index, &"가".repeat(400), Some(1)))
+            .collect();
+        let error = TdsError::SqlServerError { errors };
+
+        // when
+        let actual = statement_error_details(&error).unwrap();
+
+        // then
+        let message = actual["message"].as_str().unwrap();
+        assert_eq!(actual["errors"].as_array().unwrap().len(), 8);
+        assert!(message.len() <= 4000);
+        assert!(message.len() > 3996);
+        assert!(message.starts_with("SQL Server error 50000: 가"));
     }
 
     #[test]

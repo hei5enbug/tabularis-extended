@@ -425,7 +425,7 @@ pub async fn execute(
                 "Query result exceeded its limit; the full transaction was rolled back",
             );
             if reserved {
-                error.details = json!({"session_closed":true});
+                error.close_session();
             }
             return Err(error);
         }

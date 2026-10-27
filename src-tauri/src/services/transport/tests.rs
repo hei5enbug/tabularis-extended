@@ -198,7 +198,11 @@ async fn 모든_도구는_반환값과_쓰기_여부를_밝히는_실제_설명�
     for tool in &actual {
         let description = tool["description"].as_str().unwrap();
         assert!(description.len() > 30, "{}", tool["name"]);
-        assert!(!description.starts_with("Common service"), "{}", tool["name"]);
+        assert!(
+            !description.starts_with("Common service"),
+            "{}",
+            tool["name"]
+        );
         assert!(description.ends_with('.'), "{}", tool["name"]);
     }
     let write_tools: Vec<_> = actual
@@ -1278,7 +1282,10 @@ fn derived_fixture_parity(h: &Harness) -> (Vec<String>, usize, usize) {
                 flat.insert(key.into(), value[key].clone());
             }
         }
-        if let Some(deadline) = value.get("deadline_ms").filter(|deadline| !deadline.is_null()) {
+        if let Some(deadline) = value
+            .get("deadline_ms")
+            .filter(|deadline| !deadline.is_null())
+        {
             flat.insert("deadline_ms".into(), deadline.clone());
         }
         let canonical = h.transport.validator.validate_request(value).is_ok();
@@ -1356,13 +1363,48 @@ async fn resources_list는_주입된_기존_연결과_스키마_목록을_전달
 fn 미리보기_문장은_방언마다_식별자를_인용하고_한도를_문법에_맞게_넣는다() {
     // given
     let cases = [
-        (SqlFlavor::Postgres, Some("public"), "orders", "SELECT * FROM \"public\".\"orders\" LIMIT 3"),
-        (SqlFlavor::Mysql, None, "orders", "SELECT * FROM `orders` LIMIT 3"),
-        (SqlFlavor::Sqlite, None, "orders", "SELECT * FROM \"orders\" LIMIT 3"),
-        (SqlFlavor::Mssql, Some("dbo"), "orders", "SELECT TOP (3) * FROM [dbo].[orders]"),
-        (SqlFlavor::Postgres, None, "a\"b", "SELECT * FROM \"a\"\"b\" LIMIT 3"),
-        (SqlFlavor::Mysql, None, "a`b", "SELECT * FROM `a``b` LIMIT 3"),
-        (SqlFlavor::Mssql, None, "a]b", "SELECT TOP (3) * FROM [a]]b]"),
+        (
+            SqlFlavor::Postgres,
+            Some("public"),
+            "orders",
+            "SELECT * FROM \"public\".\"orders\" LIMIT 3",
+        ),
+        (
+            SqlFlavor::Mysql,
+            None,
+            "orders",
+            "SELECT * FROM `orders` LIMIT 3",
+        ),
+        (
+            SqlFlavor::Sqlite,
+            None,
+            "orders",
+            "SELECT * FROM \"orders\" LIMIT 3",
+        ),
+        (
+            SqlFlavor::Mssql,
+            Some("dbo"),
+            "orders",
+            "SELECT TOP (3) * FROM [dbo].[orders]",
+        ),
+        (
+            SqlFlavor::Postgres,
+            None,
+            "a\"b",
+            "SELECT * FROM \"a\"\"b\" LIMIT 3",
+        ),
+        (
+            SqlFlavor::Mysql,
+            None,
+            "a`b",
+            "SELECT * FROM `a``b` LIMIT 3",
+        ),
+        (
+            SqlFlavor::Mssql,
+            None,
+            "a]b",
+            "SELECT TOP (3) * FROM [a]]b]",
+        ),
     ];
     // when
     let actual: Vec<String> = cases
@@ -1374,7 +1416,10 @@ fn 미리보기_문장은_방언마다_식별자를_인용하고_한도를_문�
     // then
     assert_eq!(
         actual,
-        cases.iter().map(|case| case.3.to_owned()).collect::<Vec<_>>()
+        cases
+            .iter()
+            .map(|case| case.3.to_owned())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -1428,4 +1473,218 @@ fn 제어_도구는_결과와_작업을_다루는_도구만이고_쿼리_실행�
     let actual = names.map(tool_catalog::is_control_tool);
     // then
     assert_eq!(actual, [true, true, true, true, true, false, false, false]);
+}
+
+struct SlowLegacy {
+    delay: Duration,
+    finished: Arc<std::sync::atomic::AtomicUsize>,
+}
+#[async_trait]
+impl LegacyMcpBackend for SlowLegacy {
+    fn tools(&self) -> Value {
+        json!({"tools":[{"name":"slow_tool"}]})
+    }
+    async fn call(
+        &self,
+        name: &str,
+        _arguments: Value,
+        _caller: &CallerContext,
+    ) -> Option<Result<Value, LegacyFailure>> {
+        if name != "slow_tool" {
+            return None;
+        }
+        tokio::time::sleep(self.delay).await;
+        self.finished.fetch_add(1, Ordering::SeqCst);
+        Some(Ok(json!({"content":[{"type":"text","text":"done"}]})))
+    }
+    async fn read(&self, _uri: &str, _caller: &CallerContext) -> Option<Value> {
+        None
+    }
+}
+
+/// Reports the first write of every frame as not ready, so a write races the
+/// deadline timer instead of finishing on its first poll.
+#[derive(Clone, Default)]
+struct StallingOutput {
+    inner: Output,
+    stalled: Arc<AtomicBool>,
+}
+impl tokio::io::AsyncWrite for StallingOutput {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bytes: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        if !self.stalled.swap(true, Ordering::SeqCst) {
+            cx.waker().wake_by_ref();
+            return std::task::Poll::Pending;
+        }
+        self.stalled.store(false, Ordering::SeqCst);
+        let inner = self.inner.clone();
+        std::pin::Pin::new(&mut { inner }).poll_write(cx, bytes)
+    }
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+fn written_ids(output: &Output) -> Vec<Value> {
+    output
+        .0
+        .lock()
+        .unwrap()
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<Value>(line).unwrap()["id"].clone())
+        .collect()
+}
+
+async fn send(client: &mut tokio::io::DuplexStream, frame: Value) {
+    use tokio::io::AsyncWriteExt;
+    client
+        .write_all(format!("{frame}\n").as_bytes())
+        .await
+        .unwrap();
+}
+
+async fn until_written(output: &Output, count: usize) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while written_ids(output).len() < count {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the frames were never written");
+}
+
+fn open_stream(
+    h: &Harness,
+    output: impl tokio::io::AsyncWrite + Unpin + Send + 'static,
+) -> (
+    tokio::io::DuplexStream,
+    tokio::task::JoinHandle<ServiceResult<i32>>,
+) {
+    let (client, server) = tokio::io::duplex(1 << 16);
+    let transport = h.transport.clone();
+    let task = tokio::spawn(async move {
+        transport
+            .run_stdio(
+                tokio::io::BufReader::new(server),
+                output,
+                support::caller(),
+                Mode::Mcp,
+                false,
+                Default::default(),
+            )
+            .await
+    });
+    (client, task)
+}
+
+#[tokio::test]
+async fn 요청_기한이_지난_뒤에_끝난_응답도_쓰고_같은_스트림의_다음_요청에_답한다() {
+    // given
+    let h = Harness::new();
+    let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    h.transport
+        .set_legacy(Arc::new(SlowLegacy {
+            delay: Duration::from_millis(2500),
+            finished: finished.clone(),
+        }))
+        .unwrap();
+    let output = StallingOutput::default();
+    let observed = output.inner.clone();
+    let (mut client, task) = open_stream(&h, output);
+    send(
+        &mut client,
+        json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow_tool","arguments":{"deadline_ms":1,"wait_ms":0}}}),
+    )
+    .await;
+
+    // when
+    until_written(&observed, 1).await;
+    send(&mut client, json!({"jsonrpc":"2.0","id":2,"method":"ping"})).await;
+    until_written(&observed, 2).await;
+    drop(client);
+    let code = task.await.unwrap().unwrap();
+
+    // then
+    assert_eq!(finished.load(Ordering::SeqCst), 1);
+    assert_eq!(written_ids(&observed), vec![json!(1), json!(2)]);
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn 취소_알림을_받은_요청은_중단하고_응답을_쓰지_않으며_다른_요청은_계속_처리한다() {
+    // given
+    let h = Harness::new();
+    let finished = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    h.transport
+        .set_legacy(Arc::new(SlowLegacy {
+            delay: Duration::from_secs(1),
+            finished: finished.clone(),
+        }))
+        .unwrap();
+    let output = Output::default();
+    let (mut client, task) = open_stream(&h, output.clone());
+    let call = |id: Value| json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"slow_tool","arguments":{"deadline_ms":1,"wait_ms":0}}});
+    send(&mut client, call(json!(1))).await;
+    send(&mut client, call(json!("abc"))).await;
+    send(&mut client, call(json!(3))).await;
+
+    // when
+    send(
+        &mut client,
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1,"reason":"user","_meta":{}}}),
+    )
+    .await;
+    send(
+        &mut client,
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"abc"}}),
+    )
+    .await;
+    send(
+        &mut client,
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"unknown"}}),
+    )
+    .await;
+    send(&mut client, json!({"jsonrpc":"2.0","id":4,"method":"ping"})).await;
+    until_written(&output, 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    drop(client);
+    let code = task.await.unwrap().unwrap();
+
+    // then
+    let mut ids = written_ids(&output);
+    ids.sort_by_key(Value::to_string);
+    assert_eq!(ids, vec![json!(3), json!(4)]);
+    assert_eq!(finished.load(Ordering::SeqCst), 1);
+    assert_eq!(code, 0);
+}
+
+#[tokio::test]
+async fn 서비스_오류_응답의_메시지는_코드와_사유를_담고_data는_그대로_둔다() {
+    // given
+    let h = Harness::new();
+    let frames = vec![json!({"jsonrpc":"2.0","id":1,"method":"unknown/method"})];
+
+    // when
+    let actual = stream(&h, frames, Mode::Mcp).await;
+
+    // then
+    let error = &actual.1[0]["error"];
+    assert_eq!(
+        error["message"],
+        "Service request failed: UNSUPPORTED_OPERATION: The connection does not support this operation."
+    );
+    assert_eq!(error["data"]["code"], "UNSUPPORTED_OPERATION");
 }

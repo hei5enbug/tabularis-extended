@@ -29,6 +29,7 @@ pub use super::policy::mcp_forbidden;
 pub use mcp::{ArtifactResource, LegacyFailure, LegacyMcpBackend, ResourceRead};
 pub use request::{error_exit_code, exit_code, MAX_FRAME_BYTES};
 pub use stdio::{legacy_error_frame, Mode};
+pub(crate) use tool_call::{ReadOutcome, ReadQuery};
 
 #[async_trait]
 pub trait TransportArtifacts: Send + Sync {

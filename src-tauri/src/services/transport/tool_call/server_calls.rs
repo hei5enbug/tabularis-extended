@@ -2,6 +2,7 @@
 //! connection's dialect and submitted as a `query.execute`, so the write
 //! policy, read-only mode, approval and revision checks see an ordinary query.
 
+use super::super::super::error::unsupported_server_tool;
 use super::super::server_tools::{
     self, DEFAULT_ACTIVITY_LIMIT, MAX_ACTIVITY_LIMIT, MAX_PROCESS_ID,
 };
@@ -25,6 +26,12 @@ fn process_id(arguments: &Map<String, Value>) -> ServiceResult<u32> {
         .ok_or_else(|| failure(ErrorCode::InvalidArgument))
 }
 
+struct ServerStatement {
+    tool: &'static str,
+    page_size: u64,
+    write: bool,
+}
+
 impl ServiceTransport {
     pub(super) async fn server_activity(
         self: &Arc<Self>,
@@ -35,9 +42,17 @@ impl ServiceTransport {
         let include_idle = flag(&arguments, "include_idle")?.unwrap_or(false);
         let limit =
             bounded(&arguments, "limit", 1, MAX_ACTIVITY_LIMIT)?.unwrap_or(DEFAULT_ACTIVITY_LIMIT);
-        self.run_server_statement(arguments, caller, signal, limit, false, |flavor| {
-            server_tools::activity_sql(flavor, include_idle, limit)
-        })
+        self.run_server_statement(
+            ServerStatement {
+                tool: "server_activity",
+                page_size: limit,
+                write: false,
+            },
+            arguments,
+            caller,
+            signal,
+            |flavor| server_tools::activity_sql(flavor, include_idle, limit),
+        )
         .await
     }
 
@@ -49,9 +64,17 @@ impl ServiceTransport {
     ) -> ServiceResult<Value> {
         let process = process_id(&arguments)?;
         let write = flag(&arguments, "write")?.unwrap_or(false);
-        self.run_server_statement(arguments, caller, signal, 1, write, |flavor| {
-            server_tools::cancel_sql(flavor, process)
-        })
+        self.run_server_statement(
+            ServerStatement {
+                tool: "server_cancel",
+                page_size: 1,
+                write,
+            },
+            arguments,
+            caller,
+            signal,
+            |flavor| server_tools::cancel_sql(flavor, process),
+        )
         .await
     }
 
@@ -59,11 +82,14 @@ impl ServiceTransport {
     /// the runtime refuses it as an unproven read.
     async fn run_server_statement(
         self: &Arc<Self>,
+        ServerStatement {
+            tool,
+            page_size,
+            write,
+        }: ServerStatement,
         arguments: Map<String, Value>,
         caller: CallerContext,
         signal: Option<CancellationSignal>,
-        page_size: u64,
-        write: bool,
         statement: impl FnOnce(SqlFlavor) -> ServiceResult<String>,
     ) -> ServiceResult<Value> {
         let connection_id = text(&arguments, "connection_id")?
@@ -74,10 +100,17 @@ impl ServiceTransport {
         let deadline = bounded(&arguments, "deadline_ms", 1, 120_000)?.unwrap_or(30_000);
         let connection = self.runtime.connections.get(&connection_id).await?;
         self.runtime.policy.permission(&connection, &caller).await?;
-        let traits = self.traits(&connection).await?;
+        let unsupported = |error: ServiceError| {
+            if error.code == ErrorCode::CapabilityUnavailable {
+                unsupported_server_tool(tool, &connection.driver)
+            } else {
+                error
+            }
+        };
+        let traits = self.traits(&connection).await.map_err(unsupported)?;
         let mut input = json!({
             "language":"sql",
-            "text":statement(traits.flavor)?,
+            "text":statement(traits.flavor).map_err(unsupported)?,
             "parameters":[],
             "page_size":page_size,
         });

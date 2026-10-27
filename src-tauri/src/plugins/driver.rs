@@ -140,6 +140,36 @@ enum PluginCommand {
     DropNative(u64),
 }
 
+/// Sends the plugin a cancel for a request whose caller stopped waiting
+/// before any response arrived, e.g. because the calling task was aborted.
+struct CancelOnAbandon {
+    sender: mpsc::Sender<PluginCommand>,
+    id: u64,
+    armed: bool,
+}
+impl CancelOnAbandon {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+impl Drop for CancelOnAbandon {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        if let Err(mpsc::error::TrySendError::Full(command)) =
+            self.sender.try_send(PluginCommand::Cancel(self.id))
+        {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let sender = self.sender.clone();
+                runtime.spawn(async move {
+                    let _ = sender.send(command).await;
+                });
+            }
+        }
+    }
+}
+
 struct NativeDispatch {
     attempted: AtomicBool,
     abandoned: AtomicBool,
@@ -690,21 +720,35 @@ impl PluginProcess {
         };
 
         let (tx, rx) = oneshot::channel();
+        let mut abandoned = CancelOnAbandon {
+            sender: self.sender.clone(),
+            id,
+            armed: true,
+        };
         self.sender
             .send(PluginCommand::Call(req, tx))
             .await
             .map_err(|_| "Plugin process channel closed".to_string())?;
 
         let Some(timeout) = timeout else {
-            return rx
+            let result = rx
                 .await
                 .unwrap_or_else(|_| Err("Plugin process did not respond".to_string().into()));
+            abandoned.disarm();
+            return result;
         };
 
         match tokio::time::timeout(timeout, rx).await {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("Plugin process did not respond".to_string().into()),
+            Ok(Ok(result)) => {
+                abandoned.disarm();
+                result
+            }
+            Ok(Err(_)) => {
+                abandoned.disarm();
+                Err("Plugin process did not respond".to_string().into())
+            }
             Err(_) => {
+                abandoned.disarm();
                 // Tell the management task to drop the now-orphaned pending
                 // entry so it does not leak one slot per timeout.
                 let _ = self.sender.send(PluginCommand::Cancel(id)).await;

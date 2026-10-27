@@ -6,13 +6,17 @@ use super::super::{
 };
 use super::{request, tool_catalog, LegacyFailure, ServiceTransport};
 use serde_json::{json, Value};
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt},
     sync::{mpsc, watch, Semaphore},
-    task::JoinSet,
+    task::{AbortHandle, Id, JoinSet},
     time::{timeout_at, Instant},
 };
+
+/// How long one frame may take to write once its write has started, however
+/// late the request that produced it was due.
+const WRITE_STALL: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -69,8 +73,9 @@ async fn write_frame<W: AsyncWrite + Unpin>(
     };
     tokio::pin!(output);
     let mut watch_open = true;
+    let stall_deadline = Instant::now() + WRITE_STALL;
     loop {
-        let deadline = *deadlines.borrow();
+        let deadline = (*deadlines.borrow()).max(stall_deadline);
         tokio::select! {
             result=&mut output => return result.map_err(|_|failure(ErrorCode::DriverExited)),
             _=tokio::time::sleep_until(deadline) => return Err(failure(ErrorCode::DeadlineExceeded)),
@@ -100,7 +105,37 @@ pub fn legacy_error_frame(id: Value, failure: LegacyFailure) -> Value {
 }
 
 fn rpc_error(id: Value, error: ServiceError) -> Value {
-    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":"Service request failed","data":redact_error(error)}})
+    let error = redact_error(error);
+    let code = serde_json::to_value(error.code)
+        .ok()
+        .and_then(|code| code.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let message = format!("Service request failed: {code}: {}", error.message);
+    json!({"jsonrpc":"2.0","id":id,"error":{"code":-32602,"message":message,"data":error}})
+}
+
+/// The key under which an in-flight request is tracked: its JSON-RPC id, with
+/// strings and numbers kept apart.
+fn request_key(id: &Value) -> Option<String> {
+    matches!(id, Value::String(_) | Value::Number(_)).then(|| id.to_string())
+}
+
+/// The request a `notifications/cancelled` notification names, if the
+/// notification is well formed.
+fn cancelled_request(raw: &Value) -> Option<String> {
+    if raw["method"] != "notifications/cancelled" || rpc_id(raw).ok()?.is_some() {
+        return None;
+    }
+    let params = raw.get("params")?;
+    only_keys(params, &["requestId", "reason", "_meta"]).ok()?;
+    if params
+        .get("reason")
+        .is_some_and(|reason| !reason.is_string())
+    {
+        return None;
+    }
+    let target = json!({"jsonrpc":"2.0","id":params.get("requestId")?,"method":"x"});
+    request_key(&rpc_id(&target).ok()??)
 }
 
 fn rpc_id(raw: &Value) -> ServiceResult<Option<Value>> {
@@ -147,6 +182,28 @@ fn only_keys(value: &Value, keys: &[&str]) -> ServiceResult<()> {
         return Err(failure(ErrorCode::InvalidArgument));
     }
     Ok(())
+}
+
+/// Drops a finished task from the in-flight table and returns the exit code
+/// it asks for, if any. A task aborted on request asks for none.
+fn settle(
+    in_flight: &mut HashMap<String, AbortHandle>,
+    task_keys: &mut HashMap<Id, String>,
+    result: Result<(Id, i32), tokio::task::JoinError>,
+) -> Option<i32> {
+    let (task, code) = match result {
+        Ok((task, code)) => (task, (code != 0).then_some(code)),
+        Err(error) => (error.id(), (!error.is_cancelled()).then_some(4)),
+    };
+    if let Some(key) = task_keys.remove(&task) {
+        if in_flight
+            .get(&key)
+            .is_some_and(|handle| handle.id() == task)
+        {
+            in_flight.remove(&key);
+        }
+    }
+    code
 }
 
 impl ServiceTransport {
@@ -250,18 +307,16 @@ impl ServiceTransport {
             let ordinary = Arc::new(Semaphore::new(80));
             let control = Arc::new(Semaphore::new(16));
             let mut tasks = JoinSet::new();
+            let mut in_flight: HashMap<String, AbortHandle> = HashMap::new();
+            let mut task_keys: HashMap<Id, String> = HashMap::new();
             let active = CancellationSignal::default();
             let mut drain_deadline = Instant::now() + Duration::from_secs(2);
             let mut exit = 0;
             let mut interrupted = false;
             loop {
-                while let Some(result) = tasks.try_join_next() {
-                    if let Ok(code) = result {
-                        if code != 0 {
-                            exit = code;
-                        }
-                    } else {
-                        exit = 4;
+                while let Some(result) = tasks.try_join_next_with_id() {
+                    if let Some(code) = settle(&mut in_flight, &mut task_keys, result) {
+                        exit = code;
                     }
                 }
                 let frame = tokio::select! {
@@ -313,6 +368,14 @@ impl ServiceTransport {
                         continue;
                     }
                 };
+                if mode == Mode::Mcp && raw["method"] == "notifications/cancelled" {
+                    if let Some(handle) =
+                        cancelled_request(&raw).and_then(|key| in_flight.get(&key))
+                    {
+                        handle.abort();
+                    }
+                    continue;
+                }
                 let envelope = if mode == Mode::Mcp {
                     &raw["params"]["arguments"]
                 } else {
@@ -384,7 +447,12 @@ impl ServiceTransport {
                 let caller = caller.clone();
                 let signal = active.clone();
                 let sender = sender.clone();
-                tasks.spawn(async move {
+                let key = if mode == Mode::Mcp {
+                    rpc_id(&raw).ok().flatten().as_ref().and_then(request_key)
+                } else {
+                    None
+                };
+                let handle = tasks.spawn(async move {
                     let _permit = permit;
                     let (response, code) = if mode == Mode::Mcp {
                         transport.mcp_request(raw, caller, signal).await
@@ -400,28 +468,29 @@ impl ServiceTransport {
                         (serde_json::to_value(response).ok(), code)
                     };
                     if let Some(response) = response {
-                        if !matches!(
-                            timeout_at(deadline, sender.send(response)).await,
-                            Ok(Ok(()))
-                        ) {
+                        let send_by = deadline.max(Instant::now() + WRITE_STALL);
+                        if !matches!(timeout_at(send_by, sender.send(response)).await, Ok(Ok(()))) {
                             return 4;
                         }
                     }
                     code
                 });
+                if let Some(key) = key {
+                    task_keys.insert(handle.id(), key.clone());
+                    in_flight.insert(key, handle);
+                }
             }
             if interrupted || disconnected.is_cancelled() {
                 drain_deadline = drain_deadline.min(Instant::now() + Duration::from_secs(2));
             }
             deadline_updates.send_replace(drain_deadline);
             loop {
-                match timeout_at(drain_deadline, tasks.join_next()).await {
-                    Ok(Some(Ok(code))) => {
-                        if code != 0 {
+                match timeout_at(drain_deadline, tasks.join_next_with_id()).await {
+                    Ok(Some(result)) => {
+                        if let Some(code) = settle(&mut in_flight, &mut task_keys, result) {
                             exit = code;
                         }
                     }
-                    Ok(Some(Err(_))) => exit = 4,
                     Ok(None) => break,
                     Err(_) => {
                         active.cancel();

@@ -62,6 +62,30 @@ async fn 기존_다섯_도구와_공통_도구가_같은_카탈로그에_존재�
 }
 
 #[tokio::test]
+async fn run_query는_통합_도구_목록에서_timeout_ms를_범위가_있는_정수로_알린다() {
+    // given
+    let h = Harness::new().await;
+    h.core.transport.set_legacy(Arc::new(adapter(&h))).unwrap();
+    // when
+    let actual = h.core.transport.tools().unwrap();
+    // then
+    let schema = |tool: &str| {
+        actual["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|candidate| candidate["name"] == tool)
+            .unwrap()["inputSchema"]["properties"]["timeout_ms"]
+            .clone()
+    };
+    let timeout = schema("run_query");
+    assert_eq!(timeout["type"], "integer");
+    assert_eq!(timeout["minimum"], 1);
+    assert_eq!(timeout["maximum"], 120000);
+    assert!(schema("list_tables").is_null());
+}
+
+#[tokio::test]
 async fn 모든_도구_이름은_목록에서_한번씩만_나온다() {
     // given
     let h = Harness::new().await;

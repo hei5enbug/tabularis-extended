@@ -145,7 +145,7 @@ async fn run(
     drop(slot);
     session::forget_service(handle).await;
     if let Err(mut error) = outcome {
-        error.details = json!({"session_closed":true});
+        error.close_session();
         return Err(error);
     }
     if scope.cancelled() {
@@ -153,7 +153,7 @@ async fn run(
             "CANCELLED",
             "Session finish was cancelled; rollback was confirmed",
         );
-        error.details = json!({"session_closed":true});
+        error.close_session();
         return Err(error);
     }
     Ok(json!({"session_handle":handle,"in_transaction":false,"rollback_confirmed":!commit}))

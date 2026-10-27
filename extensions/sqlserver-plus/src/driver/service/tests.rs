@@ -675,3 +675,75 @@ fn 기한이_지나면_연결을_분리하고_기한초과로_답한다() {
         assert_eq!(detached.load(std::sync::atomic::Ordering::SeqCst), 1);
     });
 }
+fn code(response: &serde_json::Value) -> &str {
+    response["error"]["data"]["code"].as_str().unwrap()
+}
+fn server_failure(number: u32) -> mssql_tds::error::Error {
+    mssql_tds::error::Error::SqlServerError {
+        errors: vec![mssql_tds::error::SqlErrorInfo {
+            message: "Conversion failed".into(),
+            state: 1,
+            class: 16,
+            number,
+            server_name: None,
+            proc_name: None,
+            line_number: Some(1),
+        }],
+    }
+}
+#[test]
+fn 구문_실패_응답은_코드를_유지한_채_database_error를_details에_싣는다() {
+    // given
+    let error = super::ServiceError::database(server_failure(241));
+
+    // when
+    let actual = error.response(json!(1));
+
+    // then
+    let data = &actual["error"]["data"];
+    assert_eq!(data["code"], "DRIVER_EXITED");
+    assert_eq!(data["message"], "SQL Server execution failed");
+    assert_eq!(
+        data["details"]["database_error"]["message"],
+        "SQL Server error 241: Conversion failed [statement failure; severity 16; state 1; line 1]"
+    );
+    assert_eq!(data["details"]["database_error"]["engine"], "sqlserver");
+}
+#[test]
+fn 권한_거부_응답은_write_not_allowed_코드와_database_error를_함께_싣는다() {
+    // given
+    let error = super::ServiceError::database(server_failure(229));
+
+    // when
+    let actual = error.response(json!(1));
+
+    // then
+    assert_eq!(code(&actual), "WRITE_NOT_ALLOWED");
+    assert!(actual["error"]["data"]["details"]["database_error"].is_object());
+}
+#[test]
+fn 로그인_실패_응답에는_database_error가_없다() {
+    // given
+    let error = super::ServiceError::database(server_failure(18456));
+
+    // when
+    let actual = error.response(json!(1));
+
+    // then
+    assert_eq!(code(&actual), "DRIVER_EXITED");
+    assert!(actual["error"]["data"]["details"].is_null());
+}
+#[test]
+fn 세션_종료와_구문_오류는_details에_함께_실린다() {
+    // given
+    let mut error = super::ServiceError::database(server_failure(241));
+    error.session_closed = true;
+
+    // when
+    let actual = error.response(json!(1));
+
+    // then
+    let details = &actual["error"]["data"]["details"];
+    assert_eq!(details["session_closed"], true);
+    assert!(details["database_error"].is_object());
+}

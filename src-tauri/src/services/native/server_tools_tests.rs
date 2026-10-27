@@ -5,6 +5,7 @@
 use super::tests::{approve_waiting, Harness};
 use super::*;
 use crate::drivers::driver_trait::{PluginManifest, ServiceRpcMethod, SqlDialect};
+use crate::services::{backend::ConnectionBackend, contracts::ServiceError};
 
 fn caller(h: &Harness) -> CallerContext {
     h.core.caller(CallerTransport::Mcp).unwrap()
@@ -23,6 +24,13 @@ async fn refused(h: &Harness, name: &str, arguments: Value) -> ErrorCode {
         .await
         .expect_err("the call should have been refused")
         .code
+}
+async fn refused_error(h: &Harness, name: &str, arguments: Value) -> ServiceError {
+    h.core
+        .transport
+        .call_tool(name, arguments, caller(h), None)
+        .await
+        .expect_err("the call should have been refused")
 }
 fn summary(result: &Value) -> &Value {
     &result["structuredContent"]
@@ -136,14 +144,15 @@ async fn server_activity는_범위를_벗어난_인자를_드라이버에_보내
 }
 
 #[tokio::test]
-async fn 서버_도구는_두_방언이_아닌_드라이버에_지원불가_오류를_준다() {
+async fn 서버_도구는_두_방언이_아닌_드라이버에_지원불가_오류와_드라이버_이름을_준다() {
     // given
     let h = Harness::with_manifest(dialect(SqlDialect::Mysql, "mysql")).await;
     h.allow_write().await;
+    let driver = h.core.platform.connections.get(&h.id).await.unwrap().driver;
 
     // when
-    let activity = refused(&h, "server_activity", json!({"connection_id":h.id})).await;
-    let cancel = refused(
+    let activity = refused_error(&h, "server_activity", json!({"connection_id":h.id})).await;
+    let cancel = refused_error(
         &h,
         "server_cancel",
         json!({"connection_id":h.id,"process_id":5,"write":true}),
@@ -151,8 +160,14 @@ async fn 서버_도구는_두_방언이_아닌_드라이버에_지원불가_오�
     .await;
 
     // then
-    assert_eq!(activity, ErrorCode::CapabilityUnavailable);
-    assert_eq!(cancel, ErrorCode::CapabilityUnavailable);
+    for (tool, error) in [("server_activity", activity), ("server_cancel", cancel)] {
+        assert_eq!(error.code, ErrorCode::UnsupportedOperation);
+        let redacted = crate::services::error::redact_error(error);
+        assert_eq!(
+            redacted.message,
+            format!("{tool} supports only postgresql-plus and sqlserver-plus connections; this connection uses driver '{driver}'")
+        );
+    }
     assert!(h.state.calls.lock().unwrap().is_empty());
 }
 
