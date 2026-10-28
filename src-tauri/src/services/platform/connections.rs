@@ -1,5 +1,5 @@
 use crate::services::{
-    backend::{ConnectionBackend, SavedConnection},
+    backend::{matching_ids, ConnectionBackend, SavedConnection},
     contracts::ErrorCode,
     credentials::SecretSlot,
     error::{failure, ServiceResult},
@@ -343,6 +343,16 @@ impl ConnectionBackend for ProfileConnections {
             connections.push(self.get(&id).await?);
         }
         Ok(connections)
+    }
+    async fn find_ids(&self, given: &str) -> ServiceResult<Vec<String>> {
+        persistence::transact_connections(&self.path, |file, _| {
+            Ok(matching_ids(
+                file.connections
+                    .iter()
+                    .map(|connection| (connection.id.as_str(), connection.name.as_str())),
+                given,
+            ))
+        })
     }
     async fn get(&self, id: &str) -> ServiceResult<SavedConnection> {
         let fence = self.fence(id)?;

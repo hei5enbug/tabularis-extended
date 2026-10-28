@@ -346,6 +346,8 @@ pub struct TestDriver {
     pub active: AtomicUsize,
     pub peak: AtomicUsize,
     pub contexts: Mutex<Vec<(String, bool, Option<String>)>>,
+    pub deadlines: Mutex<Vec<u64>>,
+    pub finish_read_only: Mutex<Vec<bool>>,
     sessions: Mutex<HashMap<String, Arc<AtomicUsize>>>,
     pub session_peak: AtomicUsize,
     pub gates: Mutex<HashMap<String, Arc<TestGate>>>,
@@ -382,6 +384,8 @@ impl TestDriver {
             active: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
             contexts: Mutex::new(Vec::new()),
+            deadlines: Mutex::new(Vec::new()),
+            finish_read_only: Mutex::new(Vec::new()),
             sessions: Mutex::new(HashMap::new()),
             session_peak: AtomicUsize::new(0),
             gates: Mutex::new(HashMap::new()),
@@ -471,6 +475,7 @@ impl DriverBackend for TestDriver {
             context.read_only,
             context.session_handle.clone(),
         ));
+        self.deadlines.lock().unwrap().push(context.deadline_ms);
         let count = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(count, Ordering::SeqCst);
         let session = context
@@ -621,8 +626,9 @@ impl DriverBackend for TestDriver {
         _connection: &SavedConnection,
         handle: &str,
         _finish: SessionFinish,
-        _context: DriverContext,
+        context: DriverContext,
     ) -> ServiceResult<()> {
+        self.finish_read_only.lock().unwrap().push(context.read_only);
         if self.rollback_failure.load(Ordering::SeqCst) {
             return Err(failure(ErrorCode::OutcomeUnknown));
         }

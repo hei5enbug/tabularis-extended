@@ -503,6 +503,7 @@ fn prove_postgres_wrapper(sql: &str) -> Option<ProvenRead> {
 /// first statement of a batch may call a procedure without `EXEC`, so any other
 /// first word fails.
 const TSQL_BATCH_STARTERS: &[&str] = &[
+    "BEGIN",
     "SELECT",
     "WITH",
     "DECLARE",

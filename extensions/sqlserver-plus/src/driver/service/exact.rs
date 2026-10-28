@@ -36,9 +36,15 @@ fn max_bytes() -> usize {
     32 * 1024 * 1024
 }
 pub fn validate_text(text: &str) -> Result<(), ServiceError> {
-    validate_text_for(text, false)
+    validate_leading_word(text, true)
 }
-pub fn validate_text_for(text: &str, read_only: bool) -> Result<(), ServiceError> {
+pub fn validate_text_for(text: &str, _read_only: bool) -> Result<(), ServiceError> {
+    validate_leading_word(text, false)
+}
+/// Rejects text that opens with transaction or session control, which the
+/// service runs through its session RPCs. `strict` also rejects a leading
+/// SET, for text that must not change the connection at all.
+fn validate_leading_word(text: &str, strict: bool) -> Result<(), ServiceError> {
     let bytes = text.as_bytes();
     let mut index = 0;
     loop {
@@ -78,21 +84,35 @@ pub fn validate_text_for(text: &str, read_only: bool) -> Result<(), ServiceError
         index += 1;
     }
     let word = String::from_utf8_lossy(&bytes[start..index]).to_ascii_uppercase();
-    if matches!(
-        word.as_str(),
-        "BEGIN"
-            | "START"
-            | "COMMIT"
-            | "END"
-            | "ROLLBACK"
-            | "ABORT"
-            | "SAVE"
-            | "SAVEPOINT"
-            | "RELEASE"
-            | "RESET"
-            | "DISCARD"
-            | "USE"
-    ) || (word == "SET" && !read_only)
+    let rest = &text[index..];
+    let next = rest.trim_start();
+    let next: String = next
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic() || *c == '_')
+        .collect::<String>()
+        .to_ascii_uppercase();
+    let opens_transaction = word == "BEGIN"
+        && matches!(
+            next.as_str(),
+            "TRAN" | "TRANSACTION" | "DISTRIBUTED" | "DIALOG"
+        );
+    let session_set = word == "SET" && (strict || next == "IMPLICIT_TRANSACTIONS");
+    if opens_transaction
+        || session_set
+        || matches!(
+            word.as_str(),
+            "START"
+                | "COMMIT"
+                | "END"
+                | "ROLLBACK"
+                | "ABORT"
+                | "SAVE"
+                | "SAVEPOINT"
+                | "RELEASE"
+                | "RESET"
+                | "DISCARD"
+                | "USE"
+        )
     {
         return Err(ServiceError::new(
             "UNSUPPORTED_OPERATION",
@@ -387,11 +407,41 @@ pub async fn collect(
     max_bytes: usize,
     count_sentinel: bool,
 ) -> Result<Value, ServiceError> {
+    collect_with(
+        client,
+        text,
+        parameters,
+        cancel,
+        max_rows,
+        max_bytes,
+        count_sentinel,
+        false,
+    )
+    .await
+}
+/// Like `collect`; with `batch` and no parameters the text runs as a plain
+/// SQL batch instead of through sp_executesql, so temporary tables and SET
+/// options it creates stay on the connection for the statements after it.
+#[allow(clippy::too_many_arguments)]
+pub async fn collect_with(
+    client: &mut TdsClient,
+    text: &str,
+    parameters: Vec<RpcParameter>,
+    cancel: Option<&CancelHandle>,
+    max_rows: usize,
+    max_bytes: usize,
+    count_sentinel: bool,
+    batch: bool,
+) -> Result<Value, ServiceError> {
     client.close_query().await.map_err(ServiceError::database)?;
-    client
-        .execute_sp_executesql(text.to_owned(), parameters, None, cancel)
-        .await
-        .map_err(ServiceError::database)?;
+    if batch && parameters.is_empty() {
+        client.execute(text.to_owned(), None, cancel).await
+    } else {
+        client
+            .execute_sp_executesql(text.to_owned(), parameters, None, cancel)
+            .await
+    }
+    .map_err(ServiceError::database)?;
     let mut sets = Vec::new();
     let mut row_count = 0;
     let mut bytes = 0;

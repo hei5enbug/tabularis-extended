@@ -222,6 +222,56 @@ fn 고정_catalog는_다른_database로_몰래_전환하지_않는다() {
 }
 
 #[test]
+fn 고정_catalog_describe는_종류를_선택적으로_받는다() {
+    // given
+    let table = json!({"database":"fixture","schema":"public","table":"items"});
+    let inputs = [
+        json!({"operation":"catalog.describe","table":table}),
+        json!({"operation":"catalog.describe","table":table,"kind":"foreign_table"}),
+        json!({"operation":"catalog.describe","table":table,"kind":"operator_family"}),
+    ];
+
+    // when
+    let actual: Vec<bool> = inputs
+        .iter()
+        .map(|input| {
+            crate::handlers::spatial::types::input::<service::CatalogInput>(
+                &json!({ "input": input }),
+            )
+            .is_ok()
+        })
+        .collect();
+
+    // then
+    assert_eq!(actual, [true, true, true]);
+}
+
+#[test]
+fn 고정_catalog_describe는_알_수_없는_종류와_추가_필드를_거부한다() {
+    // given
+    let table = json!({"database":"fixture","schema":"public","table":"items"});
+    let inputs = [
+        json!({"operation":"catalog.describe","table":table,"kind":"synonym"}),
+        json!({"operation":"catalog.describe","table":table,"kind":"index"}),
+        json!({"operation":"catalog.describe","table":table,"kind":"table","text":"DROP TABLE items"}),
+    ];
+
+    // when
+    let actual: Vec<bool> = inputs
+        .iter()
+        .map(|input| {
+            crate::handlers::spatial::types::input::<service::CatalogInput>(
+                &json!({ "input": input }),
+            )
+            .is_err()
+        })
+        .collect();
+
+    // then
+    assert_eq!(actual, [true, true, true]);
+}
+
+#[test]
 fn 고정_row는_사용자_sql_추가_필드를_받지_않는다() {
     // given
     let input = params(

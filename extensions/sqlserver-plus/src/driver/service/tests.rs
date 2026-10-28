@@ -1,4 +1,7 @@
-use super::{exact, explain, pool, registry, types::DriverContext};
+use super::{
+    exact, explain, pool, registry,
+    types::{DriverContext, MAX_DEADLINE_MS},
+};
 use crate::driver::azure_cli_auth::fake_cli::{HOST, OBJECT, TENANT, USER};
 use crate::{
     connection::resolve_connection_params,
@@ -124,6 +127,41 @@ fn host가_보낸_entra_token은_사용하지_않고_형식화된_오류로_거�
         assert!(!error.message.contains("canary"));
         assert!(!format!("{:?}", error).contains("canary"));
     }
+}
+#[test]
+fn 컨텍스트는_한_시간까지의_기한을_받고_그보다_길면_거부한다() {
+    // given
+    let (params, _) = entra();
+    let deadlines = [1, 120_000, 120_001, MAX_DEADLINE_MS, MAX_DEADLINE_MS + 1, 0];
+    let requests = deadlines.map(|deadline_ms| {
+        let mut value = request(&params, json!(null));
+        value["driver_context"]["deadline_ms"] = json!(deadline_ms);
+        value
+    });
+
+    // when
+    let actual: Vec<(bool, bool)> = requests
+        .iter()
+        .map(|value| {
+            (
+                DriverContext::parse(value).is_ok(),
+                DriverContext::parse_control(value).is_ok(),
+            )
+        })
+        .collect();
+
+    // then
+    assert_eq!(
+        actual,
+        [
+            (true, true),
+            (true, true),
+            (true, true),
+            (true, true),
+            (false, false),
+            (false, false)
+        ]
+    );
 }
 #[test]
 fn entra_user는_driver_자체_인증이라_transient_auth_없이만_통과한다() {
@@ -260,19 +298,48 @@ fn 읽기_작업은_주석_뒤의_소문자_set도_허용한다() {
     assert!(actual.is_ok());
 }
 #[test]
-fn 쓰기_작업은_앞의_set을_계속_거부한다() {
+fn 쓰기_작업은_앞의_set_세션_옵션을_허용한다() {
     // given
-    let text = "SET NOCOUNT ON; SELECT 1";
+    let text = "SET NOCOUNT ON; UPDATE t SET v = 1";
     // when
     let actual = exact::validate_text_for(text, false);
     // then
-    assert_eq!(actual.unwrap_err().code, "UNSUPPORTED_OPERATION");
+    assert!(actual.is_ok());
+}
+#[test]
+fn 읽기와_쓰기_모두_암묵적_트랜잭션_set은_거부한다() {
+    // given
+    let text = "SET IMPLICIT_TRANSACTIONS ON; SELECT 1";
+    // when
+    let actual = [true, false].map(|read_only| exact::validate_text_for(text, read_only));
+    // then
+    assert!(actual
+        .iter()
+        .all(|result| result.as_ref().unwrap_err().code == "UNSUPPORTED_OPERATION"));
+}
+#[test]
+fn 앞의_begin_try와_begin_블록은_허용하고_begin_tran은_거부한다() {
+    // given
+    let cases = [
+        (
+            "BEGIN TRY SELECT 1 END TRY BEGIN CATCH THROW; END CATCH",
+            true,
+        ),
+        ("begin\n  SELECT 1;\nend", true),
+        ("BEGIN TRAN; UPDATE t SET v = 1", false),
+        ("BEGIN TRANSACTION", false),
+        ("BEGIN DISTRIBUTED TRANSACTION", false),
+    ];
+    // when
+    let actual = cases.map(|(text, _)| exact::validate_text_for(text, false).is_ok());
+    // then
+    assert_eq!(actual, cases.map(|(_, allowed)| allowed));
 }
 #[test]
 fn 읽기_작업도_set_이외의_앞선_제어_단어는_계속_거부한다() {
     // given
     let words = [
-        "BEGIN",
+        "BEGIN TRAN",
         "START",
         "COMMIT",
         "END",
@@ -302,7 +369,7 @@ fn 엄격한_validate_text는_앞의_set을_거부한다() {
     assert_eq!(actual.unwrap_err().code, "UNSUPPORTED_OPERATION");
 }
 #[test]
-fn 정확_쿼리_검증은_읽기_작업에만_앞의_set을_허용한다() {
+fn 정확_쿼리_검증은_읽기와_쓰기_모두_앞의_set_세션_옵션을_허용한다() {
     // given
     let input: exact::ExactInput =
         serde_json::from_value(json!({"text":"SET NOCOUNT ON; SELECT 1"})).unwrap();
@@ -313,7 +380,7 @@ fn 정확_쿼리_검증은_읽기_작업에만_앞의_set을_허용한다() {
     );
     // then
     assert!(actual.0.is_ok());
-    assert_eq!(actual.1.unwrap_err().code, "UNSUPPORTED_OPERATION");
+    assert!(actual.1.is_ok());
 }
 #[test]
 fn explain_검증은_앞의_set을_계속_거부한다() {

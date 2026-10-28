@@ -1,6 +1,9 @@
 #![allow(non_snake_case)]
 use super::*;
-use crate::services::{contracts::Outcome, credentials::Secret};
+use crate::services::{
+    contracts::{Outcome, MAX_JOB_DEADLINE_MS},
+    credentials::Secret,
+};
 
 pub(crate) async fn child_driver(id: &str, mode: &str, extra: Value) -> RpcDriver {
     let mut manifest = test_manifest();
@@ -206,6 +209,36 @@ async fn 구조화된_검증_오류는_전송후에도_not_started와_안전한_
         .contains("SECRET_CANARY"));
 }
 
+#[tokio::test]
+async fn 플러그인_호출은_한_시간까지의_기한을_보내고_그보다_길면_송신하지_않는다() {
+    // given
+    let driver = child_driver("long-deadline", "native", json!({})).await;
+    let call = |deadline_ms: u64| {
+        let mut context = context("conn", &format!("deadline-{deadline_ms}"));
+        context.deadline_ms = deadline_ms;
+        let driver = &driver;
+        async move {
+            driver
+                .service_call(
+                    ServiceRpcMethod::ExactQuery,
+                    &params("long-deadline"),
+                    &context,
+                    query("SELECT 1"),
+                )
+                .await
+        }
+    };
+
+    // when
+    let accepted = call(MAX_JOB_DEADLINE_MS).await.unwrap();
+    let rejected = call(MAX_JOB_DEADLINE_MS + 1).await.unwrap_err();
+
+    // then
+    assert_eq!(accepted["rows"], json!([[true, null]]));
+    assert_eq!(rejected.code, ErrorCode::InvalidArgument);
+    driver.shutdown().await;
+}
+
 fn remote_failure(data: Value) -> NativeFailure {
     NativeFailure {
         error: PluginCallError::Remote(crate::plugins::rpc::JsonRpcError {
@@ -218,7 +251,7 @@ fn remote_failure(data: Value) -> NativeFailure {
 }
 
 #[test]
-fn 플러그인이_보고한_database_error는_코드를_유지한_채_문구까지_전달한다() {
+fn 플러그인이_드라이버_종료로_보고한_문장_오류는_문장_오류_코드로_바꿔_문구까지_전달한다() {
     // given
     let text =
         "SQL Server error 241: Conversion failed [statement failure; severity 16; state 1; line 1]";
@@ -234,10 +267,31 @@ fn 플러그인이_보고한_database_error는_코드를_유지한_채_문구까
     let actual = native_failure(failure);
 
     // then
-    assert_eq!(actual.code, ErrorCode::DriverExited);
+    assert_eq!(actual.code, ErrorCode::DatabaseError);
     assert_eq!(actual.outcome, Outcome::NotApplied);
     assert_eq!(actual.message, text);
     assert_eq!(actual.details["database_error"]["engine"], "sqlserver");
+}
+
+#[test]
+fn 플러그인이_잘못된_입력으로_보고한_구문_오류도_문장_오류_코드로_바꾼다() {
+    // given
+    let text = "ERROR: syntax error at or near \"WHERE\" (SQLSTATE 42601)\nPOSITION: 13";
+    let failure = remote_failure(json!({
+        "code": "INVALID_ARGUMENT",
+        "message": "Database operation failed",
+        "retryable": false,
+        "outcome": "not_applied",
+        "details": {"database_error": {"engine":"postgresql","message":text,"sqlstate":"42601","position":13}}
+    }));
+
+    // when
+    let actual = native_failure(failure);
+
+    // then
+    assert_eq!(actual.code, ErrorCode::DatabaseError);
+    assert_eq!(actual.message, text);
+    assert_eq!(actual.details["database_error"]["sqlstate"], "42601");
 }
 
 #[test]
@@ -255,6 +309,7 @@ fn database_error가_없는_플러그인_오류는_고정_문구로_가린다() 
     let actual = native_failure(failure);
 
     // then
+    assert_eq!(actual.code, ErrorCode::DriverExited);
     assert_eq!(
         actual.message,
         crate::services::error::failure(ErrorCode::DriverExited).message

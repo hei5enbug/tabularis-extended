@@ -321,7 +321,7 @@ impl ServiceRuntime {
                     true
                 } else {
                     let driver = match request.connection_id.as_deref() {
-                        Some(id) => self.connections.get(id).await.ok().map(|c| c.driver),
+                        Some(id) => Some(self.connections.get(id).await?.driver),
                         None => None,
                     };
                     is_proven_read(text, driver.as_deref(), in_session)
@@ -992,7 +992,7 @@ impl ServiceRuntime {
         context.deadline_ms = context
             .deadline_ms
             .saturating_add(self.cancel_grace().as_millis() as u64)
-            .clamp(1, 120_000);
+            .clamp(1, request.operation.max_deadline_ms());
         let result = match cursor {
             Some(cursor) => {
                 self.driver
@@ -1022,6 +1022,7 @@ impl ServiceRuntime {
                             && matches!(
                                 error.code,
                                 ErrorCode::DriverExited
+                                    | ErrorCode::DatabaseError
                                     | ErrorCode::DeadlineExceeded
                                     | ErrorCode::OutcomeUnknown
                             )))
@@ -1288,6 +1289,7 @@ impl ServiceRuntime {
                             && matches!(
                                 error.code,
                                 ErrorCode::DriverExited
+                                    | ErrorCode::DatabaseError
                                     | ErrorCode::DeadlineExceeded
                                     | ErrorCode::OutcomeUnknown
                             )))

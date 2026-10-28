@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod catalog_describe;
 pub mod catalog_objects;
 pub mod connection;
 pub mod database_error;

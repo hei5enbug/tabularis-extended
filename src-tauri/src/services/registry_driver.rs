@@ -3,7 +3,9 @@ use crate::services::{
         CancellationSignal, DriverBackend, DriverContext, DriverOutput, ReadOnlyGuarantee,
         SavedConnection, SessionFinish, TransientAuth,
     },
-    contracts::{ErrorCode, Limits, Metrics, Operation, Outcome, ServiceRequest},
+    contracts::{
+        ErrorCode, Limits, Metrics, Operation, Outcome, ServiceRequest, MAX_JOB_DEADLINE_MS,
+    },
     error::{failure, ServiceResult},
     results::{
         CursorBinding, CursorState, ResultKind, ResultSet, ResultSnapshot, MAX_RESULT_BYTES,
@@ -674,7 +676,7 @@ impl DriverBackend for RegistryDriverBackend {
 }
 
 fn context_deadline(context: &DriverContext) -> ServiceResult<tokio::time::Instant> {
-    if context.deadline_ms == 0 || context.deadline_ms > 120_000 {
+    if context.deadline_ms == 0 || context.deadline_ms > MAX_JOB_DEADLINE_MS {
         return Err(failure(ErrorCode::InvalidArgument));
     }
     if context.signal.is_cancelled() {

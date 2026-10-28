@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fixtureFile, requestSchema, operationNames, inputSchema, validateRequest, validateResponse, unavailableResponse } from "../dist/index.js";
+import { MAX_DEADLINE_MS, MAX_JOB_DEADLINE_MS, fixtureFile, requestSchema, operationNames, inputSchema, validateRequest, validateResponse, unavailableResponse } from "../dist/index.js";
 const fixtures = JSON.parse(readFileSync(fixtureFile, "utf8"));
 for (const fixture of fixtures) {
   test(fixture.name, () => {
@@ -41,4 +41,21 @@ test("연결되지 않은 핸들러는 명시적인 미지원 응답을 반환�
   assert.equal(actual.error.outcome, "not_started");
   assert.equal(actual.data, null);
   assert.equal(validateResponse(actual).valid, true);
+});
+test("deadline_ms 상한은 query.execute만 3600000이고 나머지 작업은 120000이다", () => {
+  // given
+  const query = fixtures.find((fixture) => fixture.valid && fixture.value.operation === "query.execute").value;
+  const other = fixtures.find((fixture) => fixture.valid && fixture.value.operation === "connection.list").value;
+  const withDeadline = (request, deadline_ms) => ({ ...request, deadline_ms });
+
+  // when
+  const actual = [
+    validateRequest(withDeadline(query, MAX_JOB_DEADLINE_MS)).valid,
+    validateRequest(withDeadline(query, MAX_JOB_DEADLINE_MS + 1)).valid,
+    validateRequest(withDeadline(other, MAX_DEADLINE_MS)).valid,
+    validateRequest(withDeadline(other, MAX_DEADLINE_MS + 1)).valid,
+  ];
+
+  // then
+  assert.deepEqual(actual, [true, false, true, false]);
 });

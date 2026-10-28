@@ -4,6 +4,7 @@ use tokio_postgres::Client;
 
 use super::{
     catalog::Catalog,
+    catalog_describe::ObjectKind,
     exact::{self, ExactInput, Parameter},
     types::{self, DriverContext, RowIdentity, TableRef},
     SpatialError,
@@ -27,7 +28,11 @@ pub enum CatalogInput {
         schema: Option<String>,
     },
     #[serde(rename = "catalog.describe")]
-    Describe { table: TableRef },
+    Describe {
+        table: TableRef,
+        #[serde(default)]
+        kind: Option<ObjectKind>,
+    },
 }
 #[derive(Deserialize)]
 #[serde(tag = "operation", deny_unknown_fields)]
@@ -75,7 +80,7 @@ pub fn validate(
             CatalogInput::Schemas { database } | CatalogInput::Objects { database, .. } => {
                 (Some(database), None)
             }
-            CatalogInput::Describe { table } => (table.database.clone(), Some(table)),
+            CatalogInput::Describe { table, .. } => (table.database.clone(), Some(table)),
         },
         "service_row" => {
             let table = match types::input::<RowInput>(params)? {
@@ -125,7 +130,7 @@ fn validate_values(values: &Map<String, Value>) -> Result<(), SpatialError> {
     }
     Ok(())
 }
-fn exact_input(text: String, values: Vec<Value>) -> ExactInput {
+pub(super) fn exact_input(text: String, values: Vec<Value>) -> ExactInput {
     ExactInput {
         text,
         parameters: values
@@ -142,7 +147,7 @@ fn exact_input(text: String, values: Vec<Value>) -> ExactInput {
         settings: Vec::new(),
     }
 }
-fn row_objects(result: &Value) -> Result<Vec<Value>, SpatialError> {
+pub(super) fn row_objects(result: &Value) -> Result<Vec<Value>, SpatialError> {
     let columns = result["columns"]
         .as_array()
         .ok_or_else(|| SpatialError::argument("Missing catalog columns"))?;
@@ -182,7 +187,10 @@ pub async fn catalog(
         CatalogInput::Databases => ("databases", "SELECT datname::text AS name FROM pg_catalog.pg_database WHERE datallowconn AND pg_catalog.has_database_privilege(oid,'CONNECT') ORDER BY datname".to_string(), vec![], true),
         CatalogInput::Schemas { .. } => ("schemas", "SELECT nspname::text AS name FROM pg_catalog.pg_namespace WHERE pg_catalog.has_schema_privilege(oid,'USAGE') ORDER BY nspname".to_string(), vec![], true),
         CatalogInput::Objects { schema, .. } => ("objects", super::catalog_objects::objects_sql(), vec![schema.map(Value::String).unwrap_or(Value::Null)], false),
-        CatalogInput::Describe { table } => ("columns", "SELECT a.attname::text AS name,(row_number() OVER (ORDER BY a.attnum)-1)::integer AS column_index,a.atttypid::bigint AS type_oid,pg_catalog.format_type(a.atttypid,a.atttypmod)::text AS data_type,NOT a.attnotnull AS nullable,COALESCE(a.attnum=ANY(pk.conkey),false) AS is_primary_key,pg_catalog.array_position(pk.conkey,a.attnum)::integer AS primary_key_position,COALESCE((SELECT json_agg(pa.attname ORDER BY k.ordinality) FROM unnest(pk.conkey) WITH ORDINALITY k(attnum,ordinality) JOIN pg_catalog.pg_attribute pa ON pa.attrelid=c.oid AND pa.attnum=k.attnum),'[]'::json) AS primary_key,pg_catalog.pg_get_expr(d.adbin,d.adrelid)::text AS default_value,(a.attidentity<>'' OR a.attgenerated<>'' OR pg_catalog.pg_get_expr(d.adbin,d.adrelid) LIKE 'nextval(%') AS generated FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace JOIN pg_catalog.pg_attribute a ON a.attrelid=c.oid LEFT JOIN pg_catalog.pg_constraint pk ON pk.conrelid=c.oid AND pk.contype='p' LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid=c.oid AND d.adnum=a.attnum WHERE n.nspname=$1 AND c.relname=$2 AND a.attnum>0 AND NOT a.attisdropped AND pg_catalog.has_schema_privilege(n.oid,'USAGE') AND pg_catalog.has_table_privilege(c.oid,'SELECT') ORDER BY a.attnum".to_string(), vec![json!(table.schema()), json!(table.table)], false),
+        CatalogInput::Describe { table, kind } => {
+            return super::catalog_describe::describe(client, catalog, &table, kind, scope, reserved)
+                .await
+        }
     };
     let result = exact::execute(
         client,

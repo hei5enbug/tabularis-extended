@@ -6,6 +6,7 @@ use serde_json::{json, Value};
 
 pub const FRAME_LIMIT: usize = 16 * 1024 * 1024 - 64 * 1024;
 pub const SESSION_IDLE_MS: u64 = 300_000;
+pub const MAX_DEADLINE_MS: u64 = 3_600_000;
 pub fn valid_rpc_id(id: &Value) -> bool {
     match id {
         Value::Null => true,
@@ -63,7 +64,7 @@ impl DriverContext {
             .iter()
             .any(|v| v.is_empty() || v.chars().count() > 128)
             || context.deadline_ms == 0
-            || context.deadline_ms > 120_000
+            || context.deadline_ms > MAX_DEADLINE_MS
         {
             return Err(ServiceError::argument("Invalid driver context"));
         }

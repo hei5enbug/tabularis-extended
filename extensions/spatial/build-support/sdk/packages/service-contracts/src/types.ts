@@ -85,6 +85,7 @@ export const errorCodes = [
   "GUI_UNAVAILABLE",
   "APPLY_TIMEOUT",
   "DRIVER_EXITED",
+  "DATABASE_ERROR",
   "OUTCOME_UNKNOWN",
   "DOCUMENT_NOT_FOUND",
   "WRITE_INTENT_REQUIRED",
@@ -104,6 +105,7 @@ export type PartitionKeyComponent =
   | { type: "null" }
   | { type: "undefined" };
 export interface DocumentIdentity { id: string; partition_key: PartitionKeyComponent[] }
+export type CatalogObjectKind = "table" | "view" | "materialized_view" | "foreign_table" | "routine" | "aggregate" | "trigger" | "sequence" | "synonym" | "type" | "collation" | "operator" | "operator_class" | "operator_family" | "rule" | "security_policy";
 export interface TableRef { database: string | null; schema: string | null; table: string }
 export interface RowIdentity { columns: string[]; values: JsonValue[] }
 export interface QueryParameter { name: string; value: JsonValue }
@@ -130,7 +132,7 @@ export interface OperationInputs {
   "catalog.databases": Record<string, never>;
   "catalog.schemas": { "database": string };
   "catalog.objects": { "database": string; "schema": string | null };
-  "catalog.describe": { "table": TableRef };
+  "catalog.describe": { "table": TableRef; "kind"?: CatalogObjectKind };
   "query.execute": { "text": string; "parameters": (QueryParameter)[]; "page_size": number; "mode"?: "exact"; "database"?: string; "schema"?: string; "container"?: string; "partition_key"?: PartitionKeyComponent[] | null; "ru_budget"?: number } & ({ "language": "sql"; "result_mode"?: never } | { "language": "cosmos_sql"; "result_mode"?: "json_values" | "documents" });
   "query.next": { "next_token": string };
   "query.explain": { "sql": string; "database"?: string; "schema"?: string };

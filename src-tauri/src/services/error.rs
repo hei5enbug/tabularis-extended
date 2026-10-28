@@ -1,4 +1,7 @@
-use super::contracts::{ErrorCode, Outcome, ServiceError};
+use super::{
+    contracts::{ErrorCode, Outcome, ServiceError},
+    transport::tool_catalog::OBJECT_KINDS,
+};
 use serde_json::Value;
 
 pub type ServiceResult<T> = Result<T, ServiceError>;
@@ -34,6 +37,7 @@ pub fn failure(code: ErrorCode) -> ServiceError {
             "The driver did not confirm the cancellation; the call may still finish."
         }
         ErrorCode::OutcomeUnknown => "The write outcome could not be confirmed.",
+        ErrorCode::DatabaseError => "The database rejected the statement.",
         ErrorCode::UnsupportedOperation => "The connection does not support this operation.",
         ErrorCode::TlsValidationFailed => "TLS certificate validation failed.",
         _ => "The service backend could not complete this operation.",
@@ -63,6 +67,68 @@ fn unsupported_server_tool_message(tool: &str, driver: &str) -> String {
     format!(
         "{tool} supports only postgresql-plus and sqlserver-plus connections; this connection uses driver '{driver}'"
     )
+}
+
+const MAX_LOOKUP_CHARS: usize = 128;
+const MAX_LOOKUP_MATCHES: usize = 16;
+
+fn lookup_text(given: &str) -> String {
+    given
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(MAX_LOOKUP_CHARS)
+        .collect()
+}
+
+/// The refusal for an id or name that matches no saved connection.
+pub fn connection_not_found(given: &str) -> ServiceError {
+    ServiceError {
+        details: serde_json::json!({"connection_lookup":{"requested":given,"matches":[]}}),
+        ..failure(ErrorCode::ConnectionNotFound)
+    }
+}
+
+/// The refusal for a name that several saved connections share.
+pub fn ambiguous_connection(given: &str, ids: &[String]) -> ServiceError {
+    ServiceError {
+        details: serde_json::json!({"connection_lookup":{"requested":given,"matches":ids}}),
+        ..failure(ErrorCode::InvalidArgument)
+    }
+}
+
+/// The lookup facts a connection refusal may carry, reduced to a bounded
+/// request text and well formed ids, with the message they give.
+fn connection_lookup(code: ErrorCode, details: &Value) -> Option<(Value, String)> {
+    let lookup = details.get("connection_lookup")?;
+    let requested = lookup_text(lookup.get("requested")?.as_str()?);
+    let matches: Vec<&str> = lookup
+        .get("matches")?
+        .as_array()?
+        .iter()
+        .map(Value::as_str)
+        .collect::<Option<_>>()?;
+    if requested.is_empty()
+        || matches.len() > MAX_LOOKUP_MATCHES
+        || matches
+            .iter()
+            .any(|id| super::security::opaque_id(id).is_err())
+    {
+        return None;
+    }
+    let message = match (code, matches.len()) {
+        (ErrorCode::ConnectionNotFound, 0) => format!(
+            "No saved connection has the id or name \"{requested}\"; connection_list shows the saved ones."
+        ),
+        (ErrorCode::InvalidArgument, 2..) => format!(
+            "Several saved connections are named \"{requested}\" (ids: {}); use one of these ids.",
+            matches.join(", ")
+        ),
+        _ => return None,
+    };
+    Some((
+        serde_json::json!({"requested":requested,"matches":matches}),
+        message,
+    ))
 }
 
 const MAX_DATABASE_MESSAGE_BYTES: usize = 4000;
@@ -184,20 +250,36 @@ pub fn redact_error(error: ServiceError) -> ServiceError {
             .details
             .get("object_kind")
             .and_then(Value::as_str)
-            .filter(|kind| {
-                matches!(
-                    *kind,
-                    "table" | "view" | "materialized_view" | "routine" | "trigger"
-                )
-            })
+            .filter(|kind| OBJECT_KINDS.contains(kind))
         {
             details.insert("object_kind".into(), Value::String(kind.into()));
+            if let Some(supported) = error
+                .details
+                .get("supported_kinds")
+                .and_then(Value::as_array)
+            {
+                let kinds: Vec<Value> = supported
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|kind| OBJECT_KINDS.contains(kind))
+                    .map(|kind| Value::String(kind.into()))
+                    .collect();
+                details.insert("supported_kinds".into(), Value::Array(kinds));
+            }
         }
     }
     let mut message = None;
+    if let Some((lookup, text)) = connection_lookup(error.code, &error.details) {
+        details.insert("connection_lookup".into(), lookup);
+        message = Some(text);
+    }
+    let mut code = error.code;
     if let Some(database_error) = error.details.get("database_error").and_then(database_error) {
         message = database_error["message"].as_str().map(str::to_owned);
         details.insert("database_error".into(), database_error);
+        if matches!(code, ErrorCode::DriverExited | ErrorCode::InvalidArgument) {
+            code = ErrorCode::DatabaseError;
+        }
     }
     if error.code == ErrorCode::UnsupportedOperation {
         if let (Some(tool), Some(driver)) = (
@@ -238,7 +320,7 @@ pub fn redact_error(error: ServiceError) -> ServiceError {
             details.insert("instances".into(), Value::Array(safe));
         }
     }
-    let redacted = failure(error.code);
+    let redacted = failure(code);
     ServiceError {
         outcome: error.outcome,
         retryable: error.retryable,

@@ -288,6 +288,30 @@ async fn cli_인증_시작은_기기_코드_없이_공통_인증_작업으로_�
     ));
 }
 
+#[tokio::test]
+async fn 한_시간_마감의_작업도_로그인에_필요한_만큼_남은_cli_토큰으로_인증한다() {
+    // given
+    let config = config();
+    let mut saved = entra_connection("entra_user");
+    saved.settings["extra"]["auth_source"] = json!(config.source);
+    saved.settings["extra"]["client_id"] = json!(config.client_id);
+    let manager = AuthManager::new(
+        Arc::new(CliOAuth {
+            principal: Mutex::new("11111111-1111-4111-8111-111111111111".into()),
+        }),
+        Arc::new(SessionSecretStore::default()),
+        Arc::new(SessionSecretStore::default()),
+        Arc::new(TestLifecycle(Default::default())),
+    );
+    // when
+    let context = manager.context(&saved, 3_600_000).await;
+    // then
+    assert!(matches!(
+        context.unwrap(),
+        Some(TransientAuth::EntraToken { .. })
+    ));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn 실패한_cli의_표준_오류에_있는_비밀은_응답에_노출하지_않는다() {

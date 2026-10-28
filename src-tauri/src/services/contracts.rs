@@ -5,6 +5,7 @@ use serde_json::Value;
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
 pub const MAX_DEADLINE_MS: u64 = 120_000;
+pub const MAX_JOB_DEADLINE_MS: u64 = 3_600_000;
 pub const REQUEST_SCHEMA: &str =
     include_str!("../../../packages/service-contracts/schema/v1/request.json");
 pub const RESPONSE_SCHEMA: &str =
@@ -114,6 +115,16 @@ pub enum Operation {
     AuthLogout,
     #[serde(rename = "credential.import")]
     CredentialImport,
+}
+
+impl Operation {
+    /// The longest `deadline_ms` the contract accepts for this operation.
+    pub const fn max_deadline_ms(self) -> u64 {
+        match self {
+            Operation::QueryExecute => MAX_JOB_DEADLINE_MS,
+            _ => MAX_DEADLINE_MS,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -282,6 +293,8 @@ pub enum ErrorCode {
     ApplyTimeout,
     #[serde(rename = "DRIVER_EXITED")]
     DriverExited,
+    #[serde(rename = "DATABASE_ERROR")]
+    DatabaseError,
     #[serde(rename = "OUTCOME_UNKNOWN")]
     OutcomeUnknown,
     #[serde(rename = "WRITE_INTENT_REQUIRED")]

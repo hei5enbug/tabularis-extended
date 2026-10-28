@@ -59,6 +59,8 @@ pub(crate) struct DriverState {
     pub objects: AtomicUsize,
     /// Columns the catalog describes; three when zero.
     pub columns: AtomicUsize,
+    /// The reply to `catalog.describe` when set.
+    pub described: Mutex<Option<Value>>,
     pub hold: AtomicBool,
     pub entered: AtomicUsize,
     pub ignore_cancel: AtomicBool,
@@ -85,6 +87,7 @@ impl Default for DriverState {
             cell_bytes: Default::default(),
             objects: Default::default(),
             columns: Default::default(),
+            described: Default::default(),
             hold: Default::default(),
             entered: Default::default(),
             ignore_cancel: Default::default(),
@@ -408,6 +411,9 @@ impl DatabaseDriver for MockDriver {
                     }
                 },
                 "catalog.describe" => match self.state.columns.load(Ordering::SeqCst) {
+                    _ if self.state.described.lock().unwrap().is_some() => {
+                        self.state.described.lock().unwrap().clone().unwrap_or_default()
+                    }
                     0 => {
                         json!({"columns":[{"name":"b","native_type":"text","is_primary_key":true,"primary_key_position":2},{"name":"a","native_type":"int4","is_primary_key":true,"primary_key_position":1},{"name":"payload","native_type":"jsonb"}]})
                     }

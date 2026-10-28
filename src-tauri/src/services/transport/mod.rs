@@ -74,9 +74,12 @@ pub enum SqlFlavor {
 /// connection's own metadata.
 #[derive(Clone, Debug)]
 pub struct CatalogTraits {
-    /// Object kinds the driver can list: `table`, `view`,
-    /// `materialized_view`, `routine`, `trigger`.
+    /// Object kinds the driver can list, drawn from
+    /// [`tool_catalog::OBJECT_KINDS`].
     pub kinds: Vec<String>,
+    /// Whether `catalog.describe` accepts every kind in `kinds`, not only
+    /// `table` and `view`.
+    pub extended_describe: bool,
     pub flavor: SqlFlavor,
     /// Schema the driver uses when a call names none.
     pub default_schema: Option<String>,

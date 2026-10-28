@@ -1,6 +1,6 @@
 use super::{
     backend::{CancellationSignal, SavedConnection, TransientAuth},
-    contracts::ErrorCode,
+    contracts::{ErrorCode, MAX_DEADLINE_MS},
     credentials::{Secret, SecretSlot, SecretStore},
     dispatch::{CallerContext, CallerTransport},
     error::{failure, ServiceResult},
@@ -295,6 +295,9 @@ impl AuthManager {
         connection: &SavedConnection,
         deadline_ms: u64,
     ) -> ServiceResult<Option<TransientAuth>> {
+        // A token is checked when the driver logs in, so a long job needs it
+        // only for the login, not for its whole deadline.
+        let deadline_ms = deadline_ms.min(MAX_DEADLINE_MS);
         let config = match AuthConfig::from_connection(connection)? {
             Some(config) => config,
             None => {

@@ -19,6 +19,7 @@ use std::{future::Future, sync::Arc};
 
 pub(crate) const DEFAULT_TIMEOUT_MS: u64 = 110_000;
 pub(crate) const MAX_TIMEOUT_MS: u64 = 120_000;
+pub(crate) const LONGER_READS_HINT: &str = "For a read that needs longer, use query_execute with deadline_ms up to 3600000 and poll job_get and job_result.";
 const MAX_LIMIT: u64 = 1000;
 const MAX_ADDITIONAL_SETS: usize = 32;
 const MAX_NAME_CHARS: usize = 128;
@@ -113,7 +114,7 @@ pub(super) fn advertise_timeout(mut tools: Value) -> Value {
 pub(super) fn stopped_waiting(timeout_ms: u64) -> JsonRpcError {
     JsonRpcError {
         code: -32000,
-        message: format!("QUERY_TIMEOUT: the query ran longer than timeout_ms={timeout_ms}; the host stopped waiting and asked the driver to cancel, but this driver cannot confirm that the server stopped the statement"),
+        message: format!("QUERY_TIMEOUT: the query ran longer than timeout_ms={timeout_ms}; the host stopped waiting and asked the driver to cancel, but this driver cannot confirm that the server stopped the statement. {LONGER_READS_HINT}"),
         data: None,
     }
 }
@@ -174,7 +175,7 @@ fn deadline_failure(timeout_ms: u64, cancel_state: Option<&str>) -> Failure {
     Failure {
         error: JsonRpcError {
             code: -32000,
-            message: base + &detail,
+            message: format!("{base}{detail}. {LONGER_READS_HINT}"),
             data: None,
         },
         status: "timeout",

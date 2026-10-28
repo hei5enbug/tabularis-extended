@@ -557,7 +557,7 @@ fn 올바른_sqlserver_database_error는_보존하고_그_문구를_메시지로
     let actual = super::super::error::redact_error(error);
 
     // then
-    assert_eq!(actual.code, ErrorCode::DriverExited);
+    assert_eq!(actual.code, ErrorCode::DatabaseError);
     assert_eq!(actual.message, text);
     assert_eq!(
         actual.details,
@@ -592,6 +592,7 @@ fn 올바른_postgresql_database_error는_알려진_필드만_보존한다() {
     let actual = super::super::error::redact_error(error);
 
     // then
+    assert_eq!(actual.code, ErrorCode::DatabaseError);
     assert_eq!(actual.message, "ERROR: division by zero");
     assert_eq!(
         actual.details,
@@ -668,6 +669,7 @@ fn 잘못된_database_error는_통째로_버리고_기존_고정_문구를_쓴�
         let actual = super::super::error::redact_error(error);
 
         // then
+        assert_eq!(actual.code, ErrorCode::DriverExited, "{database_error}");
         assert_eq!(actual.details, Value::Null, "{database_error}");
         assert_eq!(
             actual.message,
@@ -686,11 +688,55 @@ fn database_error가_없는_오류는_계속_고정_문구로_가리고_알_수_
     let actual = super::super::error::redact_error(error);
 
     // then
+    assert_eq!(actual.code, ErrorCode::DriverExited);
     assert_eq!(actual.details, Value::Null);
     assert_eq!(
         actual.message,
         super::super::error::failure(ErrorCode::DriverExited).message
     );
+}
+
+#[test]
+fn 실행되지_않은_문장_오류는_database_error_코드이고_적용_여부를_바꾸지_않는다() {
+    // given
+    let mut error = driver_exited(
+        json!({"database_error":{"engine":"sqlserver","message":"Conversion failed","errors":[{"number":245,"severity":16,"state":1}]}}),
+    );
+    error.outcome = Outcome::NotApplied;
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    assert_eq!(actual.code, ErrorCode::DatabaseError);
+    assert_eq!(actual.outcome, Outcome::NotApplied);
+    assert_eq!(actual.message, "Conversion failed");
+}
+
+#[test]
+fn database_error가_있어도_드라이버_종료가_아닌_코드는_바꾸지_않는다() {
+    // given
+    let mut error = super::super::error::failure(ErrorCode::PermissionDenied);
+    error.details = json!({"database_error":{"engine":"sqlserver","message":"denied"}});
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    assert_eq!(actual.code, ErrorCode::PermissionDenied);
+}
+
+#[test]
+fn database_error_없이_고정_문구만_가진_문장_오류는_고정_문구를_쓴다() {
+    // given
+    let error = super::super::error::failure(ErrorCode::DatabaseError);
+
+    // when
+    let actual = super::super::error::redact_error(error);
+
+    // then
+    assert_eq!(actual.code, ErrorCode::DatabaseError);
+    assert_eq!(actual.message, "The database rejected the statement.");
 }
 
 #[test]
@@ -705,6 +751,85 @@ fn 이미_가려진_database_error를_다시_가려도_같다() {
 
     // then
     assert_eq!(twice, once);
+}
+
+#[test]
+fn 연결을_가리키는_문자열은_id가_이름보다_먼저_맞는다() {
+    // given
+    let saved = [("id-a", "Alpha"), ("id-b", "id-a"), ("id-c", "alpha")];
+
+    // when
+    let by_id = super::super::backend::matching_ids(saved.iter().copied(), "id-a");
+    let by_name = super::super::backend::matching_ids(saved.iter().copied(), "ALPHA");
+    let unknown = super::super::backend::matching_ids(saved.iter().copied(), "beta");
+
+    // then
+    assert_eq!(by_id, ["id-a"]);
+    assert_eq!(by_name, ["id-a", "id-c"]);
+    assert!(unknown.is_empty());
+}
+
+#[test]
+fn 없는_연결과_이름이_겹친_연결의_오류는_입력값과_id를_메시지에_담는다() {
+    // given
+    let missing = super::super::error::connection_not_found("TxTestSQL");
+    let ids = vec!["id-a".to_owned(), "id-c".to_owned()];
+    let ambiguous = super::super::error::ambiguous_connection("Alpha", &ids);
+
+    // when
+    let missing = super::super::error::redact_error(missing);
+    let ambiguous = super::super::error::redact_error(ambiguous);
+    let again = super::super::error::redact_error(ambiguous.clone());
+
+    // then
+    assert_eq!(missing.code, ErrorCode::ConnectionNotFound);
+    assert!(missing.message.contains("\"TxTestSQL\""));
+    assert_eq!(ambiguous.code, ErrorCode::InvalidArgument);
+    assert!(ambiguous.message.contains("\"Alpha\""));
+    assert!(ambiguous.message.contains("id-a, id-c"));
+    assert_eq!(again, ambiguous);
+}
+
+#[test]
+fn 연결_조회_정보가_형식에_맞지_않으면_고정_문구로_가린다() {
+    for (code, lookup) in [
+        (
+            ErrorCode::ConnectionNotFound,
+            json!({"requested":"x","matches":["id-a"]}),
+        ),
+        (
+            ErrorCode::InvalidArgument,
+            json!({"requested":"x","matches":["id-a"]}),
+        ),
+        (
+            ErrorCode::InvalidArgument,
+            json!({"requested":"x","matches":["id a","id-b"]}),
+        ),
+        (
+            ErrorCode::ConnectionNotFound,
+            json!({"requested":"\u{0}","matches":[]}),
+        ),
+        (
+            ErrorCode::PermissionDenied,
+            json!({"requested":"x","matches":[]}),
+        ),
+    ] {
+        // given
+        let mut error = super::super::error::failure(code);
+        error.message = "synthetic-private-password".into();
+        error.details = json!({"connection_lookup": lookup.clone()});
+
+        // when
+        let actual = super::super::error::redact_error(error);
+
+        // then
+        assert_eq!(actual.details, Value::Null, "{lookup}");
+        assert_eq!(
+            actual.message,
+            super::super::error::failure(code).message,
+            "{lookup}"
+        );
+    }
 }
 
 struct PolicyAccess;

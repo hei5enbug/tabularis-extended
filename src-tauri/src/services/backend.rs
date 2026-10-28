@@ -31,12 +31,38 @@ pub struct PermissionScope {
     pub allow_writes: bool,
 }
 
+/// The ids a caller's text refers to among `(id, name)` pairs: the connection
+/// whose id it is, otherwise every connection whose name equals it ignoring
+/// ASCII case.
+pub fn matching_ids<'a>(
+    connections: impl Iterator<Item = (&'a str, &'a str)> + Clone,
+    given: &str,
+) -> Vec<String> {
+    if let Some((id, _)) = connections.clone().find(|(id, _)| *id == given) {
+        return vec![id.to_owned()];
+    }
+    connections
+        .filter(|(_, name)| name.eq_ignore_ascii_case(given))
+        .map(|(id, _)| id.to_owned())
+        .collect()
+}
+
 #[async_trait]
 pub trait ConnectionBackend: Send + Sync {
     async fn validate_settings(&self, driver: &str, settings: &Value) -> ServiceResult<()>;
     async fn rotate_auth_revision(&self, id: &str) -> ServiceResult<String>;
     async fn list(&self) -> ServiceResult<Vec<SavedConnection>>;
     async fn get(&self, id: &str) -> ServiceResult<SavedConnection>;
+    /// Ids of the saved connections that `given` names, see `matching_ids`.
+    async fn find_ids(&self, given: &str) -> ServiceResult<Vec<String>> {
+        let saved = self.list().await?;
+        Ok(matching_ids(
+            saved
+                .iter()
+                .map(|connection| (connection.id.as_str(), connection.name.as_str())),
+            given,
+        ))
+    }
     async fn create(
         &self,
         name: &str,

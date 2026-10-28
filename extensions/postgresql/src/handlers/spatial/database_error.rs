@@ -52,6 +52,29 @@ pub(super) fn value(
     Some(error)
 }
 
+/// The server's own wording, as psql prints it, without the client's debug
+/// dump of the error.
+pub(super) fn brief(
+    severity: &str,
+    message: &str,
+    sqlstate: &str,
+    detail: Option<&str>,
+    hint: Option<&str>,
+    position: Option<u32>,
+) -> String {
+    let mut text = format!("{severity}: {message} (SQLSTATE {sqlstate})");
+    if let Some(detail) = detail {
+        text.push_str(&format!("\nDETAIL: {detail}"));
+    }
+    if let Some(hint) = hint {
+        text.push_str(&format!("\nHINT: {hint}"));
+    }
+    if let Some(position) = position {
+        text.push_str(&format!("\nPOSITION: {position}"));
+    }
+    text
+}
+
 /// `None` unless the server itself raised the error while running a statement.
 pub(super) fn details(error: &tokio_postgres::Error) -> Option<Value> {
     let database = error.as_db_error()?;
@@ -60,7 +83,14 @@ pub(super) fn details(error: &tokio_postgres::Error) -> Option<Value> {
         _ => None,
     };
     value(
-        &crate::client::format_pg_error(error),
+        &brief(
+            database.severity(),
+            database.message(),
+            database.code().code(),
+            database.detail(),
+            database.hint(),
+            position,
+        ),
         database.code().code(),
         database.detail(),
         database.hint(),

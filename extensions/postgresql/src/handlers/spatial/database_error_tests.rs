@@ -75,6 +75,43 @@ fn 문구는_사천_바이트로_글자_경계에서_자른다() {
 }
 
 #[test]
+fn 서버_문구는_디버그_출력_없이_sqlstate와_선택_필드를_한_줄씩_붙인다() {
+    // given
+    let fields = ("ERROR", "division by zero", "22012");
+
+    // when
+    let actual = brief(
+        fields.0,
+        fields.1,
+        fields.2,
+        Some("row 1"),
+        Some("check divisor"),
+        Some(8),
+    );
+
+    // then
+    assert_eq!(
+        actual,
+        "ERROR: division by zero (SQLSTATE 22012)\nDETAIL: row 1\nHINT: check divisor\nPOSITION: 8"
+    );
+}
+
+#[test]
+fn 선택_필드가_없는_서버_문구는_한_줄이다() {
+    // given
+    let fields = ("ERROR", "relation \"x\" does not exist", "42P01");
+
+    // when
+    let actual = brief(fields.0, fields.1, fields.2, None, None, None);
+
+    // then
+    assert_eq!(
+        actual,
+        "ERROR: relation \"x\" does not exist (SQLSTATE 42P01)"
+    );
+}
+
+#[test]
 fn 서버가_만들지_않은_오류에는_database_error가_없다() {
     // given
     let error = tokio_postgres::Error::__private_api_timeout();

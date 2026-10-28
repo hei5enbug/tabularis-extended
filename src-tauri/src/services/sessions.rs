@@ -185,6 +185,7 @@ impl SessionManager {
     }
     async fn rollback_or_discard(&self, session: &Session, mut context: DriverContext) {
         context.session_handle = Some(session.handle.clone());
+        context.read_only = session.read_only;
         if !matches!(
             tokio::time::timeout(
                 Duration::from_millis(context.deadline_ms),
@@ -217,6 +218,9 @@ impl SessionManager {
         lease.guard.closed = true;
         let mut context = context;
         context.session_handle = Some(lease.guard.handle.clone());
+        // The driver checks the session's own mode, and rolling back or closing
+        // a write session needs no write intent of its own.
+        context.read_only = lease.guard.read_only;
         let result = tokio::time::timeout(
             Duration::from_millis(context.deadline_ms),
             self.driver

@@ -4,6 +4,8 @@ use serde_json::Value;
 use super::SpatialError;
 use crate::models::ConnectionParams;
 
+pub const MAX_DEADLINE_MS: u64 = 3_600_000;
+
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DriverContext {
@@ -42,7 +44,7 @@ impl DriverContext {
             || context.request_id.is_empty()
             || context.request_id.chars().count() > 128
             || context.deadline_ms == 0
-            || context.deadline_ms > 120_000
+            || context.deadline_ms > MAX_DEADLINE_MS
         {
             return Err(SpatialError::argument("Invalid driver context"));
         }
@@ -274,3 +276,7 @@ pub fn positions(geometry: &Value) -> Result<usize, SpatialError> {
     }
     coordinates(&geometry["coordinates"])
 }
+
+#[cfg(test)]
+#[path = "types_tests.rs"]
+mod types_tests;

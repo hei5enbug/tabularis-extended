@@ -169,44 +169,122 @@ async fn 구형_도구_출력은_인자가_없으면_이전_서버와_바이트�
     assert_eq!(actual, expected);
 }
 
+async fn call_legacy(config: &AppConfig, name: &str, args: Value) -> Result<Value, JsonRpcError> {
+    let mut audit = CallAudit::for_tool(name);
+    dispatch_tool(name, args.as_object(), config, "golden-session", &mut audit).await
+}
+
+fn payload(result: &Value) -> Value {
+    assert!(
+        result.get("structuredContent").is_none(),
+        "a structuredContent without the payload hides it from clients"
+    );
+    serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
 #[tokio::test]
-async fn 선택_인자를_쓰면_텍스트는_그대로이고_유효_데이터베이스와_스키마를_추가로_알린다() {
+async fn 스키마를_주면_run_query는_행과_유효_데이터베이스와_스키마를_같은_본문에_담는다() {
     // given
     let _guard = crate::drivers::registry::REGISTRY_TEST_LOCK.lock().await;
     crate::drivers::registry::register_driver(sqlite::SqliteDriver::new()).await;
     let _fixture = Fixture::new().await;
     let config = AppConfig::default();
-    let run = |args: Value| {
-        let config = config.clone();
-        async move {
-            let mut audit = CallAudit::for_tool("run_query");
-            dispatch_tool(
-                "run_query",
-                args.as_object(),
-                &config,
-                "golden-session",
-                &mut audit,
-            )
-            .await
-        }
-    };
     let plain = json!({"connection_id":"fx-sqlite","query":"select id from users order by id"});
+    let chosen = json!({"connection_id":"fx-sqlite","query":"select id from users order by id","schema":"main"});
     // when
-    let baseline = run(plain.clone()).await.unwrap();
-    let with_schema = run(json!({"connection_id":"fx-sqlite","query":"select id from users order by id","schema":"main"}))
-        .await
-        .unwrap();
-    let unknown_database =
-        run(json!({"connection_id":"fx-sqlite","query":"select 1","database":"missing"}))
-            .await
-            .unwrap_err();
+    let baseline = call_legacy(&config, "run_query", plain).await.unwrap();
+    let with_schema = call_legacy(&config, "run_query", chosen).await.unwrap();
     // then
+    let body = payload(&with_schema);
+    assert_eq!(body["rows"], json!([[1], [2], [3]]));
+    assert_eq!(body["columns"], json!(["id"]));
+    assert_eq!(body["effective"]["schema"], "main");
+    assert!(body["effective"]["database"].is_string());
     assert!(baseline.get("structuredContent").is_none());
-    assert_eq!(with_schema["content"], baseline["content"]);
-    assert_eq!(
-        with_schema["structuredContent"]["effective"]["schema"],
-        "main"
+    assert!(payload(&baseline).get("effective").is_none());
+}
+
+#[tokio::test]
+async fn 스키마를_주면_describe_table은_열과_유효_데이터베이스와_스키마를_같은_본문에_담는다() {
+    // given
+    let _guard = crate::drivers::registry::REGISTRY_TEST_LOCK.lock().await;
+    crate::drivers::registry::register_driver(sqlite::SqliteDriver::new()).await;
+    let _fixture = Fixture::new().await;
+    let config = AppConfig::default();
+    let plain = json!({"connection_id":"fx-sqlite","table_name":"users"});
+    let chosen = json!({"connection_id":"fx-sqlite","table_name":"users","schema":"main"});
+    // when
+    let baseline = payload(&call_legacy(&config, "describe_table", plain).await.unwrap());
+    let with_schema = payload(
+        &call_legacy(&config, "describe_table", chosen)
+            .await
+            .unwrap(),
     );
+    // then
+    assert_eq!(with_schema["table"], "users");
+    let names: Vec<&str> = with_schema["columns"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|column| column["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["id", "name", "email"]);
+    assert_eq!(with_schema["effective"]["schema"], "main");
+    assert!(baseline.get("effective").is_none());
+}
+
+#[tokio::test]
+async fn 스키마를_주면_list_tables는_테이블과_유효_데이터베이스와_스키마를_같은_본문에_담는다() {
+    // given
+    let _guard = crate::drivers::registry::REGISTRY_TEST_LOCK.lock().await;
+    crate::drivers::registry::register_driver(sqlite::SqliteDriver::new()).await;
+    let _fixture = Fixture::new().await;
+    let config = AppConfig::default();
+    let plain = json!({"connection_id":"fx-sqlite"});
+    let chosen = json!({"connection_id":"fx-sqlite","schema":"main"});
+    // when
+    let baseline = payload(&call_legacy(&config, "list_tables", plain).await.unwrap());
+    let with_schema = payload(&call_legacy(&config, "list_tables", chosen).await.unwrap());
+    // then
+    assert!(baseline.is_array());
+    assert_eq!(with_schema["tables"], baseline);
+    assert_eq!(with_schema["effective"]["schema"], "main");
+}
+
+#[tokio::test]
+async fn toon으로_받아도_스키마를_주면_본문에_행과_유효_스키마가_함께_있다() {
+    // given
+    let _guard = crate::drivers::registry::REGISTRY_TEST_LOCK.lock().await;
+    crate::drivers::registry::register_driver(sqlite::SqliteDriver::new()).await;
+    let _fixture = Fixture::new().await;
+    let config = AppConfig::default();
+    let chosen = json!({"connection_id":"fx-sqlite","query":"select id from users order by id","schema":"main","output_format":"toon"});
+    // when
+    let result = call_legacy(&config, "run_query", chosen).await.unwrap();
+    // then
+    assert!(result.get("structuredContent").is_none());
+    let text = result["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("rows"), "{text}");
+    assert!(text.contains("effective"), "{text}");
+    assert!(text.contains("main"), "{text}");
+}
+
+#[tokio::test]
+async fn 알_수_없는_데이터베이스는_계속_잘못된_인자로_거부한다() {
+    // given
+    let _guard = crate::drivers::registry::REGISTRY_TEST_LOCK.lock().await;
+    crate::drivers::registry::register_driver(sqlite::SqliteDriver::new()).await;
+    let _fixture = Fixture::new().await;
+    let config = AppConfig::default();
+    // when
+    let unknown_database = call_legacy(
+        &config,
+        "run_query",
+        json!({"connection_id":"fx-sqlite","query":"select 1","database":"missing"}),
+    )
+    .await
+    .unwrap_err();
+    // then
     assert_eq!(unknown_database.code, -32602);
     assert!(unknown_database.message.starts_with("INVALID_ARGUMENT"));
 }

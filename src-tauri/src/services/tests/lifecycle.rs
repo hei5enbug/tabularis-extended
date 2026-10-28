@@ -1,5 +1,13 @@
 use super::{
-    super::{backend::SessionFinish, contracts::*, jobs::JobManager, sessions::SessionManager},
+    super::{
+        backend::SessionFinish,
+        contracts::*,
+        jobs::{running_expiry_ms, JobManager, JOB_TTL_MS},
+        results::reservation_expiry_ms,
+        runtime::CANCEL_GRACE_MS,
+        sessions::SessionManager,
+        storage::now_ms,
+    },
     support::*,
 };
 use serde_json::json;
@@ -387,6 +395,34 @@ async fn 읽기_세션의_commit도_정상적으로_물리_연결을_종료한�
 }
 
 #[tokio::test]
+async fn 쓰기_세션의_rollback은_쓰기_의도_없이도_세션의_쓰기_모드로_드라이버에_보낸다() {
+    // given
+    let driver = Arc::new(TestDriver::new());
+    let manager = SessionManager::new(driver.clone());
+    let saved = connection("conn-a");
+    let id = manager
+        .open(&saved, "fixture", false, &caller(), context("conn-a"))
+        .await
+        .unwrap();
+
+    // when
+    let actual = manager
+        .finish(
+            &id,
+            &saved,
+            &caller(),
+            SessionFinish::Rollback,
+            context("conn-a"),
+        )
+        .await;
+
+    // then
+    assert!(actual.is_ok());
+    assert_eq!(*driver.finish_read_only.lock().unwrap(), [false]);
+    assert_eq!(driver.discarded.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn 취소_제어_요청은_일반_작업_semaphore를_기다리지_않는다() {
     // given
     let directory = TestDirectory::new();
@@ -471,4 +507,145 @@ fn 작업_목록_조회와_작업_종료가_동시에_반복돼도_교착하지_
     for reader in readers {
         reader.join().unwrap();
     }
+}
+
+fn 성공_응답(request: &ServiceRequest, job_id: &str) -> ServiceResponse {
+    ServiceResponse {
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        connection_id: request.connection_id.clone(),
+        status: JobStatus::Succeeded,
+        job_id: Some(job_id.into()),
+        result_id: None,
+        data: json!({}),
+        page: Page::default(),
+        limits: Limits::default(),
+        metrics: Metrics::default(),
+        warnings: Vec::new(),
+        error: None,
+    }
+}
+
+#[tokio::test]
+async fn 한_시간짜리_작업은_15분이_지나도_기한과_취소_유예가_끝나기_전에는_읽을_수_있다() {
+    // given
+    let directory = TestDirectory::new();
+    let manager = JobManager::new("owner".into(), directory.0.clone()).unwrap();
+    let mut input = query("SELECT 1");
+    input.deadline_ms = MAX_JOB_DEADLINE_MS;
+    let lease = manager
+        .begin(&input, &caller(), false, false)
+        .await
+        .unwrap();
+
+    // when
+    let record = manager.get(&lease.id(), "owner", &caller()).unwrap();
+    let created = record.created_at_ms;
+    let minutes = |count: u64| created + count * 60 * 1000;
+    let actual = [
+        record.expired_at(minutes(20)),
+        record.expired_at(created + MAX_JOB_DEADLINE_MS + CANCEL_GRACE_MS - 1),
+        record.expired_at(created + MAX_JOB_DEADLINE_MS + CANCEL_GRACE_MS),
+    ];
+
+    // then
+    assert_eq!(actual, [false, false, true]);
+}
+
+#[test]
+fn 짧은_작업의_실행_중_만료는_기존_15분을_유지한다() {
+    // given
+    let created = 1_000_000;
+
+    // when
+    let actual = [
+        running_expiry_ms(created, 30_000),
+        running_expiry_ms(created, 120_000),
+        running_expiry_ms(created, MAX_JOB_DEADLINE_MS),
+    ];
+
+    // then
+    assert_eq!(
+        actual,
+        [
+            created + JOB_TTL_MS,
+            created + JOB_TTL_MS,
+            created + MAX_JOB_DEADLINE_MS + CANCEL_GRACE_MS
+        ]
+    );
+}
+
+#[tokio::test]
+async fn 끝난_작업은_끝난_시각부터_15분_동안_읽을_수_있다() {
+    // given
+    let directory = TestDirectory::new();
+    let manager = JobManager::new("owner".into(), directory.0.clone()).unwrap();
+    let mut input = query("SELECT 1");
+    input.deadline_ms = MAX_JOB_DEADLINE_MS;
+    let lease = manager
+        .begin(&input, &caller(), false, false)
+        .await
+        .unwrap();
+    let id = lease.id();
+
+    // when
+    let before = now_ms();
+    lease.finish(성공_응답(&input, &id)).unwrap();
+    let after = now_ms();
+    let record = manager.get(&id, "owner", &caller()).unwrap();
+
+    // then
+    assert_eq!(record.status, JobStatus::Succeeded);
+    assert!(record.expires_at_ms >= before + JOB_TTL_MS);
+    assert!(record.expires_at_ms <= after + JOB_TTL_MS);
+    assert!(!record.expired_at(before + JOB_TTL_MS - 1));
+    assert!(record.expired_at(after + JOB_TTL_MS));
+}
+
+#[tokio::test]
+async fn 끝나기_전에_종료된_작업은_종료된_시각부터_15분_동안_읽을_수_있다() {
+    // given
+    let directory = TestDirectory::new();
+    let manager = JobManager::new("owner".into(), directory.0.clone()).unwrap();
+    let mut input = query("SELECT 1");
+    input.deadline_ms = MAX_JOB_DEADLINE_MS;
+    let lease = manager
+        .begin(&input, &caller(), false, false)
+        .await
+        .unwrap();
+    let id = lease.id();
+
+    // when
+    let before = now_ms();
+    drop(lease);
+    let after = now_ms();
+    let record = manager.get(&id, "owner", &caller()).unwrap();
+
+    // then
+    assert_eq!(record.status, JobStatus::Interrupted);
+    assert!(record.expires_at_ms >= before + JOB_TTL_MS);
+    assert!(record.expires_at_ms <= after + JOB_TTL_MS);
+}
+
+#[test]
+fn 결과_예약은_한_시간짜리_기한을_넘겨서_유지되고_그보다_길게_잡지_않는다() {
+    // given
+    let now = 5_000_000;
+
+    // when
+    let actual = [
+        reservation_expiry_ms(now, 30_000),
+        reservation_expiry_ms(now, MAX_JOB_DEADLINE_MS),
+        reservation_expiry_ms(now, MAX_JOB_DEADLINE_MS * 2),
+    ];
+
+    // then
+    assert_eq!(
+        actual,
+        [
+            now + 31_000,
+            now + MAX_JOB_DEADLINE_MS + 1000,
+            now + MAX_JOB_DEADLINE_MS + 1000
+        ]
+    );
 }

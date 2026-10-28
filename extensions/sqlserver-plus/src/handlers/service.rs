@@ -191,12 +191,21 @@ async fn run(
         "execute_query_exact" => {
             let input: exact::ExactInput = types::input(params)?;
             let bindings = exact::validate(&input, context.read_only)?;
+            // The TDS client reports rows returned, not rows affected, so a
+            // write whose last statement is DML selects @@ROWCOUNT after it.
+            let counted = !context.read_only
+                && crate::driver::helpers::query_reports_affected_rows(&input.text);
+            let text = if counted {
+                crate::driver::helpers::wrap_dml_with_rowcount(&input.text)
+            } else {
+                input.text
+            };
             (
-                input.text,
+                text,
                 bindings,
                 input.max_rows,
                 input.max_bytes,
-                false,
+                counted,
                 None,
             )
         }
@@ -278,7 +287,8 @@ async fn run(
         )
         .await?
     } else {
-        exact::collect(
+        let batch = method == "execute_query_exact" && matches!(lease, Lease::Session(..));
+        exact::collect_with(
             lease.client(),
             &prepared.0,
             prepared.1,
@@ -286,6 +296,7 @@ async fn run(
             prepared.2,
             prepared.3,
             prepared.4,
+            batch,
         )
         .await?
     };

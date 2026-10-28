@@ -26,7 +26,7 @@ use crate::plugins::rpc::{
 };
 use crate::services::{
     backend::{CancellationSignal, DriverContext, TransientAuth},
-    contracts::{ErrorCode, Outcome, ServiceError, ServiceResponse},
+    contracts::{ErrorCode, Outcome, ServiceError, ServiceResponse, MAX_JOB_DEADLINE_MS},
     error::{failure, redact_error, ServiceResult},
 };
 
@@ -835,7 +835,7 @@ impl DatabaseDriver for RpcDriver {
         input: Value,
     ) -> ServiceResult<Value> {
         if context.deadline_ms == 0
-            || context.deadline_ms > 120_000
+            || context.deadline_ms > MAX_JOB_DEADLINE_MS
             || params.driver != self.manifest.id
             || context.connection_id.is_empty()
             || context.connection_id.len() > 128

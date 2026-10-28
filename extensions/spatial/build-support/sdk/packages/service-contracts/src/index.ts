@@ -6,6 +6,7 @@ export * from "./types.js";
 export const PROTOCOL_VERSION = 1 as const;
 export const DEFAULT_DEADLINE_MS = 30_000;
 export const MAX_DEADLINE_MS = 120_000;
+export const MAX_JOB_DEADLINE_MS = 3_600_000;
 export const schemaDirectory = new URL("../schema/v1/", import.meta.url);
 export const fixtureFile = new URL("../fixtures/v1/validation.json", import.meta.url);
 export const requestSchema = JSON.parse(readFileSync(new URL("request.json", schemaDirectory), "utf8")) as Record<string, unknown>;

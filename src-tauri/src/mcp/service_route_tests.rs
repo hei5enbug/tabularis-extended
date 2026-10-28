@@ -225,6 +225,7 @@ fn 서비스가_실행_전에_거부한_문장은_기존_관문으로_넘긴다(
 fn 쿼리_오류와_권한_오류는_넘기지_않고_코드_이름과_함께_돌려준다() {
     // given
     let cases = [
+        (ErrorCode::DatabaseError, "DATABASE_ERROR"),
         (ErrorCode::DriverExited, "DRIVER_EXITED"),
         (ErrorCode::PermissionDenied, "PERMISSION_DENIED"),
         (ErrorCode::InvalidArgument, "INVALID_ARGUMENT"),
@@ -259,7 +260,7 @@ fn with_database_error(code: ErrorCode) -> ServiceError {
 #[test]
 fn 데이터베이스가_알려준_문구는_코드_접두사_없이_그대로_돌려준다() {
     // given
-    let error = with_database_error(ErrorCode::DriverExited);
+    let error = with_database_error(ErrorCode::DatabaseError);
 
     // when
     let actual = judge(outcome(Some(error), JobStatus::Failed, None), 1000);
@@ -362,7 +363,13 @@ fn 마감이_지난_쿼리는_취소_상태에_따라_QUERY_TIMEOUT으로_알린
         let Judged::Failed(failed) = judged else {
             panic!("the deadline was not returned as an error");
         };
-        assert_eq!(failed.error.message, message);
+        assert_eq!(
+            failed.error.message,
+            format!("{message}. {LONGER_READS_HINT}")
+        );
+        assert!(failed.error.message.contains("query_execute"));
+        assert!(failed.error.message.contains("deadline_ms up to 3600000"));
+        assert!(failed.error.message.contains("job_get and job_result"));
         assert_eq!(failed.error.code, -32000);
         assert_eq!(failed.status, "timeout");
     }
@@ -514,7 +521,7 @@ async fn 서비스를_거친_쿼리가_timeout_ms를_넘기면_서버에서_취�
     assert_eq!(error.code, -32000);
     assert_eq!(
         error.message,
-        "QUERY_TIMEOUT: the query ran longer than timeout_ms=150 and was cancelled on the database server"
+        format!("QUERY_TIMEOUT: the query ran longer than timeout_ms=150 and was cancelled on the database server. {LONGER_READS_HINT}")
     );
     assert_eq!(audit.status, "timeout");
     assert_eq!(served.harness.state.cancels.load(Ordering::SeqCst), 1);
@@ -602,7 +609,7 @@ async fn 서비스를_쓰지_않는_경로는_timeout_ms가_지나면_기다리�
     assert_eq!(error.code, -32000);
     assert_eq!(
         error.message,
-        "QUERY_TIMEOUT: the query ran longer than timeout_ms=100; the host stopped waiting and asked the driver to cancel, but this driver cannot confirm that the server stopped the statement"
+        format!("QUERY_TIMEOUT: the query ran longer than timeout_ms=100; the host stopped waiting and asked the driver to cancel, but this driver cannot confirm that the server stopped the statement. {LONGER_READS_HINT}")
     );
     assert_eq!(audit.status, "timeout");
     assert!(started.elapsed() < std::time::Duration::from_millis(500));

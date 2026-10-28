@@ -158,7 +158,7 @@ fn catalog(h: &Harness) -> Vec<Value> {
         .clone()
 }
 #[tokio::test]
-async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔여덟_작업과_미리보기와_작업목록과_서버_도구_둘이다(
+async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔여덟_작업과_미리보기와_작업목록과_서버_도구_둘과_개체_종류_도구이다(
 ) {
     // given
     let h = Harness::new();
@@ -175,12 +175,13 @@ async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔여덟_작�
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names.len(), 52);
+    assert_eq!(names.len(), 53);
     assert!(names.iter().all(|name| pattern(name)));
     assert!(names.iter().all(|name| !EXCLUDED.contains(name)));
     assert!(names.contains(&"table_preview") && names.contains(&"job_list"));
     assert!(names.contains(&"query_explain"));
     assert!(names.contains(&"server_activity") && names.contains(&"server_cancel"));
+    assert!(names.contains(&"catalog_object_kinds"));
     assert!(names.contains(&"map_layer_add") && names.contains(&"connection_test"));
     assert!(!names.contains(&"query_execute_write"));
     assert_eq!(
@@ -273,6 +274,94 @@ async fn 도구_인자는_평평하며_봉투_필드는_도구가_쓰는_것만_
     assert_eq!(preview["properties"]["limit"]["maximum"], 1000);
     let list = &by_name("job_list")["inputSchema"];
     assert_eq!(list["properties"]["limit"]["maximum"], 200);
+}
+#[tokio::test]
+async fn query_execute만_deadline_ms를_한_시간까지_알리고_다른_도구는_120000까지만_알린다() {
+    // given
+    let h = Harness::new();
+    let actual = catalog(&h);
+    let maximum = |name: &str| {
+        actual.iter().find(|tool| tool["name"] == name).unwrap()["inputSchema"]["properties"]
+            ["deadline_ms"]["maximum"]
+            .clone()
+    };
+
+    // when
+    let names = [
+        "query_execute",
+        "query_explain",
+        "connection_test",
+        "catalog_describe",
+        "table_preview",
+    ];
+    let limits: Vec<Value> = names.iter().map(|name| maximum(name)).collect();
+
+    // then
+    assert_eq!(limits, [3_600_000, 120_000, 120_000, 120_000, 120_000]);
+    let description = actual
+        .iter()
+        .find(|tool| tool["name"] == "query_execute")
+        .unwrap()["inputSchema"]["properties"]["deadline_ms"]["description"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(description.contains("job_get") && description.contains("job_result"));
+    assert!(description.contains("MCP server process exits"));
+}
+#[tokio::test]
+async fn query_execute는_한_시간짜리_기한을_드라이버까지_전달하고_초과하면_거부한다() {
+    // given
+    let h = Harness::new();
+    let with_deadline = |operation: &str, deadline_ms: u64| {
+        let mut raw = raw_query("SELECT 1");
+        raw["operation"] = json!(operation);
+        raw["deadline_ms"] = json!(deadline_ms);
+        raw
+    };
+
+    // when
+    let accepted = h
+        .transport
+        .call(
+            with_deadline("query.execute", 3_600_000),
+            support::caller(),
+            None,
+        )
+        .await
+        .unwrap();
+    let too_long = h
+        .transport
+        .call(
+            with_deadline("query.execute", 3_600_001),
+            support::caller(),
+            None,
+        )
+        .await;
+
+    // then
+    assert_eq!(accepted.status, JobStatus::Succeeded);
+    assert_eq!(too_long.unwrap_err().code, ErrorCode::InvalidArgument);
+    let delivered = h.driver.deadlines.lock().unwrap().clone();
+    assert_eq!(delivered.len(), 1);
+    assert!(
+        delivered[0] > 3_590_000 && delivered[0] <= 3_600_000,
+        "{delivered:?}"
+    );
+}
+#[tokio::test]
+async fn 다른_작업은_120001_이상의_기한을_거부한다() {
+    // given
+    let h = Harness::new();
+    let mut raw =
+        serde_json::to_value(support::request(Operation::CatalogDatabases, json!({}))).unwrap();
+    raw["deadline_ms"] = json!(120_001);
+
+    // when
+    let actual = h.transport.call(raw, support::caller(), None).await;
+
+    // then
+    assert_eq!(actual.unwrap_err().code, ErrorCode::InvalidArgument);
+    assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
 async fn 알수없는_인자가_있으면_실행하지_않는다() {
@@ -489,6 +578,95 @@ fn 일반_목록은_응답이_맞으면_전부_싣고_진단_배열만_다섯개
     let data = &actual["structuredContent"]["data"];
     assert_eq!(data["maps"].as_array().unwrap().len(), 40);
     assert_eq!(data["warnings"].as_array().unwrap().len(), 5);
+    assert_eq!(actual["structuredContent"]["presentation_truncated"], true);
+}
+fn describe_response(data: Value) -> ServiceResponse {
+    let request = support::request(
+        Operation::CatalogDescribe,
+        json!({"table":{"database":null,"schema":null,"table":"orders"}}),
+    );
+    let mut response = ServiceResponse::failure(&request, ErrorCode::InvalidArgument, "fixed");
+    response.error = None;
+    response.status = JobStatus::Succeeded;
+    response.data = data;
+    response
+}
+fn foreign_keys(count: usize) -> Vec<Value> {
+    (0..count)
+        .map(|id| json!({"name":format!("fk_{id}"),"columns":["a"],"ref_schema":"public","ref_table":"parent","ref_columns":["id"],"on_update":"NO ACTION","on_delete":"CASCADE"}))
+        .collect()
+}
+#[test]
+fn describe의_키_정보는_다섯개로_줄이지_않고_긴_정의도_통째로_싣는다() {
+    // given
+    let definition = "select 1 ".repeat(400);
+    let response = describe_response(json!({
+        "columns":[{"name":"id","native_type":"int4"}],
+        "foreign_keys":foreign_keys(12),
+        "indexes":(0..9).map(|id| json!({"name":format!("ix_{id}"),"columns":["a"],"included_columns":[],"is_unique":false,"is_primary":false,"type":"btree","filter":null,"definition":"c".repeat(1500)})).collect::<Vec<_>>(),
+        "keys":[{"name":"pk","kind":"primary_key","columns":["id"],"index":"pk"}],
+        "check_constraints":[{"name":"ck","definition":"d".repeat(1800)}],
+        "definition":definition,
+        "properties":{"labels":(0..8).map(|id| json!(format!("label_{id}"))).collect::<Vec<_>>()},
+    }));
+    // when
+    let actual = present::tool_result(Operation::CatalogDescribe, &response, None);
+    // then
+    let data = &actual["structuredContent"]["data"];
+    assert_eq!(data["foreign_keys"].as_array().unwrap().len(), 12);
+    assert_eq!(data["indexes"].as_array().unwrap().len(), 9);
+    assert_eq!(data["indexes"][8]["definition"].as_str().unwrap().len(), 1500);
+    assert_eq!(data["check_constraints"][0]["definition"].as_str().unwrap().len(), 1800);
+    assert_eq!(data["properties"]["labels"].as_array().unwrap().len(), 8);
+    assert_eq!(data["definition"], definition);
+    assert!(data.get("truncation_reason").is_none());
+    assert_eq!(actual["structuredContent"]["presentation_truncated"], false);
+    assert!(serde_json::to_vec(&actual).unwrap().len() <= 64 * 1024);
+}
+#[test]
+fn describe의_정의가_응답에_맞지_않으면_정의만_줄이고_사유를_밝힌다() {
+    // given
+    let definition = "가".repeat(40_000);
+    let response = describe_response(json!({
+        "columns":[{"name":"id","native_type":"int4"},{"name":"qty","native_type":"int4"}],
+        "foreign_keys":foreign_keys(12),
+        "definition":definition,
+    }));
+    // when
+    let actual = present::tool_result(Operation::CatalogDescribe, &response, None);
+    // then
+    let data = &actual["structuredContent"]["data"];
+    let shown = data["definition"].as_str().unwrap();
+    assert!(shown.len() < definition.len() && shown.len() > 1024);
+    assert!(definition.starts_with(shown));
+    assert_eq!(data["truncated"], true);
+    assert_eq!(data["truncation_reason"], "definition_shortened_to_fit_response");
+    assert_eq!(data["definition_bytes"], definition.len());
+    assert_eq!(data["foreign_keys"].as_array().unwrap().len(), 12);
+    assert_eq!(data["columns"].as_array().unwrap().len(), 2);
+    assert_eq!(data["has_more"], false);
+    assert_eq!(actual["structuredContent"]["presentation_truncated"], true);
+    assert!(serde_json::to_vec(&actual).unwrap().len() <= 64 * 1024);
+}
+#[test]
+fn describe가_아닌_카탈로그_응답의_나머지_필드는_기존처럼_다섯개로_줄인다() {
+    // given
+    let request = support::request(
+        Operation::CatalogObjects,
+        json!({"database":"fixture","schema":null}),
+    );
+    let mut response = ServiceResponse::failure(&request, ErrorCode::InvalidArgument, "fixed");
+    response.error = None;
+    response.status = JobStatus::Succeeded;
+    response.data = json!({
+        "objects":[{"name":"orders","kind":"table"}],
+        "foreign_keys":foreign_keys(12),
+    });
+    // when
+    let actual = present::tool_result(Operation::CatalogObjects, &response, None);
+    // then
+    let data = &actual["structuredContent"]["data"];
+    assert_eq!(data["foreign_keys"].as_array().unwrap().len(), 5);
     assert_eq!(actual["structuredContent"]["presentation_truncated"], true);
 }
 #[test]

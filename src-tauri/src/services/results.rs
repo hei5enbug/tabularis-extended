@@ -1,5 +1,5 @@
 use super::{
-    contracts::{ErrorCode, Limits, Metrics, Page, ResumeMode},
+    contracts::{ErrorCode, Limits, Metrics, Page, ResumeMode, MAX_JOB_DEADLINE_MS},
     error::{failure, ServiceResult},
     security::{digest, opaque_id},
     storage::{now_ms, PrivateStore},
@@ -148,6 +148,13 @@ struct SpatialTokenRecord {
     checksum: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_hash: Option<String>,
+}
+
+/// A reservation outlives the longest deadline a query may carry.
+pub(crate) fn reservation_expiry_ms(now_ms: u64, deadline_ms: u64) -> u64 {
+    now_ms
+        .saturating_add(deadline_ms.min(MAX_JOB_DEADLINE_MS))
+        .saturating_add(1000)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -841,9 +848,7 @@ impl ResultStore {
             &id,
             &CacheRecord::Reservation {
                 connection_id: connection_id.into(),
-                expires_at_ms: now_ms()
-                    .saturating_add(deadline_ms.min(120_000))
-                    .saturating_add(1000),
+                expires_at_ms: reservation_expiry_ms(now_ms(), deadline_ms),
                 bytes,
             },
         )?;

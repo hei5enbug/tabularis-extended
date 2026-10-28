@@ -9,7 +9,7 @@ use super::super::{
         ServiceResponse,
     },
     dispatch::{CallerContext, CallerTransport},
-    error::{failure, ServiceResult},
+    error::{ambiguous_connection, connection_not_found, failure, ServiceResult},
     history::{HistoryQuery, MAX_LIST_LIMIT},
     policy::accepts_write_intent,
 };
@@ -79,10 +79,20 @@ fn bounded(
     }
 }
 
-fn error_with_kind(kind: &str) -> ServiceError {
+fn error_with_kind(kind: &str, supported: &[String]) -> ServiceError {
     let mut error = failure(ErrorCode::UnsupportedOperation);
-    error.details = json!({"object_kind":kind});
+    error.details = json!({"object_kind":kind,"supported_kinds":supported});
     error
+}
+
+/// The kinds `catalog.describe` accepts for a driver.
+fn describable_kinds(traits: &CatalogTraits) -> Vec<String> {
+    traits
+        .kinds
+        .iter()
+        .filter(|kind| traits.extended_describe || matches!(kind.as_str(), "table" | "view"))
+        .cloned()
+        .collect()
 }
 
 fn quote(flavor: SqlFlavor, name: &str) -> String {
@@ -199,13 +209,16 @@ impl ServiceTransport {
                 None => Err(failure(ErrorCode::UnsupportedOperation)),
             };
         };
-        let arguments = match arguments {
+        let mut arguments = match arguments {
             Value::Null => Map::new(),
             Value::Object(arguments) => arguments,
             _ => return Err(failure(ErrorCode::InvalidArgument)),
         };
         if arguments.keys().any(|key| !spec.arguments.contains(key)) {
             return Err(failure(ErrorCode::InvalidArgument));
+        }
+        if let Err(error) = self.resolve_connection(&mut arguments).await {
+            return Ok(present::error_result(error));
         }
         match spec.kind {
             ToolKind::Service(operation) => {
@@ -216,7 +229,28 @@ impl ServiceTransport {
             ToolKind::JobList => self.job_list(arguments, caller).await,
             ToolKind::ServerActivity => self.server_activity(arguments, caller, signal).await,
             ToolKind::ServerCancel => self.server_cancel(arguments, caller, signal).await,
+            ToolKind::CatalogObjectKinds => self.catalog_object_kinds(arguments, caller).await,
         }
+    }
+
+    /// Replaces the id-or-name a caller gave with the id of the one saved
+    /// connection it names.
+    async fn resolve_connection(&self, arguments: &mut Map<String, Value>) -> ServiceResult<()> {
+        let Some(given) = arguments.get("connection_id").and_then(Value::as_str) else {
+            return Ok(());
+        };
+        if given.is_empty() || given.chars().count() > 128 || given.chars().any(char::is_control) {
+            return Ok(());
+        }
+        let given = given.to_owned();
+        let mut ids = self.runtime.connections.find_ids(&given).await?;
+        let id = match ids.len() {
+            0 => return Err(connection_not_found(&given)),
+            1 => ids.remove(0),
+            _ => return Err(ambiguous_connection(&given, &ids)),
+        };
+        arguments.insert("connection_id".into(), Value::String(id));
+        Ok(())
     }
 
     fn envelope(
@@ -288,6 +322,13 @@ impl ServiceTransport {
                             .or(extras.schema.take());
                     }
                     _ => return Err(failure(ErrorCode::InvalidArgument)),
+                }
+                if let Some(kind) = extras
+                    .kind
+                    .as_deref()
+                    .filter(|kind| !matches!(*kind, "table" | "view"))
+                {
+                    input.insert("kind".into(), json!(kind));
                 }
             }
             Operation::CatalogObjects => {
@@ -416,12 +457,13 @@ impl ServiceTransport {
             return Ok(());
         };
         let traits = self.traits(connection).await?;
-        if !traits.kinds.iter().any(|supported| supported == kind) {
-            return Err(error_with_kind(kind));
-        }
-        // The service describes tables and views only.
-        if operation == Operation::CatalogDescribe && !matches!(kind, "table" | "view") {
-            return Err(error_with_kind(kind));
+        let supported = if operation == Operation::CatalogDescribe {
+            describable_kinds(&traits)
+        } else {
+            traits.kinds
+        };
+        if !supported.iter().any(|supported| supported == kind) {
+            return Err(error_with_kind(kind, &supported));
         }
         Ok(())
     }
@@ -488,7 +530,10 @@ impl ServiceTransport {
         // The decode below checks the shape; the connection is needed first
         // to fill a default database.
         let connection = match raw["connection_id"].as_str() {
-            Some(id) => self.runtime.connections.get(id).await.ok(),
+            Some(id) => match self.runtime.connections.get(id).await {
+                Ok(connection) => Some(connection),
+                Err(error) => return Ok(present::error_result(error)),
+            },
             None => None,
         };
         if let Some(connection) = &connection {
@@ -949,6 +994,25 @@ impl ServiceTransport {
                 size = (size / 2).max(if extra.is_empty() { 1 } else { 0 });
             }
         }
+    }
+
+    async fn catalog_object_kinds(
+        self: &Arc<Self>,
+        arguments: Map<String, Value>,
+        caller: CallerContext,
+    ) -> ServiceResult<Value> {
+        let connection_id = text(&arguments, "connection_id")?
+            .ok_or_else(|| failure(ErrorCode::InvalidArgument))?
+            .to_owned();
+        let connection = self.runtime.connections.get(&connection_id).await?;
+        self.runtime.policy.permission(&connection, &caller).await?;
+        let traits = self.traits(&connection).await?;
+        Ok(present::raw_result(&json!({
+            "status":"succeeded",
+            "connection_id":connection_id,
+            "data":{"kinds":traits.kinds,"describable_kinds":describable_kinds(&traits)},
+            "presentation_truncated":false,
+        })))
     }
 
     async fn table_preview(

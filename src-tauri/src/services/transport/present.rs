@@ -16,6 +16,16 @@ const DATA_BUDGET: usize = 12 * 1024;
 const COMPLETE_BUDGET: usize = 48 * 1024;
 const COMPLETE_NODES: usize = 50_000;
 const SAMPLE_ITEMS: usize = 5;
+/// What a described object carries next to its columns. These are rendered
+/// whole; only `definition` is shortened, and only when the reply would not fit.
+const DESCRIBE_WHOLE_KEYS: &[&str] = &[
+    "foreign_keys",
+    "indexes",
+    "keys",
+    "check_constraints",
+    "properties",
+];
+const MIN_DEFINITION: usize = 1024;
 /// Arrays that describe the call rather than hold its answer stay sampled.
 const DIAGNOSTIC_KEYS: &[&str] = &["warnings", "errors", "diagnostics", "reasons", "notices"];
 
@@ -331,9 +341,23 @@ fn list_result(
     let start = usize::try_from(offset)
         .unwrap_or(usize::MAX)
         .min(items.len());
+    let describing = operation == Operation::CatalogDescribe;
     let mut other = Map::new();
     let mut other_truncated = false;
+    let mut definition: Option<&str> = None;
     for (key, value) in object.iter().filter(|(key, _)| key.as_str() != field) {
+        if describing {
+            if key == "definition" {
+                if let Some(text) = value.as_str() {
+                    definition = Some(text);
+                    continue;
+                }
+            }
+            if key == "definition" || DESCRIBE_WHOLE_KEYS.contains(&key.as_str()) {
+                other.insert(key.clone(), value.clone());
+                continue;
+            }
+        }
         let mut presentation = Presentation::sampled();
         other.insert(key.clone(), presentation.value(value, 1));
         other_truncated |= presentation.truncated;
@@ -345,9 +369,23 @@ fn list_result(
             (presentation.value(item, 1), presentation.truncated)
         })
         .collect();
-    let build = |kept: usize| {
+    let build = |kept: usize, definition_len: usize| {
         let mut data = other.clone();
         let next = start + kept;
+        let mut definition_cut = false;
+        if let Some(text) = definition {
+            let shown = shortened(text, definition_len);
+            definition_cut = shown.len() < text.len();
+            data.insert("definition".into(), json!(shown));
+            if definition_cut {
+                data.insert("truncated".into(), json!(true));
+                data.insert(
+                    "truncation_reason".into(),
+                    json!("definition_shortened_to_fit_response"),
+                );
+                data.insert("definition_bytes".into(), json!(text.len()));
+            }
+        }
         data.insert(
             field.into(),
             Value::Array(
@@ -365,6 +403,7 @@ fn list_result(
         );
         data.insert("has_more".into(), json!(next < items.len()));
         let truncated = other_truncated
+            || definition_cut
             || next < items.len()
             || sanitized[..kept].iter().any(|(_, truncated)| *truncated);
         render(
@@ -379,19 +418,43 @@ fn list_result(
             false,
         )
     };
+    let mut definition_len = definition.map_or(0, str::len);
+    if definition_len > MIN_DEFINITION && oversized(&build(sanitized.len(), definition_len)) {
+        let (mut low, mut high) = (MIN_DEFINITION, definition_len - 1);
+        while low < high {
+            let middle = low + (high - low).div_ceil(2);
+            if oversized(&build(sanitized.len(), middle)) {
+                high = middle - 1;
+            } else {
+                low = middle;
+            }
+        }
+        definition_len = low;
+    }
     let (mut low, mut high) = (0usize, sanitized.len());
     while low < high {
         let middle = low + (high - low).div_ceil(2);
-        if oversized(&build(middle)) {
+        if oversized(&build(middle, definition_len)) {
             high = middle - 1;
         } else {
             low = middle;
         }
     }
-    if low == 0 && !sanitized.is_empty() {
+    if low == 0
+        && (!sanitized.is_empty() || (describing && oversized(&build(0, definition_len))))
+    {
         return Some(too_large(response));
     }
-    Some(build(low))
+    Some(build(low, definition_len))
+}
+
+/// `text` cut to at most `limit` bytes on a character boundary.
+fn shortened(text: &str, limit: usize) -> &str {
+    let mut end = text.len().min(limit);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
 }
 
 /// An estimated plan, whole: the host already bounded its size, and sampling

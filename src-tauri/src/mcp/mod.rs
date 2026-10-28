@@ -874,23 +874,17 @@ async fn dispatch_tool(
         "list_tables" => {
             let args = require_args(args)?;
             let format = requested_output_format(Some(args), config)?;
-            let mut result = tool_list_tables(args, config, audit, format).await?;
-            report_effective(&mut result, args, audit);
-            Ok(result)
+            tool_list_tables(args, config, audit, format).await
         }
         "describe_table" => {
             let args = require_args(args)?;
             let format = requested_output_format(Some(args), config)?;
-            let mut result = tool_describe_table(args, config, audit, format).await?;
-            report_effective(&mut result, args, audit);
-            Ok(result)
+            tool_describe_table(args, config, audit, format).await
         }
         "run_query" => {
             let args = require_args(args)?;
             let format = requested_output_format(Some(args), config)?;
-            let mut result = tool_run_query(args, config, session_id, audit, format).await?;
-            report_effective(&mut result, args, audit);
-            Ok(result)
+            tool_run_query(args, config, session_id, audit, format).await
         }
         _ => Err(JsonRpcError {
             code: -32601,
@@ -968,22 +962,36 @@ async fn select_database(
     Ok(())
 }
 
-/// Adds the effective database and schema to a result when the caller chose
-/// either one. The text content is left exactly as the legacy tool wrote it.
-fn report_effective(
-    result: &mut Value,
+/// A tool result whose payload also tells the effective database and schema
+/// when the caller chose either one. Without them the payload is unchanged.
+/// A payload that is not an object is kept under `wrapper_key`.
+fn tool_result_reporting<T: Serialize>(
+    value: &T,
+    wrapper_key: &str,
     args: &serde_json::Map<String, Value>,
     audit: &CallAudit,
-) {
+    format: ToolOutputFormat,
+) -> Result<Value, JsonRpcError> {
     if !args.contains_key("database") && !args.contains_key("schema") {
-        return;
+        return tool_result(value, format);
     }
-    result["structuredContent"] = json!({
-        "effective": {
-            "database": audit.effective_database,
-            "schema": audit.effective_schema,
-        }
+    let effective = json!({
+        "database": audit.effective_database,
+        "schema": audit.effective_schema,
     });
+    let payload = serde_json::to_value(value).map_err(|error| JsonRpcError {
+        code: -32603,
+        message: format!("Failed to encode MCP tool output: {error}"),
+        data: None,
+    })?;
+    let payload = match payload {
+        Value::Object(mut object) => {
+            object.insert("effective".to_string(), effective);
+            Value::Object(object)
+        }
+        other => json!({ wrapper_key: other, "effective": effective }),
+    };
+    tool_result(&payload, format)
 }
 
 fn requested_output_format(
@@ -1083,7 +1091,7 @@ async fn tool_list_tables(
 
     let names: Vec<&str> = tables.iter().map(|t| t.name.as_str()).collect();
     audit.rows = Some(names.len());
-    tool_result(&json!(names), format)
+    tool_result_reporting(&json!(names), "tables", args, audit, format)
 }
 
 async fn tool_list_databases(
@@ -1170,7 +1178,7 @@ async fn tool_describe_table(
         "indexes": indexes.map_err(|e| JsonRpcError { code: -32000, message: e, data: None })?
     });
 
-    tool_result(&result, format)
+    tool_result_reporting(&result, "result", args, audit, format)
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1257,7 +1265,7 @@ async fn tool_run_query(
                     executed.database.or_else(|| effective_database(&db_params));
                 audit.effective_schema = schema.map(str::to_owned);
                 audit.rows = Some(executed.result.rows.len());
-                return tool_result(&executed.result, format);
+                return tool_result_reporting(&executed.result, "result", args, audit, format);
             }
             Ok(None) => {}
             Err(failed) => {
@@ -1462,6 +1470,6 @@ async fn tool_run_query(
 
     audit.rows = Some(result.rows.len());
 
-    tool_result(&result, format)
+    tool_result_reporting(&result, "result", args, audit, format)
 }
 

@@ -1,6 +1,6 @@
 //! The MCP tool catalog: one tool per service operation (dots become
-//! underscores) plus `table_preview`, `job_list`, `server_activity` and
-//! `server_cancel`. Arguments are flat: the
+//! underscores) plus `table_preview`, `job_list`, `server_activity`,
+//! `server_cancel` and `catalog_object_kinds`. Arguments are flat: the
 //! operation's input fields at the top level next to the identifiers the
 //! operation uses, so a caller never builds the request envelope.
 
@@ -16,7 +16,24 @@ use std::collections::BTreeSet;
 
 pub const MAX_WAIT_MS: u64 = 60_000;
 pub const DEFAULT_WAIT_MS: u64 = 5_000;
-pub const OBJECT_KINDS: &[&str] = &["table", "view", "materialized_view", "routine", "trigger"];
+pub const OBJECT_KINDS: &[&str] = &[
+    "table",
+    "view",
+    "materialized_view",
+    "foreign_table",
+    "routine",
+    "aggregate",
+    "trigger",
+    "sequence",
+    "synonym",
+    "type",
+    "collation",
+    "operator",
+    "operator_class",
+    "operator_family",
+    "rule",
+    "security_policy",
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToolKind {
@@ -25,6 +42,7 @@ pub enum ToolKind {
     JobList,
     ServerActivity,
     ServerCancel,
+    CatalogObjectKinds,
 }
 
 #[derive(Clone, Debug)]
@@ -79,8 +97,9 @@ pub fn description(name: &str) -> &'static str {
         "connection_test" => "Tests a saved connection with its stored credentials and returns whether it connected. Read-only; it accepts no parameter overrides.",
         "catalog_databases" => "Lists the databases the driver reports for a connection. Read-only.",
         "catalog_schemas" => "Lists the schemas of one database and reports the effective database. Read-only.",
-        "catalog_objects" => "Lists the objects of a database and schema, optionally only one kind such as table, view or routine, and reports the effective database and schema. Read-only; a kind the driver lacks fails with UNSUPPORTED_OPERATION naming it.",
-        "catalog_describe" => "Returns the columns and key positions of one table or view and reports the effective database and schema. Read-only; a kind the driver lacks fails with UNSUPPORTED_OPERATION naming it.",
+        "catalog_objects" => "Lists the objects of a database and schema, optionally only one kind (table, view, materialized_view, foreign_table, routine, aggregate, trigger, sequence, synonym, type, collation, operator, operator_class, operator_family, rule or security_policy), and reports the effective database and schema. Which kinds a connection offers depends on its driver; catalog_object_kinds lists them. Read-only; a kind the driver lacks fails with UNSUPPORTED_OPERATION naming it and the kinds it supports.",
+        "catalog_describe" => "Describes one object and reports the effective database and schema. The reply always carries columns (for a routine or aggregate the parameters; for a type the attributes), keys, foreign_keys, indexes, check_constraints, definition (view query or routine, trigger and rule text) and properties (kind-specific values such as return type, sequence bounds or trigger timing); a key that does not apply is empty or null. kind defaults to table; kinds other than table and view are described on postgresql-plus and sqlserver-plus only, and catalog_object_kinds lists them. Read-only; a kind the driver cannot describe fails with UNSUPPORTED_OPERATION naming it and the kinds it supports.",
+        "catalog_object_kinds" => "Lists the object kinds a connection's driver can list with catalog_objects (kinds) and describe with catalog_describe (describable_kinds). Read-only.",
         "query_execute" => "Registers a SQL job and returns at once with job_id, owner_instance_id and status (queued, awaiting_approval or running), or with the first page of rows when it finishes within wait_ms. Read-only unless write is true, which also needs connection write permission and approval. Without write, a read is one SELECT or WITH statement; on postgresql-plus it may also be one read statement wrapped in BEGIN, SET [LOCAL] of statement_timeout, lock_timeout, idle_in_transaction_session_timeout, plan_cache_mode, work_mem, search_path, jit, random_page_cost, max_parallel_workers_per_gather or the enable_* planner switches, and COMMIT or ROLLBACK (not inside a session), and on sqlserver-plus a T-SQL batch of reads with DECLARE, variable and session-option SET, IF, WHILE, BEGIN...END, TRY...CATCH, THROW, PRINT and WAITFOR DELAY; anything else needs write: true. Page further with result_get.",
         "query_explain" => "Returns the estimated execution plan of one SELECT, WITH, INSERT, UPDATE, DELETE, MERGE, VALUES or TABLE statement without running it: the statement is planned only (never ANALYZE, BUFFERS or STATISTICS XML) inside a read-only call, so it needs no write flag and no approval. data.summary gives total_cost in cost_unit (postgres_planner_cost or sqlserver_estimated_subtree_cost, not comparable across engines), estimated_rows, node_count, nodes (pre-order, at most 40, each with depth, operation, object, index, estimated_rows and total_cost), full_scans (Seq Scan on PostgreSQL; Table Scan and Clustered Index Scan on SQL Server), and on SQL Server warnings and missing_indexes. data.plan holds the raw plan unless data.plan_omitted is true. Use it before query_execute to judge the load of a statement. Only postgresql-plus and sqlserver-plus connections support it.",
         "query_next" => "Continues a result from the page token of an earlier reply and returns the next page. Read-only; stored results are never re-run.",
@@ -131,7 +150,7 @@ pub fn description(name: &str) -> &'static str {
 pub(super) fn clean_envelope(key: &str) -> Value {
     match key {
         "connection_id" => {
-            json!({"type":"string","minLength":1,"maxLength":128,"description":"Id of the saved connection (see connection_list or list_connections)."})
+            json!({"type":"string","minLength":1,"maxLength":128,"description":"Id or name of the saved connection (see connection_list or list_connections). A name matches ignoring case; if several connections share it, use the id."})
         }
         "session_id" => {
             json!({"type":"string","minLength":1,"maxLength":128,"description":"Session id from session_open."})
@@ -234,10 +253,15 @@ fn service_schema(source: &Value, operation: Operation) -> ServiceResult<Value> 
     {
         add(&mut properties, "session_id", clean_envelope("session_id"));
     }
+    let deadline_description = if operation == Operation::QueryExecute {
+        "End-to-end limit in milliseconds, up to 3600000 (one hour). The call itself replies within wait_ms; a job still running then is polled with job_get and job_result, read with result_get and stopped with job_cancel, and is cancelled if the MCP server process exits. At expiry the driver is asked to cancel and gets 5 seconds to answer."
+    } else {
+        "End-to-end limit in milliseconds. At expiry the driver is asked to cancel and gets 5 seconds to answer."
+    };
     add(
         &mut properties,
         "deadline_ms",
-        json!({"type":"integer","minimum":1,"maximum":120000,"default":30000,"description":"End-to-end limit in milliseconds. At expiry the driver is asked to cancel and gets 5 seconds to answer."}),
+        json!({"type":"integer","minimum":1,"maximum":operation.max_deadline_ms(),"default":30000,"description":deadline_description}),
     );
     if accepts_write(operation) {
         add(
@@ -313,7 +337,7 @@ fn service_schema(source: &Value, operation: Operation) -> ServiceResult<Value> 
             add(
                 &mut properties,
                 "kind",
-                json!({"enum":OBJECT_KINDS,"default":"table","description":"Kind of the object to describe."}),
+                json!({"enum":OBJECT_KINDS,"default":"table","description":"Kind of the object to describe. Kinds other than table and view need postgresql-plus or sqlserver-plus (see catalog_object_kinds)."}),
             );
         }
         Operation::QueryExplain => {
@@ -356,9 +380,15 @@ fn table_preview_schema() -> Value {
     },"required":["connection_id","table"],"additionalProperties":false})
 }
 
+fn object_kinds_schema() -> Value {
+    json!({"type":"object","properties":{
+        "connection_id":clean_envelope("connection_id")
+    },"required":["connection_id"],"additionalProperties":false})
+}
+
 fn job_list_schema() -> Value {
     json!({"type":"object","properties":{
-        "connection_id":{"type":"string","minLength":1,"maxLength":128,"description":"Only jobs of this connection (optional)."},
+        "connection_id":{"type":"string","minLength":1,"maxLength":128,"description":"Id or name of a saved connection; only its jobs are listed (optional)."},
         "status":{"enum":["queued","running","succeeded","failed","cancelled","interrupted","outcome_unknown"],"description":"Only jobs in this status (optional)."},
         "since_ms":{"type":"integer","minimum":0,"description":"Only jobs started at or after this Unix time in milliseconds (optional)."},
         "until_ms":{"type":"integer","minimum":0,"description":"Only jobs started before this Unix time in milliseconds (optional)."},
@@ -403,6 +433,11 @@ pub fn build() -> ServiceResult<Vec<ToolSpec>> {
         "server_cancel".into(),
         ToolKind::ServerCancel,
         server_tools::cancel_schema(),
+    ));
+    tools.push(spec(
+        "catalog_object_kinds".into(),
+        ToolKind::CatalogObjectKinds,
+        object_kinds_schema(),
     ));
     for tool in &tools {
         if !valid_tool_name(&tool.name) || tool.description.is_empty() {

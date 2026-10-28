@@ -1,6 +1,7 @@
 //! A read statement run for the legacy `run_query` tool: it waits for the job
 //! to end and cancels the job on the server when nobody waits for it any more.
 
+use super::super::super::contracts::MAX_DEADLINE_MS;
 use super::*;
 
 /// How long past the deadline the wait lasts, so that the cancellation the
@@ -72,6 +73,9 @@ impl ServiceTransport {
         caller: CallerContext,
     ) -> ServiceResult<ReadOutcome> {
         request::validate_caller(&caller)?;
+        if query.deadline_ms > MAX_DEADLINE_MS {
+            return Err(failure(ErrorCode::InvalidArgument));
+        }
         let mut input = json!({
             "language":"sql",
             "text":query.text,

@@ -198,7 +198,7 @@ def serve(request):
     expected = settings.get("expected_text", text)
     valid = (text == expected and input_value["parameters"] == settings.get("expected_parameters", input_value["parameters"])
              and set(input_value) == {"text", "parameters", "max_rows", "max_bytes"}
-             and context.get("protocol_version") == 1 and 0 < context.get("deadline_ms", 0) <= 120000)
+             and context.get("protocol_version") == 1 and 0 < context.get("deadline_ms", 0) <= 3600000)
     emit(request, {"columns": ["duplicate", "duplicate"], "column_metadata": [
         {"type": "geometry", "srid": 4326, "dimensions": "XY"}, {"type": "decimal", "precision": None}],
         "rows": [] if text == "zero_rows" else [[valid, None]], "affected_rows": None,

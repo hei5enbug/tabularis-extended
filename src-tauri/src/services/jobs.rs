@@ -4,6 +4,7 @@ use super::{
     dispatch::CallerContext,
     error::{failure, ServiceResult},
     history::{HistoryMeta, HistoryStore, LiveJobs},
+    runtime::CANCEL_GRACE_MS,
     storage::{now_ms, PrivateStore},
 };
 use serde::{Deserialize, Serialize};
@@ -20,9 +21,20 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 pub const GLOBAL_CONCURRENCY: usize = 8;
 pub const CONNECTION_CONCURRENCY: usize = 4;
 pub const QUEUE_CAPACITY: usize = 64;
-const JOB_TTL_MS: u64 = 15 * 60 * 1000;
+pub const JOB_TTL_MS: u64 = 15 * 60 * 1000;
 const MAX_JOB_RECORDS: usize = 256;
 const MAX_JOB_BYTES: u64 = 64 * 1024 * 1024;
+
+/// When a job that has not finished stops being readable: not before its
+/// deadline and the grace given to the driver to cancel.
+pub(crate) fn running_expiry_ms(created_ms: u64, deadline_ms: u64) -> u64 {
+    created_ms.saturating_add(JOB_TTL_MS.max(deadline_ms.saturating_add(CANCEL_GRACE_MS)))
+}
+
+/// When a job that ended at `ended_ms` stops being readable.
+pub(crate) fn finished_expiry_ms(ended_ms: u64) -> u64 {
+    ended_ms.saturating_add(JOB_TTL_MS)
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct JobRecord {
@@ -48,6 +60,12 @@ pub struct JobRecord {
     pub created_at_ms: u64,
     pub expires_at_ms: u64,
     pub response: Option<ServiceResponse>,
+}
+
+impl JobRecord {
+    pub(crate) fn expired_at(&self, now_ms: u64) -> bool {
+        self.expires_at_ms <= now_ms
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -262,7 +280,7 @@ impl JobManager {
             cancel_requested: false,
             cancel_state: String::new(),
             created_at_ms: now_ms(),
-            expires_at_ms: now_ms().saturating_add(JOB_TTL_MS),
+            expires_at_ms: running_expiry_ms(now_ms(), request.deadline_ms),
             response: None,
         };
         let history = (!control && !internal && self.history.get().is_some()).then(|| {
@@ -423,7 +441,7 @@ impl JobManager {
         {
             return Err(failure(ErrorCode::PermissionDenied));
         }
-        if record.expires_at_ms <= now_ms() {
+        if record.expired_at(now_ms()) {
             return Err(failure(ErrorCode::ResultExpired));
         }
         Ok(record)
@@ -657,6 +675,7 @@ impl JobLease {
             response.status = JobStatus::OutcomeUnknown;
         }
         record.status = response.status;
+        record.expires_at_ms = finished_expiry_ms(now_ms());
         let mut persisted = response.clone();
         if let Some(data) = persisted.data.as_object_mut() {
             data.remove("challenge");
@@ -727,6 +746,7 @@ fn interrupt_record(record: &mut JobRecord) {
     } else {
         JobStatus::Interrupted
     };
+    record.expires_at_ms = finished_expiry_ms(now_ms());
     record.response = Some(ServiceResponse {
         protocol_version: 1,
         request_id: record.request_id.clone(),

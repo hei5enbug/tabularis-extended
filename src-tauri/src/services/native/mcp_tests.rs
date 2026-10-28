@@ -142,7 +142,7 @@ async fn 승인을_기다리는_동안에도_응답하고_제어_호출은_즉�
         .unwrap()
         .iter()
         .any(|entry| entry["job_id"] == summary(&reply)["job_id"]));
-    assert_eq!(catalog["tools"].as_array().unwrap().len(), 52);
+    assert_eq!(catalog["tools"].as_array().unwrap().len(), 53);
     assert!(summary(&cancelled)["error"].is_null());
     assert_eq!(summary(&ended)["data"]["cancel_state"], "confirmed");
     assert_eq!(h.state.executions.load(Ordering::SeqCst), 0);
@@ -526,6 +526,10 @@ async fn 드라이버에_없는_개체_종류는_종류를_밝힌_지원불가�
             assert_eq!(result["isError"], true, "{kind}");
             assert_eq!(code(result), Some("UNSUPPORTED_OPERATION"), "{kind}");
             assert_eq!(summary(result)["error"]["details"]["object_kind"], *kind);
+            assert_eq!(
+                summary(result)["error"]["details"]["supported_kinds"],
+                json!(["table", "view"])
+            );
         }
     }
     assert_eq!(
@@ -554,6 +558,273 @@ async fn 서비스가_다루지_않는_개체의_설명은_있는_종류여도_�
         summary(&actual)["error"]["details"]["object_kind"],
         "routine"
     );
+    assert_eq!(
+        summary(&actual)["error"]["details"]["supported_kinds"],
+        json!(["table", "view"])
+    );
+    assert!(h
+        .state
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|call| call.0 != ServiceRpcMethod::Catalog));
+}
+
+static PLUS_DRIVER_IDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn postgresql_plus() -> Harness {
+    Harness::with_manifest(|manifest| {
+        manifest.id = "postgresql-plus".into();
+        manifest.capabilities.sql_dialect = Some(SqlDialect::Postgres);
+    })
+    .await
+}
+async fn sqlserver_plus() -> Harness {
+    Harness::with_manifest(|manifest| {
+        manifest.id = "sqlserver-plus".into();
+        manifest.capabilities.sql_dialect = Some(SqlDialect::Mssql);
+    })
+    .await
+}
+fn describe_inputs(h: &Harness) -> Vec<Value> {
+    h.state
+        .calls
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|call| call.0 == ServiceRpcMethod::Catalog)
+        .map(|call| call.1.clone())
+        .filter(|input| input["operation"] == "catalog.describe")
+        .collect()
+}
+
+#[tokio::test]
+async fn 확장_드라이버의_describe는_테이블과_뷰가_아닌_종류만_종류를_붙여_플러그인에_보낸다() {
+    // given
+    let _serial = PLUS_DRIVER_IDS.lock().await;
+    let h = postgresql_plus().await;
+    // when
+    let routine = call(
+        &h,
+        "catalog_describe",
+        json!({"connection_id":h.id,"table":"fn","kind":"routine"}),
+    )
+    .await;
+    let aggregate = call(
+        &h,
+        "catalog_describe",
+        json!({"connection_id":h.id,"table":"agg","kind":"aggregate"}),
+    )
+    .await;
+    let table = call(
+        &h,
+        "catalog_describe",
+        json!({"connection_id":h.id,"table":"records","kind":"table"}),
+    )
+    .await;
+    let view = call(
+        &h,
+        "catalog_describe",
+        json!({"connection_id":h.id,"table":"records_view","kind":"view"}),
+    )
+    .await;
+    let plain = call(
+        &h,
+        "catalog_describe",
+        json!({"connection_id":h.id,"table":"records"}),
+    )
+    .await;
+    // then
+    for result in [&routine, &aggregate, &table, &view, &plain] {
+        assert_eq!(summary(result)["status"], "succeeded", "{result}");
+    }
+    let inputs = describe_inputs(&h);
+    assert_eq!(inputs.len(), 5);
+    assert_eq!(inputs[0]["kind"], "routine");
+    assert_eq!(inputs[0]["table"]["table"], "fn");
+    assert_eq!(inputs[1]["kind"], "aggregate");
+    assert!(inputs[2..].iter().all(|input| input.get("kind").is_none()));
+}
+
+#[tokio::test]
+async fn 확장_드라이버가_갖지_않은_종류의_describe는_지원하는_종류를_밝히고_플러그인을_부르지_않는다() {
+    // given
+    let _serial = PLUS_DRIVER_IDS.lock().await;
+    let postgres = postgresql_plus().await;
+    let mssql = sqlserver_plus().await;
+    // when
+    let synonym = call(
+        &postgres,
+        "catalog_describe",
+        json!({"connection_id":postgres.id,"table":"s","kind":"synonym"}),
+    )
+    .await;
+    let aggregate = call(
+        &mssql,
+        "catalog_describe",
+        json!({"connection_id":mssql.id,"table":"a","kind":"aggregate"}),
+    )
+    .await;
+    let listed = call(
+        &mssql,
+        "catalog_objects",
+        json!({"connection_id":mssql.id,"kind":"materialized_view"}),
+    )
+    .await;
+    // then
+    let postgres_kinds = json!([
+        "table",
+        "view",
+        "materialized_view",
+        "foreign_table",
+        "routine",
+        "aggregate",
+        "trigger",
+        "sequence",
+        "type",
+        "collation",
+        "operator",
+        "operator_class",
+        "operator_family"
+    ]);
+    let mssql_kinds = json!([
+        "table",
+        "view",
+        "routine",
+        "trigger",
+        "sequence",
+        "synonym",
+        "type",
+        "rule",
+        "security_policy"
+    ]);
+    for (result, kind, supported) in [
+        (&synonym, "synonym", &postgres_kinds),
+        (&aggregate, "aggregate", &mssql_kinds),
+        (&listed, "materialized_view", &mssql_kinds),
+    ] {
+        assert_eq!(code(result), Some("UNSUPPORTED_OPERATION"), "{kind}");
+        assert_eq!(summary(result)["error"]["details"]["object_kind"], kind);
+        assert_eq!(
+            summary(result)["error"]["details"]["supported_kinds"],
+            *supported
+        );
+    }
+    assert!(describe_inputs(&postgres).is_empty() && describe_inputs(&mssql).is_empty());
+}
+
+#[tokio::test]
+async fn 알_수_없는_개체_종류는_인자_오류로_거부하고_플러그인을_부르지_않는다() {
+    // given
+    let h = Harness::new().await;
+    // when
+    let mut rejected = Vec::new();
+    for (tool, arguments) in [
+        (
+            "catalog_describe",
+            json!({"connection_id":h.id,"table":"records","kind":"index"}),
+        ),
+        (
+            "catalog_objects",
+            json!({"connection_id":h.id,"kind":"index"}),
+        ),
+    ] {
+        rejected.push(
+            h.core
+                .transport
+                .call_tool(tool, arguments, caller(&h), None)
+                .await,
+        );
+    }
+    // then
+    for result in rejected {
+        assert_eq!(result.unwrap_err().code, ErrorCode::InvalidArgument);
+    }
+    assert!(describe_inputs(&h).is_empty());
+}
+
+#[tokio::test]
+async fn catalog_object_kinds는_연결의_종류와_설명할_수_있는_종류를_알려준다() {
+    // given
+    let _serial = PLUS_DRIVER_IDS.lock().await;
+    let postgres = postgresql_plus().await;
+    let mssql = sqlserver_plus().await;
+    let plain = Harness::with_manifest(|manifest| {
+        manifest.capabilities.views = true;
+        manifest.capabilities.materialized_views = false;
+        manifest.capabilities.routines = true;
+        manifest.capabilities.triggers = false;
+    })
+    .await;
+    // when
+    let on_postgres = call(&postgres, "catalog_object_kinds", json!({"connection_id":postgres.id})).await;
+    let on_mssql = call(&mssql, "catalog_object_kinds", json!({"connection_id":mssql.id})).await;
+    let on_plain = call(&plain, "catalog_object_kinds", json!({"connection_id":plain.id})).await;
+    let unknown = plain
+        .core
+        .transport
+        .call_tool(
+            "catalog_object_kinds",
+            json!({"connection_id":"missing"}),
+            caller(&plain),
+            None,
+        )
+        .await;
+    // then
+    let kinds = |result: &Value, key: &str| -> Vec<String> {
+        summary(result)["data"][key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|kind| kind.as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(summary(&on_postgres)["status"], "succeeded");
+    assert_eq!(kinds(&on_postgres, "kinds").len(), 13);
+    assert_eq!(kinds(&on_postgres, "kinds"), kinds(&on_postgres, "describable_kinds"));
+    assert!(kinds(&on_postgres, "kinds").contains(&"foreign_table".to_owned()));
+    assert_eq!(kinds(&on_mssql, "kinds").len(), 9);
+    assert_eq!(kinds(&on_mssql, "kinds"), kinds(&on_mssql, "describable_kinds"));
+    assert!(kinds(&on_mssql, "kinds").contains(&"security_policy".to_owned()));
+    assert_eq!(kinds(&on_plain, "kinds"), ["table", "view", "routine"]);
+    assert_eq!(kinds(&on_plain, "describable_kinds"), ["table", "view"]);
+    assert_eq!(
+        summary(&unknown.unwrap())["error"]["code"],
+        "CONNECTION_NOT_FOUND"
+    );
+}
+
+#[tokio::test]
+async fn 확장_드라이버의_describe_응답은_키와_정의를_잘라내지_않고_그대로_전달한다() {
+    // given
+    let _serial = PLUS_DRIVER_IDS.lock().await;
+    let h = postgresql_plus().await;
+    let definition = "select a, b from parent ".repeat(120);
+    *h.state.described.lock().unwrap() = Some(json!({
+        "columns":[{"name":"id","data_type":"integer","mode":"IN","ordinal_position":1}],
+        "foreign_keys":(0..9).map(|id| json!({"name":format!("fk_{id}"),"columns":["a"],"ref_schema":"public","ref_table":"parent","ref_columns":["id"],"on_update":"NO ACTION","on_delete":"CASCADE"})).collect::<Vec<_>>(),
+        "indexes":[],
+        "keys":[],
+        "check_constraints":[],
+        "definition":definition,
+        "properties":{"routine_type":"FUNCTION","return_type":"integer","language":"sql","overloads":1},
+    }));
+    // when
+    let described = call(
+        &h,
+        "catalog_describe",
+        json!({"connection_id":h.id,"table":"fn","kind":"routine"}),
+    )
+    .await;
+    // then
+    let data = &summary(&described)["data"];
+    assert_eq!(summary(&described)["status"], "succeeded", "{described}");
+    assert_eq!(data["foreign_keys"].as_array().unwrap().len(), 9);
+    assert_eq!(data["definition"], definition);
+    assert_eq!(data["properties"]["routine_type"], "FUNCTION");
+    assert_eq!(data["columns"][0]["mode"], "IN");
+    assert_eq!(summary(&described)["presentation_truncated"], false);
 }
 
 #[tokio::test]
@@ -1137,6 +1408,7 @@ async fn executed_inputs(h: &Harness, texts: &[&str]) -> (Vec<Value>, Vec<Value>
 #[tokio::test]
 async fn postgresql_plus는_읽기_래퍼를_벗겨_문장과_설정으로_나누어_드라이버에_보낸다() {
     // given
+    let _serial = PLUS_DRIVER_IDS.lock().await;
     let h = Harness::with_manifest(|manifest| manifest.id = "postgresql-plus".into()).await;
     let wrapper = "BEGIN; SET LOCAL statement_timeout = '30s'; SET LOCAL transaction_read_only = on; SELECT 1; ROLLBACK;";
     let plain = "select 1";
@@ -1158,6 +1430,7 @@ async fn postgresql_plus는_읽기_래퍼를_벗겨_문장과_설정으로_나�
 #[tokio::test]
 async fn sqlserver_plus는_읽기_보장이_없어도_읽기_배치를_그대로_드라이버에_보낸다() {
     // given
+    let _serial = PLUS_DRIVER_IDS.lock().await;
     let h = Harness::with_manifest(|manifest| {
         manifest.id = "sqlserver-plus".into();
         manifest.capabilities.sql_dialect = Some(SqlDialect::Mssql);
@@ -1188,4 +1461,107 @@ async fn sqlserver_plus는_읽기_보장이_없어도_읽기_배치를_그대로
     assert_eq!(inputs.len(), 1);
     assert_eq!(inputs[0]["text"], batch);
     assert!(inputs[0].get("settings").is_none());
+}
+
+async fn second_connection_named(h: &Harness, name: &str) -> String {
+    use crate::services::backend::ConnectionBackend as _;
+    let saved = h.core.platform.connections.get(&h.id).await.unwrap();
+    h.core
+        .platform
+        .connections
+        .create(
+            name,
+            &saved.driver,
+            json!({"host":"127.0.0.1","database":"fixture","save_in_keychain":false}),
+            None,
+        )
+        .await
+        .unwrap()
+        .id
+}
+
+#[tokio::test]
+async fn 저장된_연결의_이름으로도_쿼리와_카탈로그_도구가_같은_연결에서_실행된다() {
+    // given
+    let h = Harness::new().await;
+    // when
+    let query = call(
+        &h,
+        "query_execute",
+        json!({"connection_id":"fIXTURE","text":"select 1"}),
+    )
+    .await;
+    let schemas = call(&h, "catalog_schemas", json!({"connection_id":"Fixture"})).await;
+    let preview = call(
+        &h,
+        "table_preview",
+        json!({"connection_id":"fixture","table":"records"}),
+    )
+    .await;
+    let jobs = call(&h, "job_list", json!({"connection_id":"fixture"})).await;
+    // then
+    assert_eq!(summary(&query)["status"], "succeeded", "{query}");
+    assert_eq!(summary(&query)["connection_id"], h.id.as_str());
+    assert_eq!(summary(&schemas)["status"], "succeeded", "{schemas}");
+    assert_eq!(summary(&schemas)["connection_id"], h.id.as_str());
+    assert_eq!(summary(&preview)["connection_id"], h.id.as_str());
+    assert_eq!(summary(&jobs)["status"], "succeeded", "{jobs}");
+}
+
+#[tokio::test]
+async fn 같은_이름의_연결이_여럿이면_실행하지_않고_일치하는_id를_모두_알린다() {
+    // given
+    let h = Harness::new().await;
+    let other = second_connection_named(&h, "FIXTURE").await;
+    let before = h.state.executions.load(Ordering::SeqCst);
+    // when
+    let query = call(
+        &h,
+        "query_execute",
+        json!({"connection_id":"fixture","text":"select 1"}),
+    )
+    .await;
+    let by_id = call(
+        &h,
+        "query_execute",
+        json!({"connection_id":other,"text":"select 1"}),
+    )
+    .await;
+    // then
+    assert_eq!(code(&query), Some("INVALID_ARGUMENT"), "{query}");
+    let message = summary(&query)["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains(&h.id) && message.contains(&other),
+        "{message}"
+    );
+    assert_eq!(summary(&by_id)["status"], "succeeded", "{by_id}");
+    assert_eq!(h.state.executions.load(Ordering::SeqCst), before + 1);
+}
+
+#[tokio::test]
+async fn 없는_연결은_쓰기_결과_불명이_아니라_연결_없음과_입력값을_알린다() {
+    // given
+    let h = Harness::new().await;
+    let before = h.state.executions.load(Ordering::SeqCst);
+    // when
+    let query = call(
+        &h,
+        "query_execute",
+        json!({"connection_id":"no-such-connection","text":"select 1"}),
+    )
+    .await;
+    let catalog = call(
+        &h,
+        "catalog_schemas",
+        json!({"connection_id":"no-such-connection"}),
+    )
+    .await;
+    // then
+    for reply in [&query, &catalog] {
+        assert_eq!(code(reply), Some("CONNECTION_NOT_FOUND"), "{reply}");
+        let message = summary(reply)["error"]["message"].as_str().unwrap();
+        assert!(message.contains("no-such-connection"), "{message}");
+        assert_eq!(reply["isError"], true);
+    }
+    assert_eq!(h.state.executions.load(Ordering::SeqCst), before);
 }

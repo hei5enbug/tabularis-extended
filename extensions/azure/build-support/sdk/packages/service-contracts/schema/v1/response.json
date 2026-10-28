@@ -185,6 +185,7 @@
                 "GUI_UNAVAILABLE",
                 "APPLY_TIMEOUT",
                 "DRIVER_EXITED",
+                "DATABASE_ERROR",
                 "OUTCOME_UNKNOWN",
                 "DOCUMENT_NOT_FOUND",
                 "WRITE_INTENT_REQUIRED",

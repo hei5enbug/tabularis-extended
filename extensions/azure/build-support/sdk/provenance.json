@@ -101,9 +101,9 @@
     },
     {
       "path": "packages/service-contracts/fixtures/v1/validation.json",
-      "sha256": "a33a9dcc27bb70bacebd095fd8c1433a4f7dbba2c9f9cadf18d557b9419222a2",
-      "size": 299967,
-      "origin_sha256": "a33a9dcc27bb70bacebd095fd8c1433a4f7dbba2c9f9cadf18d557b9419222a2"
+      "sha256": "14f73651c31cc25c8309250b68a2b73d1a6f7c56f491129a6bc3c36b459cd601",
+      "size": 304155,
+      "origin_sha256": "14f73651c31cc25c8309250b68a2b73d1a6f7c56f491129a6bc3c36b459cd601"
     },
     {
       "path": "packages/service-contracts/package.json",
@@ -113,27 +113,27 @@
     },
     {
       "path": "packages/service-contracts/schema/v1/request.json",
-      "sha256": "fb06e5834802c444efcde25cb1d4b5bc10184ece9e5f5259cbbd20a0f210c14f",
-      "size": 56777,
-      "origin_sha256": "fb06e5834802c444efcde25cb1d4b5bc10184ece9e5f5259cbbd20a0f210c14f"
+      "sha256": "5ae60139bdacb73478db31bf8118cfd4c9555976e82e9b790167b7c0b38f3136",
+      "size": 57515,
+      "origin_sha256": "5ae60139bdacb73478db31bf8118cfd4c9555976e82e9b790167b7c0b38f3136"
     },
     {
       "path": "packages/service-contracts/schema/v1/response.json",
-      "sha256": "35d48429ec37415a2904384be07fddad3143322426e48bf3552516f1d273e577",
-      "size": 5323,
-      "origin_sha256": "35d48429ec37415a2904384be07fddad3143322426e48bf3552516f1d273e577"
+      "sha256": "cc8937d1307361661818fc92c5aa12afeaec46a012d61cf074ceb2610b0b69a5",
+      "size": 5357,
+      "origin_sha256": "cc8937d1307361661818fc92c5aa12afeaec46a012d61cf074ceb2610b0b69a5"
     },
     {
       "path": "packages/service-contracts/src/index.ts",
-      "sha256": "b59c5e5b36224db0c5028efc6bf7a4733c13e42c44efc656565fc3818d066a1a",
-      "size": 2634,
-      "origin_sha256": "b59c5e5b36224db0c5028efc6bf7a4733c13e42c44efc656565fc3818d066a1a"
+      "sha256": "0ec8215483214f4611fe410920466806aecf3be1a843ef2dac08e3478457865e",
+      "size": 2680,
+      "origin_sha256": "0ec8215483214f4611fe410920466806aecf3be1a843ef2dac08e3478457865e"
     },
     {
       "path": "packages/service-contracts/src/types.ts",
-      "sha256": "27e1b760aca7f654f2036c23db7ef7bfb1fa216af66d66ca0c3f1c7cbb0bcb29",
-      "size": 9739,
-      "origin_sha256": "27e1b760aca7f654f2036c23db7ef7bfb1fa216af66d66ca0c3f1c7cbb0bcb29"
+      "sha256": "30d121f8df7f225364331c6614f4aec3d611a585a0529340da88ab41cc15eed6",
+      "size": 10044,
+      "origin_sha256": "30d121f8df7f225364331c6614f4aec3d611a585a0529340da88ab41cc15eed6"
     },
     {
       "path": "packages/service-contracts/tsconfig.json",
