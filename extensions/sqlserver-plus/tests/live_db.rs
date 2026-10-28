@@ -2464,3 +2464,83 @@ fn database_user_lifecycle_privilege_diff_roles_and_ownership_guard() {
     ));
     assert_eq!(login["rows"], json!([[0]]));
 }
+
+/// Runs one call on its own thread so a plugin that never answers fails the
+/// test, and is killed, instead of hanging the suite.
+fn call_within(
+    plugin: Plugin,
+    method: &'static str,
+    params: Value,
+    limit: std::time::Duration,
+) -> (Plugin, Value) {
+    let pid = plugin.child.id();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut plugin = plugin;
+        let response = plugin.call(method, params);
+        let _ = sender.send((plugin, response));
+    });
+    receiver.recv_timeout(limit).unwrap_or_else(|_| {
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        panic!("{method} did not answer within {limit:?}")
+    })
+}
+
+fn mid_row_error_query(plugin: &mut Plugin, table: &str) -> String {
+    plugin.reset_table(
+        table,
+        "id INT NOT NULL PRIMARY KEY, value NVARCHAR(10) NOT NULL",
+    );
+    plugin.execute(format!(
+        "INSERT INTO [{TEST_SCHEMA}].[{table}] VALUES (1, N'1'), (2, N'x')"
+    ));
+    format!("SELECT id, CAST(value AS INT) AS n FROM [{TEST_SCHEMA}].[{table}] ORDER BY id")
+}
+
+#[test]
+fn 행을_보내던_중_실패한_조회_뒤에도_다음_조회는_멈추지_않고_답한다() {
+    // given
+    let mut plugin = Plugin::with_scratch_database();
+    let failing_query = mid_row_error_query(&mut plugin, "mid_row_error_reuse");
+    let failure = plugin.call_error(
+        "execute_query",
+        json!({ "params": connection_params(), "query": failing_query }),
+    );
+
+    // when
+    let (_plugin, response) = call_within(
+        plugin,
+        "execute_query",
+        json!({ "params": connection_params(), "query": "SELECT CAST(1 AS INT) AS x" }),
+        std::time::Duration::from_secs(30),
+    );
+
+    // then
+    assert!(failure.contains("245"), "{failure}");
+    assert_eq!(response["result"]["rows"], json!([[1]]), "{response}");
+}
+
+#[test]
+fn 일괄_실행에서_행을_보내던_중_실패하면_뒤_문장은_다시_실행하라는_오류로_바로_끝난다() {
+    // given
+    let mut plugin = Plugin::with_scratch_database();
+    let failing_query = mid_row_error_query(&mut plugin, "mid_row_error_batch");
+
+    // when
+    let (_plugin, response) = call_within(
+        plugin,
+        "execute_query_batch",
+        json!({
+            "params": connection_params(),
+            "queries": [failing_query, "SELECT CAST(1 AS INT) AS x"]
+        }),
+        std::time::Duration::from_secs(30),
+    );
+
+    // then
+    let statements = &response["result"];
+    let first = statements[0]["error"].as_str().unwrap_or_default();
+    let second = statements[1]["error"].as_str().unwrap_or_default();
+    assert!(first.contains("245"), "{response}");
+    assert!(second.contains("run this statement again"), "{response}");
+}

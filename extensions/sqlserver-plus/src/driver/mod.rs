@@ -91,19 +91,40 @@ async fn run_query_collecting(
     query: &str,
     overflow_policy: OverflowPolicy,
 ) -> Result<Vec<QueryResult>, String> {
+    conn.ensure_usable()?;
     let query_timeout_seconds = conn.query_timeout_seconds();
     let ssl_mode = conn.ssl_mode().to_owned();
-    let client = conn.inner_mut();
+    let results = collect_result_sets(
+        conn.inner_mut(),
+        query,
+        query_timeout_seconds,
+        &ssl_mode,
+        overflow_policy,
+    )
+    .await;
+    if results.is_err() {
+        conn.discard_if_batch_left_open();
+    }
+    results
+}
+
+async fn collect_result_sets(
+    client: &mut mssql_tiberius_bridge::TdsClient,
+    query: &str,
+    query_timeout_seconds: Option<u32>,
+    ssl_mode: &str,
+    overflow_policy: OverflowPolicy,
+) -> Result<Vec<QueryResult>, String> {
     // Drain any leftover state from a prior query / dropped stream so we
     // don't hit "open batch" errors when re-using the client.
     client
         .close_query()
         .await
-        .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?;
+        .map_err(|error| error::format_tds_error(&error, Some(ssl_mode)))?;
     client
         .execute(query.to_string(), query_timeout_seconds, None)
         .await
-        .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?;
+        .map_err(|error| error::format_tds_error(&error, Some(ssl_mode)))?;
 
     let mut results = Vec::new();
     let mut retained_rows = 0usize;
@@ -122,7 +143,7 @@ async fn run_query_collecting(
         while let Some(values) = result_set
             .next_row()
             .await
-            .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?
+            .map_err(|error| error::format_tds_error(&error, Some(ssl_mode)))?
         {
             if retained_rows >= MAX_RESULT_ROWS && !is_affected_rows_sentinel {
                 current.truncated = true;
@@ -156,7 +177,7 @@ async fn run_query_collecting(
         if !client
             .move_to_next()
             .await
-            .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?
+            .map_err(|error| error::format_tds_error(&error, Some(ssl_mode)))?
         {
             break;
         }
@@ -165,7 +186,7 @@ async fn run_query_collecting(
         client
             .close_query()
             .await
-            .map_err(|error| error::format_tds_error(&error, Some(&ssl_mode)))?;
+            .map_err(|error| error::format_tds_error(&error, Some(ssl_mode)))?;
     }
     if results.iter().any(|result| result.truncated) {
         // `truncated` on the primary result is the statement-level signal the

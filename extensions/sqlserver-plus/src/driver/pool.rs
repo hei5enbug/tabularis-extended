@@ -21,6 +21,7 @@ use crate::driver::error::{bridge_error_requires_discard, format_bridge_error};
 use crate::models::ConnectionParams;
 use crate::settings::PluginSettings;
 use deadpool::managed::{Manager, Metrics, RecycleError, RecycleResult};
+use mssql_tds::connection::tds_client::ResultSetClient;
 use mssql_tiberius_bridge::TdsClient;
 use mssql_tiberius_bridge::{
     AuthMethod, Client, Config, EncryptionLevel, Error, ExecuteResult, QueryResult, ToSql,
@@ -33,7 +34,12 @@ pub struct BridgeConnection {
     query_timeout_seconds: Option<u32>,
     ssl_mode: String,
     recyclable: bool,
+    batch_left_open: bool,
 }
+
+const BATCH_LEFT_OPEN_ERROR: &str =
+    "SQL Server: an earlier statement failed while returning rows and \
+     left this connection unusable; run this statement again";
 
 impl BridgeConnection {
     async fn with_query_timeout<T>(
@@ -56,6 +62,7 @@ impl BridgeConnection {
     }
 
     pub async fn simple_query(&mut self, sql: impl Into<String>) -> Result<QueryResult, String> {
+        self.ensure_usable()?;
         let result = self.simple_query_raw(sql).await;
         self.discard_if_transaction_open();
         self.format_result(result)
@@ -66,6 +73,7 @@ impl BridgeConnection {
         sql: impl Into<String>,
         params: &[&dyn ToSql],
     ) -> Result<QueryResult, String> {
+        self.ensure_usable()?;
         let operation = self.client.query(sql.into(), params);
         let result = Self::with_query_timeout(self.query_timeout_seconds, operation).await;
         self.discard_if_transaction_open();
@@ -77,6 +85,7 @@ impl BridgeConnection {
         sql: impl Into<String>,
         params: &[&dyn ToSql],
     ) -> Result<ExecuteResult, String> {
+        self.ensure_usable()?;
         let operation = self.client.execute(sql.into(), params);
         let result = Self::with_query_timeout(self.query_timeout_seconds, operation).await;
         self.discard_if_transaction_open();
@@ -89,6 +98,24 @@ impl BridgeConnection {
         }
     }
 
+    /// mssql-tds keeps a batch marked open when an ERROR token arrives between
+    /// rows, although it has already read the batch to its end. Draining that
+    /// batch waits for tokens that never come, so the connection is not used
+    /// again, not even by a later statement of the same request.
+    pub fn discard_if_batch_left_open(&mut self) {
+        if self.client.inner_mut().get_current_resultset().is_some() {
+            self.batch_left_open = true;
+            self.recyclable = false;
+        }
+    }
+
+    pub fn ensure_usable(&self) -> Result<(), String> {
+        if self.batch_left_open {
+            return Err(BATCH_LEFT_OPEN_ERROR.to_string());
+        }
+        Ok(())
+    }
+
     fn format_result<T>(&mut self, result: Result<T, Error>) -> Result<T, String> {
         result.map_err(|error| {
             if bridge_error_requires_discard(&error)
@@ -99,6 +126,7 @@ impl BridgeConnection {
                 // to issue reset commands into an errored transaction stream.
                 self.recyclable = false;
             }
+            self.discard_if_batch_left_open();
             format_bridge_error(&error, Some(&self.ssl_mode))
         })
     }
@@ -203,15 +231,19 @@ impl Manager for BridgeManager {
             query_timeout_seconds: self.query_timeout_seconds,
             ssl_mode: self.ssl_mode.clone(),
             recyclable: true,
+            batch_left_open: false,
         };
         self.apply_startup_script(&mut connection).await?;
         Ok(connection)
     }
 
     async fn recycle(&self, conn: &mut Self::Type, _: &Metrics) -> RecycleResult<Self::Error> {
-        if !conn.recyclable || conn.client.inner_mut().has_active_transaction() {
+        if !conn.recyclable
+            || conn.client.inner_mut().has_active_transaction()
+            || conn.client.inner_mut().get_current_resultset().is_some()
+        {
             return Err(RecycleError::message(
-                "connection was discarded after an error, timeout, transport failure, or open transaction",
+                "connection was discarded after an error, timeout, transport failure, open transaction, or unfinished result stream",
             ));
         }
 
