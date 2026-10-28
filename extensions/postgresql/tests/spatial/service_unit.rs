@@ -10,9 +10,18 @@ use crate::{
     models::ConnectionParams,
 };
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU64, Ordering};
 
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
+
+/// Tests run in parallel and the cancel registry rejects a request ID that is
+/// already active on the connection, so every request gets its own ID.
 fn params(input: Value, read_only: bool) -> Value {
-    json!({"params":{"database":"fixture","username":"synthetic"},"driver_context":{"protocol_version":1,"connection_id":"synthetic-connection","request_id":"synthetic-request","read_only":read_only},"input":input})
+    let request_id = format!(
+        "synthetic-request-{}",
+        NEXT_REQUEST.fetch_add(1, Ordering::Relaxed)
+    );
+    json!({"params":{"database":"fixture","username":"synthetic"},"driver_context":{"protocol_version":1,"connection_id":"synthetic-connection","request_id":request_id,"read_only":read_only},"input":input})
 }
 
 #[tokio::test]
