@@ -946,27 +946,47 @@ async fn 입력이_끝나지_않아도_제한시간이_지나면_반환한다() 
     // then
     assert_eq!(actual, ErrorCode::DeadlineExceeded);
 }
-/// The contract carries a descriptor as one byte, while parallel tests can hold more than 255
-/// descriptors at once; move the pipe's read end to a free number the contract accepts.
+/// The contract carries a descriptor as one byte, while a parallel test run can hold more than
+/// 255 descriptors at once; move the pipe's read end to a free number the contract accepts.
 #[cfg(unix)]
-fn descriptor_below_256(file: std::fs::File) -> std::fs::File {
+fn descriptor_below_256(file: std::fs::File) -> Option<std::fs::File> {
     use std::os::fd::{AsRawFd, FromRawFd};
     if file.as_raw_fd() <= 255 {
-        return file;
+        return Some(file);
     }
-    for _ in 0..400 {
-        let duplicate = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 3) };
-        assert!(duplicate >= 0);
-        if duplicate <= 255 {
-            return unsafe { std::fs::File::from_raw_fd(duplicate) };
-        }
-        unsafe { libc::close(duplicate) };
-        std::thread::sleep(std::time::Duration::from_millis(25));
+    let duplicate = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 3) };
+    assert!(duplicate >= 0);
+    if duplicate <= 255 {
+        return Some(unsafe { std::fs::File::from_raw_fd(duplicate) });
     }
-    panic!("no file descriptor at or below 255 became free");
+    unsafe { libc::close(duplicate) };
+    None
 }
 #[cfg(unix)]
-async fn protected_descriptor(h: &Harness) -> (String, ErrorCode, bool) {
+const ALONE_ENV: &str = "TABULARIS_DESCRIPTOR_TEST_ALONE";
+/// Runs one test of this module again in a child process of the test binary, where it is the
+/// only test and few descriptors are open.
+#[cfg(unix)]
+fn rerun_alone(test: &str) {
+    assert!(
+        std::env::var_os(ALONE_ENV).is_none(),
+        "no file descriptor at or below 255 is free even when the test runs alone"
+    );
+    let module = module_path!().split_once("::").map_or("", |(_, path)| path);
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([&format!("{module}::{test}"), "--exact", "--test-threads=1"])
+        .env(ALONE_ENV, "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+#[cfg(unix)]
+async fn protected_descriptor(h: &Harness) -> Option<(String, ErrorCode, bool)> {
     use std::{
         io::Write,
         os::fd::{AsRawFd, FromRawFd},
@@ -974,6 +994,10 @@ async fn protected_descriptor(h: &Harness) -> (String, ErrorCode, bool) {
     let mut fds = [0; 2];
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
     let reader = descriptor_below_256(unsafe { std::fs::File::from_raw_fd(fds[0]) });
+    let Some(reader) = reader else {
+        unsafe { libc::close(fds[1]) };
+        return None;
+    };
     let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     writer.write_all(b" SECRET_CANARY \n").unwrap();
     drop(writer);
@@ -1021,7 +1045,7 @@ async fn protected_descriptor(h: &Harness) -> (String, ErrorCode, bool) {
             &request.input["input_channel"],
         )
         .is_err();
-    (secret.expose().into(), wrong, replay)
+    Some((secret.expose().into(), wrong, replay))
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -1029,7 +1053,10 @@ async fn 명시적_파일서술자는_단한번_비밀을_읽고_공통_요청�
     // given
     let h = Harness::new().await;
     // when
-    let actual = protected_descriptor(&h).await;
+    let Some(actual) = protected_descriptor(&h).await else {
+        rerun_alone("명시적_파일서술자는_단한번_비밀을_읽고_공통_요청에는_값을_넣지_않는다");
+        return;
+    };
     // then
     assert_eq!(actual.0, " SECRET_CANARY \n");
     assert_eq!(actual.1, ErrorCode::PermissionDenied);

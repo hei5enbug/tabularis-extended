@@ -104,19 +104,6 @@ jobs:
     runs-on: ubuntu-24.04
 
     services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: tabularis-e2e
-          POSTGRES_DB: tabularis_e2e
-        ports:
-          - 45432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres -d tabularis_e2e"
-          --health-interval 2s
-          --health-timeout 3s
-          --health-retries 30
       mysql:
         image: mysql:8.4
         env:

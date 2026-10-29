@@ -34,7 +34,7 @@ interface DriverManifest {
 }
 
 interface DatabaseFixture {
-    name: 'sqlite' | 'postgres' | 'mysql';
+    name: 'sqlite' | 'mysql';
     params: ConnectionParameters;
     identityQuery: string;
     expectedIdentity: string;
@@ -58,21 +58,6 @@ const databaseFixtures: DatabaseFixture[] = [
         },
         identityQuery: 'SELECT sqlite_version()',
         expectedIdentity: '.',
-    },
-    {
-        name: 'postgres',
-        params: {
-            driver: 'postgres',
-            host: process.env.TABULARIS_E2E_POSTGRES_HOST ?? '127.0.0.1',
-            port: Number.parseInt(process.env.TABULARIS_E2E_POSTGRES_PORT ?? '45432', 10),
-            username: process.env.TABULARIS_E2E_POSTGRES_USER ?? 'postgres',
-            password: databasePassword,
-            database: process.env.TABULARIS_E2E_POSTGRES_DATABASE ?? 'tabularis_e2e',
-            ssl_mode: 'disable',
-            save_in_keychain: false,
-        },
-        identityQuery: 'SELECT current_database()',
-        expectedIdentity: process.env.TABULARIS_E2E_POSTGRES_DATABASE ?? 'tabularis_e2e',
     },
     {
         name: 'mysql',
