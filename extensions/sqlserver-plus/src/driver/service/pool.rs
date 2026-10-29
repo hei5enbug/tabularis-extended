@@ -369,13 +369,18 @@ mod tests {
     #[test]
     fn entra_pool_identity는_tenant_object_user_cli_경로를_분리한다() {
         // given
-        let (base, context) = entra_fixture(Some("/opt/azure/az"));
+        let (cli, other_cli) = if cfg!(windows) {
+            ("C:/azure/az", "C:/other/az")
+        } else {
+            ("/opt/azure/az", "/opt/other/az")
+        };
+        let (base, context) = entra_fixture(Some(cli));
         let settings = PluginSettings::default();
         let original = fingerprint_with_settings(&base, &context, &settings);
         let variants = [
             ("tenant_id", "00000000-0000-0000-0000-0000000000a9"),
             ("entra_object_id", "00000000-0000-0000-0000-0000000000b9"),
-            ("azure_cli_path", "/opt/other/az"),
+            ("azure_cli_path", other_cli),
         ]
         .map(|(key, value)| {
             let mut params = base.clone();

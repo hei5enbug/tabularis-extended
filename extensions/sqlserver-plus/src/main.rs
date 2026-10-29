@@ -14,6 +14,7 @@ use tokio::{
     time::sleep,
 };
 
+mod cancellation;
 mod common;
 mod connection;
 mod driver;
@@ -63,10 +64,12 @@ async fn run() {
         resp_tx.clone(),
         &mut tasks,
         shutdown_rx,
-        |line: String, scope| async move { Box::pin(rpc::handle_line_with_scope(&line, scope)).await },
+        |line: String, scope, execution| async move {
+            Box::pin(rpc::handle_line_with_scope(&line, scope, execution)).await
+        },
     )
     .await;
-    driver::service::registry::cancel_all();
+    cancel_all_requests();
 
     let _ = shutdown_tx.send(true);
 
@@ -143,7 +146,14 @@ async fn run_reader<R, H, F>(
     handler: H,
 ) where
     R: tokio::io::AsyncRead + Unpin,
-    H: Fn(String, Option<driver::service::registry::Scope>) -> F + Clone + Send + 'static,
+    H: Fn(
+            String,
+            Option<driver::service::registry::Scope>,
+            Option<cancellation::ExecutionLease>,
+        ) -> F
+        + Clone
+        + Send
+        + 'static,
     F: std::future::Future<Output = serde_json::Value> + Send + 'static,
 {
     let mut reader = BufReader::new(input);
@@ -202,9 +212,23 @@ async fn run_reader<R, H, F>(
             .cloned()
             .unwrap_or(serde_json::Value::Null);
         let method = request["method"].as_str().unwrap_or("");
-        // The pre-service `cancel` notification carries no request scope this
-        // driver can match; it never receives a response.
-        if method == "cancel" && request.get("id").is_none() {
+        // The pre-service `cancel` notification names the numeric id of a
+        // running `execute_query` or `execute_query_batch`. Unknown, late or
+        // malformed notifications are ignored, and none gets a response.
+        if method == "cancel" {
+            if request.get("id").is_some() {
+                if send_response(
+                    &resp_tx,
+                    rpc::error_response(id, -32600, "cancel must be sent as a notification"),
+                )
+                .await
+                .is_err()
+                {
+                    break;
+                }
+            } else if let Some(request_id) = request["params"]["id"].as_u64() {
+                cancellation::global().cancel(request_id);
+            }
             continue;
         }
         if handlers::service::is_method(method) && !driver::service::types::valid_rpc_id(&id) {
@@ -299,6 +323,28 @@ async fn run_reader<R, H, F>(
                     .unwrap_or("legacy")
                     .to_owned()
             });
+        // Registered here, before the call waits for a worker, so a `cancel`
+        // notification that arrives while it is queued still reaches it.
+        let execution = match (method, id.as_u64()) {
+            ("execute_query" | "execute_query_batch", Some(request_id)) => {
+                match cancellation::global().register(request_id) {
+                    Ok(lease) => Some(lease),
+                    Err(cancellation::RegisterError::DuplicateRequestId) => {
+                        if send_response(
+                            &resp_tx,
+                            rpc::error_response(id, -32600, "request id is already active"),
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+            }
+            _ => None,
+        };
         let connection_limit = driver::service::registry::connection_limit(&connection);
         let active = active.clone();
         let queued = queued.clone();
@@ -316,14 +362,20 @@ async fn run_reader<R, H, F>(
             let admission = if let Some(scope) = &scope {
                 tokio::select! {
                     permits = &mut permits => Ok(permits),
-                    _ = tokio::time::sleep_until(scope.state.deadline) => Err(driver::service::ServiceError::new("DEADLINE_EXCEEDED", "The queued request deadline was exceeded")),
-                    _ = scope.wait_cancelled() => Err(driver::service::ServiceError::new("CANCELLED", "The queued request was cancelled")),
+                    _ = tokio::time::sleep_until(scope.state.deadline) => Err(driver::service::ServiceError::new("DEADLINE_EXCEEDED", "The queued request deadline was exceeded").response(id.clone())),
+                    _ = scope.wait_cancelled() => Err(driver::service::ServiceError::new("CANCELLED", "The queued request was cancelled").response(id.clone())),
+                }
+            } else if let Some(lease) = &execution {
+                // A call cancelled while it waits for a worker never runs.
+                tokio::select! {
+                    permits = &mut permits => Ok(permits),
+                    _ = lease.control().cancelled() => Err(rpc::query_cancelled_response(id.clone(), lease.request_id(), true)),
                 }
             } else { Ok(permits.await) };
             drop(queue_permit);
             let response = match admission {
-                Ok(_permits) => handler(line, scope).await,
-                Err(error) => error.response(id),
+                Ok(_permits) => handler(line, scope, execution).await,
+                Err(response) => response,
             };
             let _ = send_response(&resp_tx, response).await;
         });
@@ -366,17 +418,23 @@ fn bounded_response(response: serde_json::Value) -> Result<String, ()> {
     Ok(body)
 }
 
+/// Stops every in-flight service request and legacy query call.
+fn cancel_all_requests() {
+    driver::service::registry::cancel_all();
+    cancellation::global().cancel_all();
+}
+
 async fn run_writer(mut resp_rx: mpsc::Receiver<String>, shutdown_tx: watch::Sender<bool>) {
     let mut stdout = tokio::io::stdout();
     while let Some(mut body) = resp_rx.recv().await {
         body.push('\n');
         if stdout.write_all(body.as_bytes()).await.is_err() {
-            driver::service::registry::cancel_all();
+            cancel_all_requests();
             let _ = shutdown_tx.send(true);
             break;
         }
         if stdout.flush().await.is_err() {
-            driver::service::registry::cancel_all();
+            cancel_all_requests();
             let _ = shutdown_tx.send(true);
             break;
         }
@@ -459,19 +517,26 @@ mod tests {
             let (shutdown, shutdown_rx) = watch::channel(false);
             let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             let counter = started.clone();
-            let reader = tokio::spawn(async move {
-                let mut tasks = JoinSet::new();
-                run_reader(
+            let reader =
+                tokio::spawn(async move {
+                    let mut tasks = JoinSet::new();
+                    run_reader(
                     server,
                     resp_tx,
                     &mut tasks,
                     shutdown_rx,
-                    move |line: String, scope: Option<driver::service::registry::Scope>| {
+                    move |line: String,
+                          scope: Option<driver::service::registry::Scope>,
+                          execution: Option<cancellation::ExecutionLease>| {
                         counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         async move {
                             let id = serde_json::from_str::<Value>(&line).unwrap()["id"].clone();
                             let Some(scope) = scope else {
-                                return std::future::pending().await;
+                                let Some(lease) = execution else {
+                                    return std::future::pending().await;
+                                };
+                                lease.control().cancelled().await;
+                                return rpc::query_cancelled_response(id, lease.request_id(), false);
                             };
                             scope.wait_cancelled().await;
                             driver::service::ServiceError::new(
@@ -483,8 +548,8 @@ mod tests {
                     },
                 )
                 .await;
-                tasks.shutdown().await;
-            });
+                    tasks.shutdown().await;
+                });
             Self {
                 input,
                 output,
@@ -640,6 +705,122 @@ mod tests {
             assert_eq!(next["id"], "cancel-nothing");
             assert!(harness.output.try_recv().is_err());
             assert!(!harness.reader.is_finished());
+            harness.finish().await;
+        });
+    }
+
+    fn legacy_query_line(id: u64, method: &str) -> String {
+        json!({"jsonrpc":"2.0","id":id,"method":method,"params":{"params":{},"query":"SELECT 1"}})
+            .to_string()
+    }
+    fn legacy_cancel_line(id: Value) -> String {
+        json!({"jsonrpc":"2.0","method":"cancel","params":{"id":id}}).to_string()
+    }
+
+    #[test]
+    fn 실행_중인_legacy_쿼리는_cancel_notification의_id로_취소되고_하나의_응답만_받는다() {
+        on_worker_stack(async {
+            for (id, method) in [(901, "execute_query"), (902, "execute_query_batch")] {
+                // given
+                let mut harness = Harness::new();
+                harness.send(&legacy_query_line(id, method)).await;
+                harness.wait_started(1).await;
+                // when
+                harness.send(&legacy_cancel_line(json!(id))).await;
+                let response = harness.receive().await;
+                // then
+                assert_eq!(response["id"], id);
+                assert_eq!(response["error"]["code"], -32800);
+                assert_eq!(response["error"]["data"]["request_id"], id);
+                assert!(harness.output.try_recv().is_err());
+                harness.finish().await;
+            }
+        });
+    }
+
+    #[test]
+    fn worker를_기다리다_취소된_legacy_쿼리는_실행되지_않고_취소_응답으로_끝난다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            let connections = [
+                uuid::Uuid::new_v4().to_string(),
+                uuid::Uuid::new_v4().to_string(),
+            ];
+            for (index, connection) in connections.iter().enumerate() {
+                for slot in 0..4 {
+                    harness
+                        .send(&service_line(
+                            connection,
+                            &format!("busy-{index}-{slot}"),
+                            "service_test",
+                        ))
+                        .await;
+                }
+            }
+            harness.wait_started(WORKER_POOL_SIZE).await;
+            harness.send(&legacy_query_line(903, "execute_query")).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // when
+            harness.send(&legacy_cancel_line(json!(903))).await;
+            let response = harness.receive().await;
+            // then
+            assert_eq!(response["id"], 903);
+            assert_eq!(response["error"]["code"], -32800);
+            assert_eq!(
+                response["error"]["data"]["server_termination_confirmed"],
+                true
+            );
+            assert_eq!(
+                harness.started.load(std::sync::atomic::Ordering::SeqCst),
+                WORKER_POOL_SIZE
+            );
+            harness.finish().await;
+        });
+    }
+
+    #[test]
+    fn 이미_실행_중인_id의_legacy_쿼리는_무효_요청으로_거절되고_기존_요청은_계속된다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            harness.send(&legacy_query_line(904, "execute_query")).await;
+            harness.wait_started(1).await;
+            // when
+            harness.send(&legacy_query_line(904, "execute_query")).await;
+            let rejected = harness.receive().await;
+            harness.send(&legacy_cancel_line(json!(904))).await;
+            let cancelled = harness.receive().await;
+            // then
+            assert_eq!(rejected["id"], 904);
+            assert_eq!(rejected["error"]["code"], -32600);
+            assert_eq!(cancelled["error"]["code"], -32800);
+            assert_eq!(harness.started.load(std::sync::atomic::Ordering::SeqCst), 1);
+            harness.finish().await;
+        });
+    }
+
+    #[test]
+    fn 잘못된_legacy_cancel은_요청을_취소하지_않고_id가_있으면_무효_요청으로_응답한다() {
+        on_worker_stack(async {
+            // given
+            let mut harness = Harness::new();
+            harness.send(&legacy_query_line(905, "execute_query")).await;
+            harness.wait_started(1).await;
+            // when
+            harness.send(&legacy_cancel_line(json!("905"))).await;
+            harness.send(r#"{"jsonrpc":"2.0","method":"cancel"}"#).await;
+            harness
+                .send(r#"{"jsonrpc":"2.0","id":77,"method":"cancel","params":{"id":905}}"#)
+                .await;
+            let response = harness.receive().await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // then
+            assert_eq!(response["id"], 77);
+            assert_eq!(response["error"]["code"], -32600);
+            assert!(harness.output.try_recv().is_err());
+            harness.send(&legacy_cancel_line(json!(905))).await;
+            assert_eq!(harness.receive().await["id"], 905);
             harness.finish().await;
         });
     }

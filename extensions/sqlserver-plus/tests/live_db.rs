@@ -2544,3 +2544,244 @@ fn 일괄_실행에서_행을_보내던_중_실패하면_뒤_문장은_다시_�
     assert!(first.contains("245"), "{response}");
     assert!(second.contains("run this statement again"), "{response}");
 }
+
+/// Server-wide ring buffer of ATTENTION events, dropped again when the test
+/// ends, passes or not.
+struct AttentionCapture {
+    name: String,
+}
+
+impl AttentionCapture {
+    fn start(plugin: &mut Plugin, name: &str) -> Self {
+        let master = connection_params_for("master", "cancel-master");
+        let capture = Self {
+            name: name.to_string(),
+        };
+        plugin.execute_with(&master, capture.drop_sql());
+        plugin.execute_with(
+            &master,
+            format!(
+                "CREATE EVENT SESSION [{name}] ON SERVER \
+                 ADD EVENT sqlserver.attention(ACTION(sqlserver.session_id)) \
+                 ADD TARGET package0.ring_buffer; \
+                 ALTER EVENT SESSION [{name}] ON SERVER STATE = START"
+            ),
+        );
+        capture
+    }
+
+    fn drop_sql(&self) -> String {
+        let name = &self.name;
+        format!(
+            "IF EXISTS (SELECT 1 FROM sys.server_event_sessions WHERE name = N'{name}') \
+             BEGIN \
+               IF EXISTS (SELECT 1 FROM sys.dm_xe_sessions WHERE name = N'{name}') \
+                 ALTER EVENT SESSION [{name}] ON SERVER STATE = STOP; \
+               DROP EVENT SESSION [{name}] ON SERVER; \
+             END"
+        )
+    }
+
+    fn attentions_for(&self, plugin: &mut Plugin, session_id: i64) -> i64 {
+        let name = &self.name;
+        let sql = format!(
+            "SELECT CAST(t.target_data AS xml).value(\
+             'count(/RingBufferTarget/event[@name=\"attention\"]/action[@name=\"session_id\"]\
+             /value[text()=\"{session_id}\"])', 'int') \
+             FROM sys.dm_xe_session_targets t \
+             JOIN sys.dm_xe_sessions s ON t.event_session_address = s.address \
+             WHERE s.name = N'{name}'"
+        );
+        first_integer(
+            plugin,
+            &connection_params_for("master", "cancel-master"),
+            &sql,
+        )
+        .unwrap_or(0)
+    }
+}
+
+impl Drop for AttentionCapture {
+    fn drop(&mut self) {
+        let mut plugin = Plugin::spawn();
+        plugin.execute_with(
+            &connection_params_for("master", "cancel-master"),
+            self.drop_sql(),
+        );
+    }
+}
+
+fn first_integer(plugin: &mut Plugin, params: &Value, sql: &str) -> Option<i64> {
+    plugin.execute_with(params, sql)["rows"]
+        .get(0)
+        .and_then(|row| row.get(0))
+        .and_then(Value::as_i64)
+}
+
+/// Polls until `probe` returns a value, so a slow server cannot fail a test
+/// that only needs the condition to hold within a few seconds.
+fn wait_for<T>(what: &str, mut probe: impl FnMut() -> Option<T>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        if let Some(value) = probe() {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+fn session_of_marked_request(plugin: &mut Plugin, marker: &str) -> Option<i64> {
+    first_integer(
+        plugin,
+        &connection_params_for("master", "cancel-master"),
+        &format!(
+            "SELECT TOP 1 r.session_id FROM sys.dm_exec_requests r \
+             CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t \
+             WHERE r.session_id <> @@SPID AND t.text LIKE N'%{marker}%'"
+        ),
+    )
+}
+
+fn send_cancel_notification(plugin: &mut Plugin, request_id: u64) {
+    let line = json!({
+        "jsonrpc": "2.0",
+        "method": "cancel",
+        "params": { "id": request_id },
+    });
+    writeln!(plugin.stdin, "{line}").expect("write cancel notification");
+    plugin.stdin.flush().expect("flush cancel notification");
+}
+
+/// Reads the next response on its own thread, so a plugin that never answers
+/// fails the test instead of hanging the suite.
+fn read_response_within(plugin: Plugin, limit: std::time::Duration) -> (Plugin, Value) {
+    let pid = plugin.child.id();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut plugin = plugin;
+        let response = plugin.read_response();
+        let _ = sender.send((plugin, response));
+    });
+    receiver.recv_timeout(limit).unwrap_or_else(|_| {
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).status();
+        panic!("no response within {limit:?} after the cancel notification")
+    })
+}
+
+/// Starts `method` with a `WAITFOR` that would run for thirty seconds,
+/// cancels it with the host's `cancel` notification, and checks on the server
+/// that the request received an ATTENTION and ended, and that the session it
+/// ran on is not reused.
+fn assert_legacy_cancellation_reaches_the_server(method: &'static str, case: &str) {
+    // given
+    let mut plugin = Plugin::with_scratch_database();
+    let marker = format!("cancel-marker-{case}-{}", std::process::id());
+    let capture = AttentionCapture::start(&mut plugin, &format!("ss_cancel_{case}"));
+    let mut victim = connection_params();
+    victim["connection_id"] = json!(format!("cancel-victim-{case}"));
+    let long_statement =
+        format!("WAITFOR DELAY '00:00:30'; SELECT CAST(1 AS INT) AS late /* {marker} */");
+    let request = if method == "execute_query" {
+        json!({ "params": victim, "query": long_statement })
+    } else {
+        json!({
+            "params": victim,
+            "queries": [
+                "SELECT CAST(1 AS INT) AS first_ok",
+                long_statement,
+                "SELECT CAST(2 AS INT) AS never_run"
+            ],
+        })
+    };
+    let request_id = plugin.send(method, request);
+    let spid = wait_for("the long request to reach the server", || {
+        session_of_marked_request(&mut plugin, &marker)
+    });
+    let cancelled_connection = plugin.execute_with(
+        &connection_params_for("master", "cancel-master"),
+        format!(
+            "SELECT CAST(connection_id AS NVARCHAR(40)) FROM sys.dm_exec_connections \
+             WHERE session_id = {spid}"
+        ),
+    )["rows"][0][0]
+        .as_str()
+        .expect("connection id of the running request")
+        .to_string();
+
+    // when
+    let cancelled_at = std::time::Instant::now();
+    send_cancel_notification(&mut plugin, request_id);
+    let (mut plugin, response) = read_response_within(plugin, std::time::Duration::from_secs(20));
+
+    // then
+    assert!(
+        cancelled_at.elapsed() < std::time::Duration::from_secs(20),
+        "the thirty second WAITFOR was not interrupted"
+    );
+    assert_eq!(response["id"], request_id, "{response}");
+    assert_eq!(response["error"]["code"], -32800, "{response}");
+    assert_eq!(
+        response["error"]["data"]["request_id"], request_id,
+        "{response}"
+    );
+    assert!(response.get("result").is_none(), "{response}");
+    wait_for(
+        "the cancelled request to leave sys.dm_exec_requests",
+        || {
+            session_of_marked_request(&mut plugin, &marker)
+                .is_none()
+                .then_some(())
+        },
+    );
+    let attentions = wait_for("the server to log an ATTENTION", || {
+        Some(capture.attentions_for(&mut plugin, spid)).filter(|count| *count > 0)
+    });
+    assert_eq!(attentions, 1);
+
+    // The next call on the same connection gets a fresh physical connection.
+    // SQL Server reuses a freed session id at once, so the connection id
+    // tells the two apart, and the cancelled one is gone from the server.
+    let next_connection = connection_id_of_current_session(&mut plugin, &victim);
+    assert_ne!(
+        next_connection, cancelled_connection,
+        "the cancelled connection was reused"
+    );
+    let master = connection_params_for("master", "cancel-master");
+    wait_for("the cancelled connection to close", || {
+        let remaining = plugin.execute_with(
+            &master,
+            format!(
+                "SELECT COUNT(*) FROM sys.dm_exec_connections \
+                 WHERE connection_id = '{cancelled_connection}'"
+            ),
+        )["rows"][0][0]
+            .as_i64();
+        (remaining == Some(0)).then_some(())
+    });
+}
+
+fn connection_id_of_current_session(plugin: &mut Plugin, params: &Value) -> String {
+    plugin.execute_with(
+        params,
+        "SELECT CAST(connection_id AS NVARCHAR(40)) FROM sys.dm_exec_connections \
+         WHERE session_id = @@SPID",
+    )["rows"][0][0]
+        .as_str()
+        .expect("connection id")
+        .to_string()
+}
+
+#[test]
+fn 실행_중인_execute_query는_cancel_notification으로_서버에서_중단되고_세션은_재사용되지_않는다() {
+    assert_legacy_cancellation_reaches_the_server("execute_query", "single");
+}
+
+#[test]
+fn 실행_중인_execute_query_batch는_cancel_notification으로_서버에서_중단되고_세션은_재사용되지_않는다(
+) {
+    assert_legacy_cancellation_reaches_the_server("execute_query_batch", "batch");
+}

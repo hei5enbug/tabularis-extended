@@ -2,8 +2,9 @@
 
 use serde_json::{json, Value};
 
+use crate::cancellation::ExecutionLease;
 use crate::driver::ops;
-use crate::rpc::{conn_params, req_str, respond};
+use crate::rpc::{conn_params, req_str, respond, respond_query};
 
 pub async fn test_connection(id: Value, params: &Value) -> Value {
     let conn = match conn_params(params) {
@@ -41,16 +42,30 @@ fn limit_and_page(params: &Value) -> (Option<u32>, u32) {
     (limit, page)
 }
 
-pub async fn execute_query(id: Value, params: &Value) -> Value {
+/// Runs the query under the lease's cancellation when the host gave the call
+/// a numeric id; any other call runs without a way to be cancelled.
+pub async fn execute_query(id: Value, params: &Value, execution: Option<&ExecutionLease>) -> Value {
     let (conn, query) = match (conn_params(params), req_str(params, "query")) {
         (Ok(c), Ok(q)) => (c, q),
         (Err(e), _) | (_, Err(e)) => return respond::<()>(id, Err(e)),
     };
     let (limit, page) = limit_and_page(params);
-    respond(id, ops::execute_query(&conn, query, limit, page).await)
+    match execution {
+        Some(lease) => {
+            let outcome =
+                ops::execute_query_with_cancellation(&conn, query, limit, page, lease.control())
+                    .await;
+            respond_query(id, lease.request_id(), outcome)
+        }
+        None => respond(id, ops::execute_query(&conn, query, limit, page).await),
+    }
 }
 
-pub async fn execute_query_batch(id: Value, params: &Value) -> Value {
+pub async fn execute_query_batch(
+    id: Value,
+    params: &Value,
+    execution: Option<&ExecutionLease>,
+) -> Value {
     let conn = match conn_params(params) {
         Ok(c) => c,
         Err(e) => return respond::<()>(id, Err(e)),
@@ -60,7 +75,15 @@ pub async fn execute_query_batch(id: Value, params: &Value) -> Value {
         Err(e) => return respond::<()>(id, Err(e)),
     };
     let (limit, page) = limit_and_page(params);
-    respond(id, ops::execute_batch(&conn, &queries, limit, page).await)
+    match execution {
+        Some(lease) => {
+            let outcome =
+                ops::execute_batch_with_cancellation(&conn, &queries, limit, page, lease.control())
+                    .await;
+            respond_query(id, lease.request_id(), outcome)
+        }
+        None => respond(id, ops::execute_batch(&conn, &queries, limit, page).await),
+    }
 }
 
 pub async fn explain_query(id: Value, params: &Value) -> Value {

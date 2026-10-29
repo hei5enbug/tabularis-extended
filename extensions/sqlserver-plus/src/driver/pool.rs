@@ -92,6 +92,11 @@ impl BridgeConnection {
         self.format_result(result)
     }
 
+    /// Close this session instead of returning it to the pool.
+    pub fn discard(&mut self) {
+        self.recyclable = false;
+    }
+
     fn discard_if_transaction_open(&mut self) {
         if self.client.inner_mut().has_active_transaction() {
             self.recyclable = false;

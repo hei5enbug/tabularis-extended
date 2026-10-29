@@ -13,6 +13,12 @@ app_dir := env("TABULARIS_APP_DIR", "tabularis-extended")
 plugins_root := env("TABULARIS_PLUGIN_DIR", if os() == "macos" { env("HOME") + "/Library/Application Support/" + app_dir + "/plugins" } else if os() == "windows" { env("APPDATA") + "/" + app_dir + "/plugins" } else { env("XDG_DATA_HOME", env("HOME") + "/.local/share") + "/" + app_dir + "/plugins" })
 dest := plugins_root + "/drivers/" + plugin_id
 
+# Archive platform label (<os>-<arch>) and executable suffix of the host build.
+os_label := if os() == "macos" { "darwin" } else if os() == "windows" { "win" } else { os() }
+arch_label := if arch() == "x86_64" { "x64" } else if arch() == "aarch64" { "arm64" } else { arch() }
+platform := os_label + "-" + arch_label
+exe_suffix := if os() == "windows" { ".exe" } else { "" }
+
 # Run SQL Server 2022 via Docker (accept the EULA, set a strong SA password).
 run-sqlserver:
     docker run -d --name sqlserver-dev -p 1433:1433 \
@@ -111,134 +117,50 @@ fmt:
 # Tabularis Extended before installing over an existing package.
 # ---------------------------------------------------------------------------
 
+# Packaging logic lives in scripts/*.mjs (Node built-ins only) and is covered by
+# tests/packaging, so `just test-packaging` exercises the code these recipes run.
+
+# Run the packaging script tests (archive, preflight, package and install).
+test-packaging:
+    node --test "tests/packaging/*.test.mjs"
+
 # Manifest-only preflight (no build, no writes): package identity, aligned
 # versions and the plugin-level settings contract.
 #
 # Verify package identity, aligned versions and plugin settings without building.
-[unix]
 preflight:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cargo_version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
-    for file in explain/package.json ui/package.json; do
-        if [ "$(jq -r .version "$file")" != "$cargo_version" ]; then
-            echo "$file version differs from Cargo.toml ($cargo_version)" >&2
-            exit 1
-        fi
-    done
-    jq -e --arg id "{{ plugin_id }}" --arg bin "{{ binary }}" --arg version "$cargo_version" '
-        .id == $id and .name == "SQL Server Plus" and .version == $version
-        and .kind == "driver" and .executable == $bin
-        and (.min_runtime_version | type == "string")
-        and ([.ui_extensions[].driver] | all(. == $id))
-        and (.settings | all(.key as $k | (["auth_mode","auth_source","tenant_id","entra_object_id","azure_cli_path","integrated_auth"] | index($k)) == null))
-    ' .tabularium >/dev/null || { echo ".tabularium identity check failed" >&2; exit 1; }
-    jq -r '"preflight ok: \(.id) \(.version), runtime >= \(.min_runtime_version), executable \(.executable)"' .tabularium
-
-[windows]
-preflight:
-    $cargo = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"$' | Select-Object -First 1).Matches[0].Groups[1].Value; \
-    $m = Get-Content .tabularium -Raw | ConvertFrom-Json; \
-    foreach ($f in 'explain/package.json','ui/package.json') { if ((Get-Content $f -Raw | ConvertFrom-Json).version -ne $cargo) { throw "$f version differs from Cargo.toml ($cargo)" } }; \
-    if ($m.id -ne '{{ plugin_id }}' -or $m.name -ne 'SQL Server Plus' -or $m.version -ne $cargo -or $m.executable -ne '{{ binary }}') { throw '.tabularium identity check failed' }; \
-    if ($m.ui_extensions | Where-Object { $_.driver -ne '{{ plugin_id }}' }) { throw 'ui_extensions driver is not {{ plugin_id }}' }; \
-    if ($m.settings | Where-Object { @('auth_mode','auth_source','tenant_id','entra_object_id','azure_cli_path','integrated_auth') -contains $_.key }) { throw 'authentication fields belong to per-connection params, not plugin settings' }; \
-    Write-Host "preflight ok: $($m.id) $($m.version), runtime >= $($m.min_runtime_version), executable $($m.executable)"
+    node scripts/preflight.mjs --metadata-only
 
 # The archive root holds exactly what the host loads: the executable,
-# .tabularium, assets, ui/dist/index.js and explain/dist/index.iife.js, plus the LICENSE that Apache-2.0
-# requires with every binary copy.
+# .tabularium, README.md, assets, ui/dist/index.js and explain/dist/index.iife.js,
+# plus the LICENSE that Apache-2.0 requires with every binary copy. An existing
+# archive of the same name is replaced.
 #
 # Build the release package for this host into OUT and write its SHA-256 file.
-[unix]
 package out="dist": release preflight
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p "{{ out }}"
-    out=$(cd "{{ out }}" && pwd)
-    case "$(uname -s)" in Linux) os=linux ;; Darwin) os=darwin ;; *) echo "unsupported host" >&2; exit 1 ;; esac
-    case "$(uname -m)" in x86_64|amd64) arch=x64 ;; arm64|aarch64) arch=arm64 ;; *) echo "unsupported architecture" >&2; exit 1 ;; esac
-    stage=$(mktemp -d)
-    trap 'rm -rf "$stage"' EXIT
-    cp "target/release/{{ binary }}" "$stage/"
-    cp .tabularium "$stage/"
-    cp LICENSE "$stage/"
-    if [ -d assets ]; then cp -R assets "$stage/assets"; fi
-    for bundle in ui/dist/index.js explain/dist/index.iife.js; do
-        [ -f "$bundle" ] || { echo "missing $bundle" >&2; exit 1; }
-        mkdir -p "$stage/$(dirname "$bundle")"
-        cp "$bundle" "$stage/$bundle"
-    done
-    jq -r '.executable, (.ui_extensions[].module), (.explain_parsers[].module)' "$stage/.tabularium" | while read -r rel; do
-        case "$rel" in /*|*..*) echo "unsafe manifest path: $rel" >&2; exit 1 ;; esac
-        if [ ! -f "$stage/$rel" ] || [ -L "$stage/$rel" ]; then echo "package lacks regular file $rel" >&2; exit 1; fi
-    done
-    archive="$out/{{ plugin_id }}-$os-$arch.zip"
-    rm -f "$archive" "$archive.sha256"
-    (cd "$stage" && zip -qrX "$archive" .)
-    (cd "$out" && shasum -a 256 "$(basename "$archive")" > "$(basename "$archive").sha256")
-    echo "Packaged $archive"
-
-[windows]
-package out="dist": release preflight
-    New-Item -ItemType Directory -Force -Path "{{ out }}" | Out-Null; \
-    $out = (Resolve-Path "{{ out }}").Path; \
-    $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString()); \
-    New-Item -ItemType Directory -Force -Path $stage | Out-Null; \
-    try { \
-        Copy-Item "target\release\{{ binary }}.exe" $stage; \
-        Copy-Item ".tabularium" $stage; \
-        Copy-Item "LICENSE" $stage; \
-        if (Test-Path "assets") { Copy-Item -Recurse "assets" (Join-Path $stage "assets") }; \
-        foreach ($bundle in "ui\dist\index.js", "explain\dist\index.iife.js") { \
-            if (-not (Test-Path $bundle -PathType Leaf)) { throw "missing $bundle" }; \
-            New-Item -ItemType Directory -Force -Path (Join-Path $stage (Split-Path $bundle)) | Out-Null; \
-            Copy-Item $bundle (Join-Path $stage $bundle) \
-        }; \
-        $archive = Join-Path $out "{{ plugin_id }}-win-x64.zip"; \
-        if (Test-Path $archive) { Remove-Item -Force $archive }; \
-        Compress-Archive -Path "$stage\*" -DestinationPath $archive; \
-        $hash = (Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower(); \
-        Set-Content -NoNewline -Path "$archive.sha256" -Value "$hash  $(Split-Path $archive -Leaf)`n"; \
-        Write-Host "Packaged $archive" \
-    } finally { Remove-Item -Recurse -Force $stage }
+    node scripts/package.mjs --replace --binary "target/release/{{ binary }}{{ exe_suffix }}" --platform "{{ platform }}" --output "{{ out }}/{{ plugin_id }}-{{ platform }}.zip"
 
 # Check a packaged archive against its SHA-256 file and its embedded manifest.
-[unix]
 verify-package archive:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    archive="{{ archive }}"
-    (cd "$(dirname "$archive")" && shasum -a 256 -c "$(basename "$archive").sha256")
-    unzip -p "$archive" .tabularium | jq -e --arg id "{{ plugin_id }}" --arg bin "{{ binary }}" \
-        '.id == $id and .name == "SQL Server Plus" and .executable == $bin' >/dev/null
-    unzip -Z1 "$archive" | grep -qx "{{ binary }}"
-    echo "verified $archive"
-
-[windows]
-verify-package archive:
-    $expected = ((Get-Content "{{ archive }}.sha256" -Raw).Trim() -split '\s+')[0]; \
-    if ((Get-FileHash -Algorithm SHA256 "{{ archive }}").Hash.ToLower() -ne $expected) { throw 'SHA-256 mismatch' }; \
-    Write-Host "verified {{ archive }}"
+    node scripts/install.mjs --verify-only --archive "{{ archive }}" --sha256 "{{ archive }}.sha256"
 
 # Show the destination and run the manifest preflight without touching the plugins directory.
 install-dry-run: preflight
     @echo "Would install {{ plugin_id }} into {{ dest }}"
     @echo "Profile directory: {{ app_dir }}"
 
-# Verify a packaged archive, then extract it into the fork's plugin directory.
-[unix]
-install-package archive: (verify-package archive)
-    mkdir -p "{{ dest }}"
-    unzip -oq "{{ archive }}" -d "{{ dest }}"
-    @echo "Installed to {{ dest }}"
-    @echo "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
+# Verify a packaged archive and report where it would be installed, without writing anything.
+install-package-dry-run archive:
+    node scripts/install.mjs --archive "{{ archive }}" --sha256 "{{ archive }}.sha256" --plugins-root "{{ plugins_root }}"
 
-[windows]
-install-package archive: (verify-package archive)
-    New-Item -ItemType Directory -Force -Path "{{ dest }}" | Out-Null; \
-    Expand-Archive -Force -Path "{{ archive }}" -DestinationPath "{{ dest }}"; \
-    Write-Host "Installed to {{ dest }}"
+# The previous package is kept as a hidden backup next to it and restored if
+# the replacement fails. The plugins root's parent (the profile directory) must
+# already exist, so a mistyped TABULARIS_APP_DIR never creates a profile.
+#
+# Verify a packaged archive, stage it, then replace the fork's plugin directory.
+install-package archive:
+    node scripts/install.mjs --apply --archive "{{ archive }}" --sha256 "{{ archive }}.sha256" --plugins-root "{{ plugins_root }}"
+    @echo "Restart Tabularis Extended (or toggle the plugin in Settings) to pick up changes."
 
 # Build a debug binary and copy it, the manifest and the bundles into the fork's plugin folder.
 [unix]

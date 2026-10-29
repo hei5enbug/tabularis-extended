@@ -264,16 +264,24 @@ fn entra_config_rejects_unverified_tls_and_credential_combinations() {
     assert!(trusted.is_err());
 }
 
+/// An absolute Azure CLI path on every platform, written without backslashes
+/// so it appears verbatim in Debug output.
+const CLI_PATH: &str = if cfg!(windows) {
+    "C:/azure/az"
+} else {
+    "/opt/azure/az"
+};
+
 #[test]
 fn entra_manager_debug_output_has_no_token() {
     // given
-    let manager = entra_manager("/opt/azure/az");
+    let manager = entra_manager(CLI_PATH);
 
     // when
     let debug = format!("{manager:?}");
 
     // then
-    assert!(debug.contains("/opt/azure/az"));
+    assert!(debug.contains(CLI_PATH));
     assert!(!debug.contains("eyJ"));
 }
 

@@ -279,10 +279,14 @@ mod tests {
         // given
         let base = entra_params();
         let base_key = build_connection_key(&base);
+        let cli_path = std::env::current_exe()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
         let variants = [
             ("tenant_id", "00000000-0000-0000-0000-0000000000a9"),
             ("entra_object_id", "00000000-0000-0000-0000-0000000000b9"),
-            ("azure_cli_path", "/opt/azure/az"),
+            ("azure_cli_path", cli_path.as_str()),
             ("auth_source", "other_source"),
         ]
         .map(|(key, value)| {

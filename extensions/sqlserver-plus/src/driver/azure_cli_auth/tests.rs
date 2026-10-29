@@ -1,8 +1,9 @@
-use super::fake_cli::{
-    claims_with, token, unix_now, valid_token, FakeCli, HOST, OBJECT, TENANT, USER,
-};
+#[cfg(unix)]
+use super::fake_cli::{claims_with, unix_now, FakeCli};
+use super::fake_cli::{token, valid_token, HOST, OBJECT, TENANT, USER};
 use super::*;
 use serde_json::json;
+use std::fs;
 
 fn valid_auth() -> AzureCliAuth {
     AzureCliAuth {
@@ -422,6 +423,280 @@ fn access_token_and_identity_debug_output_contain_no_token() {
     assert_eq!(access.expose(), secret);
 }
 
+struct ResolverFixture {
+    directory: PathBuf,
+}
+
+impl ResolverFixture {
+    fn new() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().join(format!(
+            "sqlserver plus azure cli resolver {} {}",
+            std::process::id(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        Self { directory }
+    }
+
+    fn file(&self, relative_path: &str) -> PathBuf {
+        let path = self.directory.join(relative_path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, b"fixture").unwrap();
+        path
+    }
+}
+
+impl Drop for ResolverFixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+/// 기본 검색은 절대 PATH 디렉터리에서 az.exe를 az.cmd보다 먼저 선택한다.
+#[test]
+fn 기본_검색은_절대_path에서_az_exe를_우선한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    let executable = fixture.file("tools/az.exe");
+    fixture.file("tools/az.cmd");
+    fixture.file("python.exe");
+    let path_dirs = vec![fixture.directory.join("tools")];
+
+    // when
+    let result = resolve_windows_cli(None, &path_dirs);
+
+    // then
+    let result = result.unwrap();
+    assert_eq!(result.program, executable);
+    assert!(result.prefix_args.is_empty());
+}
+
+/// 기본 검색은 az.cmd를 인접한 Python 런타임과 Azure CLI 모듈로 실행한다.
+#[test]
+fn 기본_검색은_az_cmd를_상위_python으로_실행한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    fixture.file("Azure CLI/wbin/az.cmd");
+    let python = fixture.file("Azure CLI/python.exe");
+    let path_dirs = vec![fixture.directory.join("Azure CLI/wbin")];
+
+    // when
+    let result = resolve_windows_cli(None, &path_dirs);
+
+    // then
+    let result = result.unwrap();
+    assert_eq!(result.program, python);
+    assert_eq!(result.prefix_args, ["-IBm", "azure.cli"]);
+}
+
+/// az.cmd 옆 경로에 Python 런타임이 없으면 기본 검색을 거부한다.
+#[test]
+fn python이_없으면_az_cmd를_거부한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    fixture.file("Azure CLI/wbin/az.cmd");
+    let path_dirs = vec![fixture.directory.join("Azure CLI/wbin")];
+
+    // when
+    let result = resolve_windows_cli(None, &path_dirs);
+
+    // then
+    assert!(matches!(
+        result,
+        Err("Azure CLI Python runtime was not found")
+    ));
+}
+
+/// 기본 검색은 상대 PATH 디렉터리에서 Azure CLI를 찾지 않는다.
+#[test]
+fn 상대_path_디렉터리는_기본_검색에서_제외한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    fixture.file("relative/az.exe");
+    let path_dirs = vec![
+        PathBuf::from("relative"),
+        fixture.directory.join("empty absolute directory"),
+    ];
+    fs::create_dir_all(&path_dirs[1]).unwrap();
+
+    // when
+    let result = resolve_windows_cli(None, &path_dirs);
+
+    // then
+    assert!(matches!(
+        result,
+        Err("Azure CLI was not found in absolute PATH directories")
+    ));
+}
+
+/// 대소문자가 다른 az.cmd와 공백이 있는 경로를 Python 런타임으로 해석한다.
+#[test]
+fn 대소문자와_공백이_있는_공식_az_cmd를_해석한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    let command = fixture.file("Program Files/Azure CLI/WBIN/AZ.CMD");
+    let python = fixture.file("Program Files/Azure CLI/python.exe");
+
+    // when
+    let result = resolve_windows_cli(Some(&command), &[]);
+
+    // then
+    let result = result.unwrap();
+    assert_eq!(result.program, python);
+    assert_eq!(result.prefix_args, ["-IBm", "azure.cli"]);
+}
+
+/// 명시한 절대 az.exe 경로는 그대로 실행 파일로 사용한다.
+#[test]
+fn 명시한_절대_az_exe를_그대로_사용한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    let executable = fixture.file("Program Files/Azure CLI/az.exe");
+
+    // when
+    let result = resolve_windows_cli(Some(&executable), &[]);
+
+    // then
+    let result = result.unwrap();
+    assert_eq!(result.program, executable);
+    assert!(result.prefix_args.is_empty());
+}
+
+/// 명시한 확장자 없는 경로에서 az.exe가 있으면 az.cmd보다 먼저 선택한다.
+#[test]
+fn 확장자_없는_명시_경로에서_az_exe를_우선한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    let executable = fixture.file("first/az.exe");
+    fixture.file("first/az.cmd");
+    let extensionless_executable = fixture.directory.join("first/az");
+
+    // when
+    let executable_result = resolve_windows_cli(Some(&extensionless_executable), &[]);
+
+    // then
+    assert_eq!(executable_result.unwrap().program, executable);
+}
+
+/// 명시한 확장자 없는 경로는 az.exe가 없으면 az.cmd를 Python으로 실행한다.
+#[test]
+fn 확장자_없는_명시_경로에서_az_cmd를_python으로_해석한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    fixture.file("second/az.cmd");
+    let python = fixture.file("python.exe");
+    let extensionless_command = fixture.directory.join("second/az");
+
+    // when
+    let command_result = resolve_windows_cli(Some(&extensionless_command), &[]);
+
+    // then
+    assert_eq!(command_result.unwrap().program, python);
+}
+
+/// 명시한 az.exe 파일이 없으면 해당 실행 파일 경로를 거부한다.
+#[test]
+fn 존재하지_않는_명시_az_exe를_거부한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    let executable = fixture.directory.join("tools/az.exe");
+
+    // when
+    let result = resolve_windows_cli(Some(&executable), &[]);
+
+    // then
+    assert!(matches!(result, Err("Azure CLI executable was not found")));
+}
+
+/// 명시한 배치 파일은 Azure CLI 실행 경로로 허용하지 않는다.
+#[test]
+fn 명시한_배치_파일을_거부한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    let batch = fixture.file("tools/az.bat");
+
+    // when
+    let result = resolve_windows_cli(Some(&batch), &[]);
+
+    // then
+    assert!(matches!(
+        result,
+        Err("Azure CLI scripts and batch files are not supported")
+    ));
+}
+
+/// 명시한 PowerShell 스크립트는 Azure CLI 실행 경로로 허용하지 않는다.
+#[test]
+fn 명시한_powershell_스크립트를_거부한다() {
+    // given
+    let fixture = ResolverFixture::new();
+    let script = fixture.file("tools/az.ps1");
+
+    // when
+    let result = resolve_windows_cli(Some(&script), &[]);
+
+    // then
+    assert!(matches!(
+        result,
+        Err("Azure CLI scripts and batch files are not supported")
+    ));
+}
+
+#[cfg(windows)]
+/// 환경 설정이 켜진 Windows 검사는 Azure CLI 버전만 확인한다.
+#[tokio::test]
+async fn 옵트인된_windows_검사는_azure_cli_버전만_확인한다() {
+    // given
+    if std::env::var("TABULARIS_TEST_WINDOWS_AZURE_CLI").as_deref() != Ok("1") {
+        return;
+    }
+    let cli = resolve_cli_command(None).expect("Azure CLI should be available on PATH");
+    let mut child = build_cli_command(&cli)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("Azure CLI version command should start");
+
+    // when
+    let result = match tokio::time::timeout(std::time::Duration::from_secs(20), child.wait()).await
+    {
+        Ok(Ok(status)) => Some(status.success()),
+        Ok(Err(_)) => Some(false),
+        Err(_) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            None
+        }
+    };
+
+    // then
+    assert_eq!(result, Some(true));
+}
+
+#[tokio::test]
+async fn missing_cli_executable_is_a_sanitized_failure() {
+    // given
+    let auth = AzureCliAuth {
+        azure_cli_path: std::env::temp_dir()
+            .join("sqlserver-plus-missing-az")
+            .to_string_lossy()
+            .into_owned(),
+        ..valid_auth()
+    };
+
+    // when
+    let actual = auth.acquire_access_token().await;
+
+    // then
+    assert_eq!(actual.unwrap_err(), TOKEN_REQUEST_FAILED);
+}
+
 #[cfg(unix)]
 mod cli_process {
     use super::*;
@@ -516,24 +791,6 @@ mod cli_process {
 
         // then
         assert!(actual.is_err());
-    }
-
-    #[tokio::test]
-    async fn missing_cli_executable_is_a_sanitized_failure() {
-        // given
-        let auth = AzureCliAuth {
-            azure_cli_path: std::env::temp_dir()
-                .join("sqlserver-plus-missing-az")
-                .to_string_lossy()
-                .into_owned(),
-            ..valid_auth()
-        };
-
-        // when
-        let actual = auth.acquire_access_token().await;
-
-        // then
-        assert_eq!(actual.unwrap_err(), TOKEN_REQUEST_FAILED);
     }
 
     #[tokio::test]

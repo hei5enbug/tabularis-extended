@@ -52,6 +52,42 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  windows-native:
+    name: sqlserver-plus / Windows native Azure CLI
+    runs-on: windows-latest
+    timeout-minutes: 35
+    env:
+      CARGO_BUILD_JOBS: "2"
+      # Enables the unit test that launches the runner's real Azure CLI.
+      TABULARIS_TEST_WINDOWS_AZURE_CLI: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run unit tests
+        run: cargo test --locked --bins
+
+      - name: Clippy
+        run: cargo clippy --locked --bins -- -D warnings
+
+  packaging:
+    name: sqlserver-plus / Packaging safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22.13"
+
+      # The scripts that just preflight, package, verify-package and
+      # install-package run, with traversal, symlink and rollback cases.
+      - name: Run packaging tests
+        run: node --test "tests/packaging/*.test.mjs"
+
   explain-package:
     name: sqlserver-plus / EXPLAIN parser package
     runs-on: ubuntu-latest
