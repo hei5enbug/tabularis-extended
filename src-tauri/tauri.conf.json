@@ -2,7 +2,7 @@
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "Tabularis Extended",
   "mainBinaryName": "tabularis-extended",
-  "version": "0.27.0+extended.1",
+  "version": "0.30.0+extended.1",
   "identifier": "io.github.hei5enbug.tabularis.extended",
   "build": {
     "frontendDist": "../packages/web-ui/dist",
