@@ -30,6 +30,15 @@ test('CI는 수동 실행으로만 고정된 세 native x64 runner를 사용한�
   assert.equal(yaml.includes('test:live'), false);
   assert.ok(yaml.includes('pnpm test:install'));
 });
+test('the workflow runs the Cosmos emulator container tests on Linux only', () => {
+  // given
+  const yaml = fs.readFileSync(path.join(source, '../../.github/workflows/ext-azure.yml'), 'utf8');
+  // when
+  const actual = yamlParser.load(yaml).jobs.native.steps.filter(step => step.run?.includes('pnpm test:containers'));
+  // then
+  assert.equal(actual.length, 1);
+  assert.equal(actual[0].if, "runner.os == 'Linux'");
+});
 test('package scripts는 SDK workspace 빌드와 검사를 연결하고 live 진입점을 유지한다', () => {
   // given
   const metadata = JSON.parse(fs.readFileSync(path.join(source, 'package.json'), 'utf8'));

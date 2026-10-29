@@ -341,3 +341,35 @@ ARM64 생산 ZIP의 초기화·EOF·shutdown, symlink 0개·외부 workspace 경
 ZIP 원장 8,604개 파일을 검증하고 로컬 설치에 반영했습니다.
 이번 검사는 실제 Azure CLI 로그인, DB 접속이나 쿼리를 실행하지 않았습니다.
 레지스트리 수용 검증은 기존 미확인 상태입니다.
+
+## Cosmos emulator container tests - 2026-10-29
+
+The container suite ported from the archived standalone repository ran on macOS ARM64 with Docker Desktop, Node
+`24.11.0`, and pnpm `10.30.3` in `extensions/azure`. The pinned emulator image digest
+`sha256:4535ddbd27bba762f3e068f7585feb0022a2559ceccc9394b23aa38d91d77c38` resolved to a `linux/arm64` image on this host
+and ran natively, so no x86 emulation was involved.
+
+| Command | Observed result |
+| --- | --- |
+| `pnpm test:containers` | 9 scenarios passed (the Node runner reports 10 tests because it also counts the parent suite); 0 failed. The suite took about 11.6 s with the image already pulled. |
+| `pnpm test:unit` | 682 passed |
+| `pnpm test:protocol` | 15 passed |
+| `pnpm test:bootstrap` | 27 passed (includes a new check that the workflow runs `pnpm test:containers` on Linux only) |
+| `pnpm typecheck` | no errors |
+
+The nine scenarios cover document create, read with a shared `id` across partition keys, replace with a matching ETag,
+delete with a matching ETag, a stale-ETag conflict (`ETAG_CONFLICT`), read-only denial (`WRITE_NOT_ALLOWED`), a
+parameterized query that keeps JSON types, a query whose full result stays in the snapshot, and an empty parameterized
+result. Each scenario creates its own database and deletes it in cleanup, and the emulator container was gone after the
+run. The Testcontainers `ryuk` reaper container outlived the run briefly and then exited on its own.
+
+The emulator returned no continuation token for the five-row query, so the driver kept all five rows in its snapshot
+and exposed a two-row first page. This is not a check of native Azure continuation.
+
+The first run on this host started without the emulator image cached and failed at the suite's 300 s timeout; the cause
+(image pull or startup) was not isolated. After the pinned image was pulled with `docker pull`, the same suite passed.
+
+The tests use the emulator's public development key and an HTTP endpoint confined to the test fixture. They do not read
+saved connections or Azure credentials, and they do not validate Entra sign-in or refresh, Azure RBAC, RU charges,
+index policy, or native cloud continuation. The workflow runs `pnpm test:containers` only on the Linux runner of
+`ext-azure.yml`; this local observation does not include that job.

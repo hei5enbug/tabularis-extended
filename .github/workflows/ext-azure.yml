@@ -84,6 +84,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           pnpm test:ui
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check disposable Cosmos DB integration
+        if: runner.os == 'Linux'
+        timeout-minutes: 10
+        run: |
+          pnpm test:containers
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Check install fixtures and native production ZIP
         run: |
           pnpm test:install 2>&1 | Tee-Object -FilePath '${{ runner.temp }}/azure-install.log'

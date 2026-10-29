@@ -13,6 +13,7 @@
     "build:driver": "tsc",
     "typecheck": "corepack pnpm build:sdk && tsc --noEmit",
     "build": "corepack pnpm build:sdk && corepack pnpm build:driver",
+    "test:containers": "corepack pnpm build && node --test tests/containers/*.test.mjs",
     "test:sdk": "corepack pnpm build:sdk && node --test tests/sdk.test.mjs",
     "start": "node --max-old-space-size=512 dist/index.js",
     "test:unit": "corepack pnpm build && node --test tests/unit/*.test.mjs",
@@ -33,6 +34,7 @@
   "devDependencies": {
     "@types/node": "24.12.0",
     "js-yaml": "4.1.1",
+    "testcontainers": "12.2.0",
     "typescript": "5.9.3"
   },
   "packageManager": "pnpm@10.30.3"
