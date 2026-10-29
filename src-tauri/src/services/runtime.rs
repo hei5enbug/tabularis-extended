@@ -328,7 +328,8 @@ impl ServiceRuntime {
                 };
                 match (session_write, read, intent) {
                     (true, _, true) => true,
-                    (true, _, false) => return Err(failure(ErrorCode::WriteIntentRequired)),
+                    (true, true, false) => false,
+                    (true, false, false) => return Err(failure(ErrorCode::WriteIntentRequired)),
                     (false, true, false) => false,
                     (false, true, true) => return Err(failure(ErrorCode::InvalidArgument)),
                     (false, false, true) => true,
@@ -570,13 +571,21 @@ impl ServiceRuntime {
             self.recheck_after_approval(request, caller, &connection, is_write)
                 .await?;
         }
+        // A proven read in a write session skips write intent and approval,
+        // but the driver still runs it in the session's write transaction.
+        let write_session_read = !is_write
+            && request.operation == Operation::QueryExecute
+            && match &request.session_id {
+                Some(id) => self.sessions.is_write(id, &connection.id, caller).await?,
+                None => false,
+            };
         let mut context = DriverContext {
             connection_id: connection.id.clone(),
             request_id: request.request_id.clone(),
             deadline_ms: lease.deadline_at_ms.saturating_sub(now_ms()),
             signal: lease.signal(),
             transient_auth: None,
-            read_only: !is_write,
+            read_only: !is_write && !write_session_read,
             session_handle: None,
         };
         match request.operation {
@@ -785,7 +794,7 @@ impl ServiceRuntime {
         if !self.driver.supports(&connection, request.operation).await? {
             return Err(failure(ErrorCode::CapabilityUnavailable));
         }
-        let guarantee = if is_write {
+        let guarantee = if is_write || write_session_read {
             "not_applicable"
         } else {
             let guarantee = self.driver.read_only_guarantee(&connection).await?;

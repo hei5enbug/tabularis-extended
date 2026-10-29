@@ -179,13 +179,13 @@ ORDER BY c.relname LIMIT 1";
 
 const SEQUENCE_SQL: &str = "SELECT json_build_object(\
 'data_type',s.data_type::text,\
-'start_value',CASE WHEN abs(s.start_value)<=9007199254740991 THEN to_json(s.start_value) ELSE to_json(s.start_value::text) END,\
-'increment',CASE WHEN abs(s.increment_by)<=9007199254740991 THEN to_json(s.increment_by) ELSE to_json(s.increment_by::text) END,\
-'minimum_value',CASE WHEN abs(s.min_value)<=9007199254740991 THEN to_json(s.min_value) ELSE to_json(s.min_value::text) END,\
-'maximum_value',CASE WHEN abs(s.max_value)<=9007199254740991 THEN to_json(s.max_value) ELSE to_json(s.max_value::text) END,\
+'start_value',CASE WHEN s.start_value BETWEEN -9007199254740991 AND 9007199254740991 THEN to_json(s.start_value) ELSE to_json(s.start_value::text) END,\
+'increment',CASE WHEN s.increment_by BETWEEN -9007199254740991 AND 9007199254740991 THEN to_json(s.increment_by) ELSE to_json(s.increment_by::text) END,\
+'minimum_value',CASE WHEN s.min_value BETWEEN -9007199254740991 AND 9007199254740991 THEN to_json(s.min_value) ELSE to_json(s.min_value::text) END,\
+'maximum_value',CASE WHEN s.max_value BETWEEN -9007199254740991 AND 9007199254740991 THEN to_json(s.max_value) ELSE to_json(s.max_value::text) END,\
 'cycle',s.cycle,\
-'cache_size',CASE WHEN abs(s.cache_size)<=9007199254740991 THEN to_json(s.cache_size) ELSE to_json(s.cache_size::text) END,\
-'last_value',CASE WHEN s.last_value IS NULL THEN NULL WHEN abs(s.last_value)<=9007199254740991 THEN to_json(s.last_value) ELSE to_json(s.last_value::text) END) AS properties \
+'cache_size',CASE WHEN s.cache_size BETWEEN -9007199254740991 AND 9007199254740991 THEN to_json(s.cache_size) ELSE to_json(s.cache_size::text) END,\
+'last_value',CASE WHEN s.last_value IS NULL THEN NULL WHEN s.last_value BETWEEN -9007199254740991 AND 9007199254740991 THEN to_json(s.last_value) ELSE to_json(s.last_value::text) END) AS properties \
 FROM pg_catalog.pg_sequences s \
 WHERE s.schemaname=$1::text AND s.sequencename=$2::text AND pg_catalog.has_schema_privilege($1::text,'USAGE')";
 

@@ -129,11 +129,19 @@ async fn run(
             .begin_transaction(TransactionIsolationLevel::ReadCommitted, None)
             .await
             .map_err(ServiceError::database)?;
+        let transaction_id = exact::transaction_id(lease.client()).await?;
         scope.remaining()?;
         let Lease::Owned(client, _) = &mut lease else {
             unreachable!()
         };
-        let result = sessions::open(*client.take().unwrap(), connection, context, permit).await;
+        let result = sessions::open(
+            *client.take().unwrap(),
+            connection,
+            context,
+            permit,
+            transaction_id,
+        )
+        .await;
         scope.register_opened_session(result["session_handle"].as_str().unwrap());
         return Ok(result);
     }
@@ -306,8 +314,16 @@ async fn run(
             "The row operation did not confirm a single-row outcome",
         ));
     }
-    if let Lease::Session(slot, _) = &mut lease {
-        if !slot.client.as_ref().unwrap().has_active_transaction() {
+    if matches!(lease, Lease::Session(..)) {
+        let current = if lease.client().has_active_transaction() {
+            Some(exact::transaction_id(lease.client()).await?)
+        } else {
+            None
+        };
+        let Lease::Session(slot, _) = &mut lease else {
+            unreachable!()
+        };
+        if current.as_ref() != Some(&slot.transaction_id) {
             return Err(ServiceError::new(
                 "OUTCOME_UNKNOWN",
                 "The user SQL changed the reserved transaction",

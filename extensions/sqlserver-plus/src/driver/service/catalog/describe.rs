@@ -267,9 +267,14 @@ fn indexes_and_keys(rows: &[Row]) -> (Vec<Value>, Vec<Value>) {
     (indexes, keys)
 }
 
+/// Largest integer a JSON consumer such as JavaScript reads without rounding.
+const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
 fn number_or_text(value: Value) -> Value {
     match value.as_str().map(str::parse::<i64>) {
-        Some(Ok(number)) => json!(number),
+        Some(Ok(number)) if (-MAX_SAFE_INTEGER..=MAX_SAFE_INTEGER).contains(&number) => {
+            json!(number)
+        }
         _ => value,
     }
 }

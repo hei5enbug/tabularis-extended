@@ -643,6 +643,7 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
          CREATE TRIGGER child_audit BEFORE INSERT OR UPDATE ON {schema}.child FOR EACH ROW EXECUTE FUNCTION {schema}.audit();
          CREATE AGGREGATE {schema}.my_sum(integer) (SFUNC = int4pl, STYPE = integer, INITCOND = '0');
          CREATE SEQUENCE {schema}.seq_big AS bigint START 5 INCREMENT 2 MINVALUE 1 MAXVALUE 9223372036854775807 CYCLE CACHE 3;
+         CREATE SEQUENCE {schema}.seq_min AS bigint MINVALUE -9223372036854775808 MAXVALUE -1 START -1 INCREMENT -1;
          CREATE DOMAIN {schema}.posint AS integer NOT NULL DEFAULT 1 CONSTRAINT posint_pos CHECK (VALUE > 0);
          CREATE TYPE {schema}.mood AS ENUM ('sad','ok','happy');
          CREATE TYPE {schema}.pair AS (left_v integer, right_v text);
@@ -668,6 +669,7 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
     let aggregate = fixture.describe("my_sum", Some("aggregate")).await;
     let trigger = fixture.describe("child_audit", Some("trigger")).await;
     let sequence = fixture.describe("seq_big", Some("sequence")).await;
+    let lowest = fixture.describe("seq_min", Some("sequence")).await;
     let domain = fixture.describe("posint", Some("type")).await;
     let labels = fixture.describe("mood", Some("type")).await;
     let composite = fixture.describe("pair", Some("type")).await;
@@ -800,6 +802,11 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
         sequence["properties"],
         json!({"data_type":"bigint","start_value":5,"increment":2,"minimum_value":1,"maximum_value":"9223372036854775807","cycle":true,"cache_size":3,"last_value":null})
     );
+    assert_eq!(
+        lowest["properties"]["minimum_value"],
+        "-9223372036854775808"
+    );
+    assert_eq!(lowest["properties"]["increment"], -1);
     assert_eq!(domain["properties"]["category"], "domain");
     assert_eq!(domain["properties"]["base_type"], "integer");
     assert_eq!(domain["properties"]["nullable"], false);

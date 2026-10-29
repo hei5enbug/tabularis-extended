@@ -547,6 +547,50 @@ fn sequence_설명은_정수_범위는_숫자로_넘치는_값은_문자열로_�
 }
 
 #[test]
+fn sequence_설명은_javascript_안전_정수를_넘는_값도_문자열로_둔다() {
+    // given
+    let data = set(
+        &[
+            "definition",
+            "p_data_type",
+            "p_start_value",
+            "p_increment",
+            "p_minimum_value",
+            "p_maximum_value",
+            "p_cycle",
+            "p_cache_size",
+            "p_current_value",
+        ],
+        json!([[
+            null,
+            "bigint",
+            "9007199254740991",
+            "1",
+            "-9007199254740993",
+            "9007199254740993",
+            false,
+            null,
+            "-9007199254740991"
+        ]]),
+    );
+
+    // when
+    let actual = result(&describe_query(Some(Kind::Sequence)), &data);
+
+    // then
+    assert_eq!(
+        actual["properties"]["start_value"],
+        json!(9007199254740991_i64)
+    );
+    assert_eq!(
+        actual["properties"]["current_value"],
+        json!(-9007199254740991_i64)
+    );
+    assert_eq!(actual["properties"]["minimum_value"], "-9007199254740993");
+    assert_eq!(actual["properties"]["maximum_value"], "9007199254740993");
+}
+
+#[test]
 fn type_설명은_표_형식의_컬럼과_별칭_속성을_함께_돌려준다() {
     // given
     let columns = set(&["name", "data_type"], json!([["id", "int"]]));

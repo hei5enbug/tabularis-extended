@@ -27,6 +27,7 @@ pub struct Slot {
     pub read_only: bool,
     pub last_used: Instant,
     pub dirty: bool,
+    pub transaction_id: Value,
     _permit: OwnedSemaphorePermit,
 }
 impl Slot {
@@ -70,6 +71,7 @@ pub async fn open(
     params: &ConnectionParams,
     context: &DriverContext,
     permit: OwnedSemaphorePermit,
+    transaction_id: Value,
 ) -> Value {
     let handle = uuid::Uuid::new_v4().to_string();
     let slot = Slot {
@@ -79,6 +81,7 @@ pub async fn open(
         read_only: context.read_only,
         last_used: Instant::now(),
         dirty: false,
+        transaction_id,
         _permit: permit,
     };
     SESSIONS.lock().await.insert(
@@ -215,6 +218,7 @@ mod tests {
                     read_only,
                     last_used: Instant::now() - Duration::from_millis(SESSION_IDLE_MS + 1),
                     dirty: false,
+                    transaction_id: Value::Null,
                     _permit: capacity.clone().acquire_owned().await.unwrap(),
                 };
                 SESSIONS.lock().await.insert(

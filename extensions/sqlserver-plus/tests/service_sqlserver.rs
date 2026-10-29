@@ -336,15 +336,71 @@ fn 읽기_batch의_앞선_set_옵션과_declare도_모든_result_set을_반환�
 }
 
 #[test]
-fn 쓰기_작업의_앞선_set은_실행_전에_거부한다() {
+fn 쓰기_작업의_앞선_set은_실행하고_implicit_transactions는_거부한다() {
     // given
     let fixture = Fixture::new();
     let mut plugin = Plugin::new();
-    let request = fixture.exact("SET NOCOUNT ON; SELECT 1 AS one", "sa", false, "set-write");
+    let allowed = fixture.exact("SET NOCOUNT ON; SELECT 1 AS one", "sa", false, "set-write");
+    let session = fixture.exact(
+        "SET IMPLICIT_TRANSACTIONS ON; SELECT 1 AS one",
+        "sa",
+        false,
+        "set-implicit",
+    );
+    // when
+    let actual = (plugin.call(&allowed), plugin.call(&session));
+    // then
+    assert_eq!(actual.0["result"]["rows"], json!([[1]]));
+    assert_eq!(actual.1["error"]["data"]["code"], "UNSUPPORTED_OPERATION");
+}
+
+#[test]
+fn 세션의_예약_트랜잭션을_바꾸는_batch는_unknown으로_세션을_닫는다() {
+    // given
+    let fixture = Fixture::new();
+    let mut plugin = Plugin::new();
+    let opened = plugin.call(&fixture.request(
+        "service_session_open",
+        json!({"database":fixture.database,"mode":"write"}),
+        "sa",
+        false,
+        "open",
+    ));
+    let handle = opened["result"]["session_handle"].clone();
+    let mut swap = fixture.exact(
+        "BEGIN UPDATE dbo.items SET value='swapped'; COMMIT TRANSACTION; BEGIN TRANSACTION; END",
+        "sa",
+        false,
+        "swap",
+    );
+    swap["params"]["driver_context"]["session_handle"] = handle.clone();
+    let mut next = fixture.exact("SELECT 1 AS one", "sa", false, "next");
+    next["params"]["driver_context"]["session_handle"] = handle;
+    // when
+    let swapped = plugin.call(&swap);
+    let after = plugin.call(&next);
+    // then
+    assert_eq!(swapped["error"]["data"]["code"], "OUTCOME_UNKNOWN");
+    assert_eq!(swapped["error"]["data"]["details"]["session_closed"], true);
+    assert!(after.get("error").is_some(), "{after}");
+}
+
+#[test]
+fn 사용자_결과의_행수_열_이름은_마지막_sentinel만_affected_rows로_읽는다() {
+    // given
+    let fixture = Fixture::new();
+    let mut plugin = Plugin::new();
+    let request = fixture.exact(
+        "SELECT 7 AS [__tabularis_affected_rows]; UPDATE dbo.items SET value='counted' WHERE id=1",
+        "sa",
+        false,
+        "lookalike",
+    );
     // when
     let actual = plugin.call(&request);
     // then
-    assert_eq!(actual["error"]["data"]["code"], "UNSUPPORTED_OPERATION");
+    assert_eq!(actual["result"]["rows"], json!([[7]]));
+    assert_eq!(actual["result"]["affected_rows"], 1);
 }
 
 #[test]
@@ -505,7 +561,7 @@ fn sdk_오류는_sql과_비밀번호를_stdout과_stderr에_포함하지_않는�
     let actual = run(&mut plugin);
     // then
     assert_eq!(actual.0["error"]["data"]["code"], "OUTCOME_UNKNOWN");
-    assert!(!actual.0.to_string().contains("SQL_ERROR_SECRET_CANARY"));
+    assert!(!actual.0.to_string().contains("RAISERROR"));
     assert!(!actual.0.to_string().contains("Str0ng!Passw0rd"));
     assert!(actual.1.is_empty());
 }
@@ -1231,6 +1287,8 @@ fn row_변경은_실제_복합_pk를_검증한_뒤_한_행만_수정한다() {
         ));
         let nonkey = plugin.call(&fixture.request("service_catalog", json!({"operation":"catalog.describe","table":{"database":fixture.database,"schema":"dbo","table":"keyless"}}), "sa", false, "describe_keyless"));
         let missing = plugin.call(&fixture.request("service_catalog", json!({"operation":"catalog.describe","table":{"database":fixture.database,"schema":"dbo","table":"missing"}}), "sa", false, "describe_missing"));
+        // Catalog SQL mentions ON DELETE actions; leave its RPCs out of the count.
+        let catalog_rpcs = support::sql_scalar(&fixture.database, &observed) - sent_before;
         let mut keys = described["result"]["columns"]
             .as_array()
             .unwrap()
@@ -1267,7 +1325,7 @@ fn row_변경은_실제_복합_pk를_검증한_뒤_한_행만_수정한다() {
             false,
             "after",
         ));
-        let sent_after = support::sql_scalar(&fixture.database, &observed);
+        let sent_after = support::sql_scalar(&fixture.database, &observed) - catalog_rpcs;
         (
             invalid,
             keyless,

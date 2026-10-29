@@ -419,6 +419,22 @@ pub async fn collect(
     )
     .await
 }
+/// The id of the connection's current transaction. A session compares it
+/// after user SQL to detect a reserved transaction that was committed or
+/// rolled back and replaced by a new one.
+pub async fn transaction_id(client: &mut TdsClient) -> Result<Value, ServiceError> {
+    let data = collect(
+        client,
+        "SELECT CURRENT_TRANSACTION_ID() AS transaction_id",
+        Vec::new(),
+        None,
+        1,
+        4096,
+        false,
+    )
+    .await?;
+    Ok(data["rows"][0][0].clone())
+}
 /// Like `collect`; with `batch` and no parameters the text runs as a plain
 /// SQL batch instead of through sp_executesql, so temporary tables and SET
 /// options it creates stay on the connection for the statements after it.
@@ -447,12 +463,31 @@ pub async fn collect_with(
     let mut bytes = 0;
     let mut affected = Value::Null;
     let mut precision_unavailable = false;
+    // Only the final result set can be the generated @@ROWCOUNT sentinel; an
+    // earlier set with the same single column is user data and is kept.
+    let mut sentinel: Option<Value> = None;
+    let limit = max_bytes.min(FRAME_LIMIT - 4096);
+    let charge = |row_count: &mut usize, bytes: &mut usize, values: &Value| {
+        *row_count += 1;
+        *bytes += serde_json::to_vec(values).unwrap().len() + 1;
+        if *row_count > max_rows || *bytes > limit {
+            return Err(ServiceError::new(
+                "RESOURCE_LIMIT",
+                "The complete SQL result exceeds its row or byte limit",
+            ));
+        }
+        Ok(())
+    };
     while let Some(result) = client.get_current_resultset() {
+        if let Some(set) = sentinel.take() {
+            charge(&mut row_count, &mut bytes, &set["rows"][0])?;
+            sets.push(set);
+        }
         let metadata = result.get_metadata().clone();
         let (columns, column_metadata, precision) = metadata_fields(&metadata);
         precision_unavailable |= precision;
         let schema = RowSchema::from_metadata(&metadata);
-        let sentinel = count_sentinel
+        let candidate = count_sentinel
             && columns.len() == 1
             && columns[0] == crate::driver::helpers::AFFECTED_ROWS_COLUMN;
         let mut rows = Vec::new();
@@ -475,24 +510,25 @@ pub async fn collect_with(
                     )
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if sentinel {
-                affected = values.first().cloned().unwrap_or(Value::Null);
-            } else {
-                row_count += 1;
-                bytes += serde_json::to_vec(&values).unwrap().len() + 1;
-                if row_count > max_rows || bytes > max_bytes.min(FRAME_LIMIT - 4096) {
-                    return Err(ServiceError::new(
-                        "RESOURCE_LIMIT",
-                        "The complete SQL result exceeds its row or byte limit",
-                    ));
-                }
-                rows.push(values);
+            let values = Value::Array(values);
+            if !candidate {
+                charge(&mut row_count, &mut bytes, &values)?;
+            }
+            rows.push(values);
+        }
+        let single = rows.len() == 1;
+        if candidate && !single {
+            for values in &rows {
+                charge(&mut row_count, &mut bytes, values)?;
             }
         }
-        if !sentinel {
-            sets.push(json!({"columns":columns,"column_metadata":column_metadata,"rows":rows}));
+        let set = json!({"columns":columns,"column_metadata":column_metadata,"rows":rows});
+        if candidate && single {
+            sentinel = Some(set);
+        } else {
+            sets.push(set);
         }
-        if bytes > max_bytes.min(FRAME_LIMIT - 4096) {
+        if bytes > limit {
             return Err(ServiceError::new(
                 "RESOURCE_LIMIT",
                 "SQL column metadata exceeds the response byte limit",
@@ -505,6 +541,9 @@ pub async fn collect_with(
         {
             break;
         }
+    }
+    if let Some(set) = sentinel {
+        affected = set["rows"][0][0].clone();
     }
     let first = finish(sets, affected, count_sentinel, precision_unavailable, None);
     if serde_json::to_vec(&first).unwrap().len() > max_bytes.min(FRAME_LIMIT - 4096) {

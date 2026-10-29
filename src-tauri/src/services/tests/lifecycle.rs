@@ -252,6 +252,33 @@ async fn 쓰기_세션에서도_이번_쓰기_의도와_승인_없는_쿼리는_
 }
 
 #[tokio::test]
+async fn 쓰기_세션의_증명된_읽기는_쓰기_의도와_승인_없이_세션_트랜잭션에서_실행한다() {
+    // given
+    let harness = Harness::new();
+    harness.allow_write();
+    let opened = harness
+        .call(&request(
+            Operation::SessionOpen,
+            json!({"database":"fixture","mode":"write"}),
+        ))
+        .await;
+    let approvals = harness.policy.approvals.load(Ordering::SeqCst);
+    let mut input = query("SELECT 1");
+    input.session_id = Some(opened.data["session_id"].as_str().unwrap().into());
+
+    // when
+    let actual = harness.call(&input).await;
+
+    // then
+    assert_eq!(actual.status, JobStatus::Succeeded, "{:?}", actual.error);
+    assert_eq!(harness.policy.approvals.load(Ordering::SeqCst), approvals);
+    let contexts = harness.driver.contexts.lock().unwrap();
+    let (_, read_only, handle) = contexts.last().unwrap();
+    assert!(!read_only);
+    assert!(handle.is_some());
+}
+
+#[tokio::test]
 async fn 읽기_세션에_쓰기_쿼리를_넣으면_거부한다() {
     // given
     let harness = Harness::new();
