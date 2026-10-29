@@ -11,7 +11,7 @@ pub use connections::{ConnectionObservation, ProfileConnections};
 #[cfg(test)]
 pub use connections::checked_params_for_tests;
 pub use expander::{
-    restore_saved_secrets, GuiParamExpander, HeadlessParamExpander, KeychainSecrets,
+    restore_saved_secrets, HeadlessParamExpander, KeychainSecrets,
     NoopParamExpander, ProfileConnectionResolver, SavedSecrets, ServiceParamExpander,
 };
 pub use history::{HistoryRecord, Phase, QueryHistory};
@@ -108,16 +108,6 @@ impl ServicePlatform {
             oauth,
             expander,
         )
-    }
-    pub fn gui<R: tauri::Runtime>(
-        app: tauri::AppHandle<R>,
-        instance_id: String,
-    ) -> ServiceResult<Self> {
-        let isolated = read_isolation_paths()?;
-        let profile = isolated
-            .data_dir
-            .unwrap_or_else(crate::paths::get_app_config_dir);
-        Self::production(profile, instance_id, Arc::new(GuiParamExpander::new(app)))
     }
     pub fn headless(instance_id: String) -> ServiceResult<Self> {
         let isolated = read_isolation_paths()?;

@@ -212,6 +212,7 @@ impl ServiceApprovals {
             session_id: caller.owner_instance_id.clone(),
             connection_id: request.connection_id.clone().unwrap_or_default(),
             connection_name: connection.name.clone(),
+            database: None,
             query: approval_display(request, annotations)?,
             query_kind: format!("service:{operation}"),
             client_hint: Some("service".into()),

@@ -262,6 +262,7 @@ impl DatabaseDriver for MockDriver {
         _: &ConnectionParams,
         _: &str,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> Result<Vec<RoutineParameter>, String> {
         self.legacy()
     }
@@ -270,6 +271,7 @@ impl DatabaseDriver for MockDriver {
         _: &ConnectionParams,
         _: &str,
         _: &str,
+        _: Option<&str>,
         _: Option<&str>,
     ) -> Result<String, String> {
         self.legacy()

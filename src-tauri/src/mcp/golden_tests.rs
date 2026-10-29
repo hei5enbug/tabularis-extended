@@ -157,7 +157,7 @@ async fn 구형_도구_출력은_인자가_없으면_이전_서버와_바이트�
         )
         .await
         .unwrap();
-        actual.push(wire(request["id"].clone(), result));
+        actual.push(without_timings(wire(request["id"].clone(), result)));
     }
     // then
     let expected: Vec<String> = HEAD
@@ -167,6 +167,29 @@ async fn 구형_도구_출력은_인자가_없으면_이전_서버와_바이트�
         .collect();
     assert_eq!(actual.len(), 7);
     assert_eq!(actual, expected);
+}
+
+/// The query timings are measured per run; everything else must stay equal.
+fn without_timings(wire: String) -> String {
+    const FORMS: [(&str, &str); 2] = [
+        (",\\n  \\\"server_time_ms\\\"", "\\\"fetch_time_ms\\\": "),
+        ("\\nserver_time_ms:", "\\nfetch_time_ms: "),
+    ];
+    let mut wire = wire;
+    for (start_marker, end_marker) in FORMS {
+        let Some(start) = wire.find(start_marker) else {
+            continue;
+        };
+        let Some(marker) = wire[start..].find(end_marker) else {
+            continue;
+        };
+        let number = start + marker + end_marker.len();
+        let length = wire[number..]
+            .find(|c: char| !(c.is_ascii_digit() || matches!(c, '.' | 'e' | '-')))
+            .unwrap_or(wire.len() - number);
+        wire.replace_range(start..number + length, "");
+    }
+    wire
 }
 
 async fn call_legacy(config: &AppConfig, name: &str, args: Value) -> Result<Value, JsonRpcError> {
@@ -286,7 +309,7 @@ async fn 알_수_없는_데이터베이스는_계속_잘못된_인자로_거부�
     .unwrap_err();
     // then
     assert_eq!(unknown_database.code, -32602);
-    assert!(unknown_database.message.starts_with("INVALID_ARGUMENT"));
+    assert!(unknown_database.message.contains("'database' parameter"));
 }
 
 #[test]

@@ -54,3 +54,6 @@ secrets.json
 *.key
 *.pfx
 *.p12
+
+# TypeScript incremental build info
+*.tsbuildinfo

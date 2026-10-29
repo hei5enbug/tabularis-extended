@@ -45,28 +45,11 @@ use std::{
     },
     time::Duration,
 };
-use tauri::{Emitter, Manager};
 
 pub trait GuiPublisher: Send + Sync {
     fn publish(&self, request: &GuiApplyRequest) -> ServiceResult<()>;
     fn renderer_subscriptions(&self) -> Option<&RendererSubscriptions> {
         None
-    }
-}
-struct TauriPublisher<R: tauri::Runtime> {
-    app: tauri::AppHandle<R>,
-    subscriptions: RendererSubscriptions,
-}
-impl<R: tauri::Runtime> GuiPublisher for TauriPublisher<R> {
-    fn renderer_subscriptions(&self) -> Option<&RendererSubscriptions> {
-        Some(&self.subscriptions)
-    }
-    fn publish(&self, request: &GuiApplyRequest) -> ServiceResult<()> {
-        self.app
-            .get_webview_window("main")
-            .ok_or_else(|| failure(ErrorCode::GuiUnavailable))?
-            .emit("service-map-apply", request)
-            .map_err(|_| failure(ErrorCode::GuiUnavailable))
     }
 }
 
@@ -138,23 +121,6 @@ impl NativeCore {
             .map_err(|_| failure(ErrorCode::ResourceLimit))? = Some(ipc);
         core.ready.store(true, Ordering::Release);
         Ok(core)
-    }
-    pub async fn gui<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> ServiceResult<Arc<Self>> {
-        let paths = crate::service_platform::read_isolation_paths()?;
-        let profile = paths
-            .data_dir
-            .unwrap_or_else(crate::paths::get_app_config_dir);
-        let platform = ServicePlatform::gui(app.clone(), uuid::Uuid::new_v4().to_string())?;
-        Self::compose(
-            platform,
-            profile,
-            EndpointKind::Gui,
-            Some(Arc::new(TauriPublisher {
-                app,
-                subscriptions: RendererSubscriptions::default(),
-            })),
-        )
-        .await
     }
     pub async fn headless(kind: EndpointKind) -> ServiceResult<Arc<Self>> {
         let paths = crate::service_platform::read_isolation_paths()?;

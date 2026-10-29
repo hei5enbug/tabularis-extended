@@ -5,10 +5,10 @@
   "version": "0.27.0+extended.1",
   "identifier": "io.github.hei5enbug.tabularis.extended",
   "build": {
-    "frontendDist": "../dist",
+    "frontendDist": "../packages/web-ui/dist",
     "devUrl": "http://localhost:5173",
-    "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build"
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm build"
   },
   "app": {
     "windows": [
@@ -37,6 +37,9 @@
     "active": true,
     "category": "DeveloperTool",
     "targets": "all",
+    "resources": {
+      "../packages/web-ui/dist/": "web-ui/"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/64x64.png",

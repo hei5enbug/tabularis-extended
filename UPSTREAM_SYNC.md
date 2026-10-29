@@ -20,7 +20,7 @@ Run them from the repository root, on the branch you want to update, with a clea
 | --- | --- |
 | `node scripts/upstream-sync.mjs status [--json]` | Adds the `upstream` remote if it is missing and fetches the `v*` tags. Shows the newest stable tag, the upstream release already merged into `HEAD`, the commits behind, and a conflict preview. It changes nothing in your work tree or index. |
 | `node scripts/upstream-sync.mjs sync [<tag>]` | Refuses a dirty tree or a merge in progress. Creates `sync/upstream-<tag>` from the current branch, turns on `rerere`, and merges the tag with `--no-ff`. The default tag is the newest stable one. A clean merge runs `finish` for you. |
-| `node scripts/upstream-sync.mjs finish` | Sets the version to `<X.Y.Z>+extended.1` in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `src/version.ts`. Then it runs the identity check and commits only those files. |
+| `node scripts/upstream-sync.mjs finish` | Sets the version to `<X.Y.Z>+extended.1` in `package.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src-tauri/Cargo.lock`, and `packages/web-ui/src/version.ts`. Then it runs the identity check and commits only those files. |
 
 If a local `vX.Y.Z` tag points somewhere else than the upstream tag with the same name, `status` and `sync` stop
 and name the tags. Fix or delete the wrong local tag yourself; the scripts never overwrite tags.
@@ -63,9 +63,9 @@ based on how many lines changed, not on a tested merge.
 - `src-tauri/src/persistence.rs`
 - `src-tauri/src/ai_activity.rs`
 - `src-tauri/src/mcp/mod.rs`
-- `src/components/modals/NewConnectionModal.tsx` and its test
-- `src/components/modals/AiApprovalModal.tsx`
-- `src/pages/Editor.tsx`
+- `packages/web-ui/src/components/modals/NewConnectionModal.tsx` and its test
+- `packages/web-ui/src/components/modals/AiApprovalModal.tsx`
+- `packages/web-ui/src/pages/Editor.tsx`
 
 Rule: keep fork logic in new files and keep edits to upstream files as small hooks. A one-line call into a new
 fork file is easy to merge. A rewritten function in an upstream file conflicts on every release.
@@ -76,7 +76,7 @@ Run the checks that `finish` prints, then push the branch yourself and open a pu
 
 ```
 cd src-tauri && cargo test --lib
-pnpm exec vitest run
+pnpm exec vitest run --config packages/web-ui/vitest.config.ts
 pnpm typecheck
 ```
 

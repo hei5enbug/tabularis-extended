@@ -222,6 +222,8 @@ pub(super) fn legacy_result(data: &Value, has_more: bool, limit: u32) -> QueryRe
             has_more,
         }),
         additional_results: None,
+        server_time_ms: None,
+        fetch_time_ms: None,
     }
 }
 

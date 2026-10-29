@@ -1,8 +1,11 @@
 use super::{
-    build_paginated_query, decode_blob_wire_format, encode_blob, encode_blob_full, i64_to_json,
-    is_explainable_query, is_select_query, parse_unsafe_bigint_string, strip_leading_sql_comments,
-    strip_limit_offset, transaction_effect, u64_to_json, TransactionEffect, DEFAULT_MAX_BLOB_SIZE,
-    JS_MAX_SAFE_INTEGER, JS_MAX_SAFE_UINT, MAX_BLOB_PREVIEW_SIZE,
+    build_paginated_query, calculate_query_timing, calculate_query_timing_from_start,
+    decode_blob_wire_format, encode_blob, encode_blob_full, full_type_if_distinct, i64_to_json,
+    is_explainable_query, is_explainable_query_for, is_select_query, is_select_query_for,
+    parse_unsafe_bigint_string, returns_result_set, returns_result_set_for,
+    strip_leading_sql_comments, strip_leading_sql_comments_for, strip_limit_offset,
+    transaction_effect, u64_to_json, TransactionEffect, DEFAULT_MAX_BLOB_SIZE, JS_MAX_SAFE_INTEGER,
+    JS_MAX_SAFE_UINT, MAX_BLOB_PREVIEW_SIZE,
 };
 
 #[test]
@@ -86,6 +89,45 @@ fn test_strip_leading_sql_comments_no_comments() {
 }
 
 #[test]
+fn test_strip_leading_sql_comments_keeps_hash_without_hash_comments() {
+    assert_eq!(
+        strip_leading_sql_comments("# note\nSELECT 1"),
+        "# note\nSELECT 1"
+    );
+    assert!(!returns_result_set("# note\nSELECT 1"));
+}
+
+#[test]
+fn test_strip_leading_sql_comments_for_hash_comments() {
+    assert_eq!(
+        strip_leading_sql_comments_for("# note\n-- x\n#y\n/* z */ SELECT 1", true),
+        "SELECT 1"
+    );
+    assert_eq!(strip_leading_sql_comments_for("# only comment", true), "");
+    // Without hash comments the `#` line stays, exactly as before.
+    assert_eq!(
+        strip_leading_sql_comments_for("# note\nSELECT 1", false),
+        strip_leading_sql_comments("# note\nSELECT 1")
+    );
+}
+
+#[test]
+fn test_returns_result_set_for_hash_comments() {
+    assert!(returns_result_set_for("# note\nSELECT 1", true));
+    assert!(returns_result_set_for("#a\n# b\nSHOW TABLES", true));
+    assert!(!returns_result_set_for(
+        "# note\nINSERT INTO t VALUES (1)",
+        true
+    ));
+    assert!(!returns_result_set_for("# note\nSELECT 1", false));
+    // MySQL's resolved syntax has hash comments; PostgreSQL's does not.
+    use crate::drivers::driver_trait::SqlDialect;
+    use crate::drivers::sql_syntax::SqlSyntax;
+    assert!(SqlSyntax::preset(Some(SqlDialect::Mysql)).hash_comments);
+    assert!(!SqlSyntax::preset(Some(SqlDialect::Postgres)).hash_comments);
+}
+
+#[test]
 fn test_strip_leading_sql_comments_unterminated() {
     assert_eq!(strip_leading_sql_comments("-- only comment"), "");
     assert_eq!(strip_leading_sql_comments("/* never closed"), "");
@@ -163,6 +205,25 @@ fn test_is_select_query_with_leading_comments() {
     ));
     assert!(!is_select_query("-- header\nUPDATE users SET name = 't'"));
     assert!(!is_select_query("/* sel */ INSERT INTO t VALUES (1)"));
+}
+
+#[test]
+fn test_is_select_query_for_hash_comments() {
+    assert!(is_select_query_for("# note\nSELECT * FROM users", true));
+    assert!(is_select_query_for("# a\n-- b\n/* c */ SELECT 1", true));
+    assert!(!is_select_query_for("# note\nUPDATE users SET a = 1", true));
+    // Without hash comments a leading `#` is code, not a comment.
+    assert!(!is_select_query_for("# note\nSELECT 1", false));
+    assert!(!is_select_query("# note\nSELECT 1"));
+}
+
+#[test]
+fn test_is_explainable_query_for_hash_comments() {
+    assert!(is_explainable_query_for("# note\nSELECT 1", true));
+    assert!(is_explainable_query_for("# note\nDELETE FROM t", true));
+    assert!(!is_explainable_query_for("# note\nDROP TABLE t", true));
+    assert!(!is_explainable_query_for("# note\nSELECT 1", false));
+    assert!(!is_explainable_query("# note\nSELECT 1"));
 }
 
 #[test]
@@ -868,6 +929,27 @@ fn transaction_effect_ignores_ordinary_statements() {
 }
 
 #[test]
+fn test_calculate_query_timing_with_rows() {
+    let (server, fetch) = calculate_query_timing(50.0, Some(20.0));
+    assert_eq!(server, Some(20.0));
+    assert_eq!(fetch, Some(30.0));
+}
+
+#[test]
+fn test_calculate_query_timing_no_rows() {
+    let (server, fetch) = calculate_query_timing(50.0, None);
+    assert_eq!(server, Some(50.0));
+    assert_eq!(fetch, Some(0.0));
+}
+
+#[test]
+fn test_calculate_query_timing_fetch_non_negative() {
+    let (server, fetch) = calculate_query_timing(50.0, Some(55.0));
+    assert_eq!(server, Some(55.0));
+    assert_eq!(fetch, Some(0.0));
+}
+
+#[test]
 fn transaction_effect_sees_through_leading_comments() {
     assert_eq!(
         transaction_effect("-- start the transaction\nBEGIN"),
@@ -894,5 +976,46 @@ fn transaction_effect_does_not_match_plpgsql_block_bodies() {
     assert_eq!(
         transaction_effect("DO $$ BEGIN RAISE NOTICE 'hi'; END $$"),
         TransactionEffect::None
+    );
+}
+
+#[test]
+fn full_type_if_distinct_keeps_types_with_modifiers() {
+    assert_eq!(
+        full_type_if_distinct("varchar", Some("varchar(255)".into())),
+        Some("varchar(255)".into())
+    );
+    assert_eq!(
+        full_type_if_distinct("decimal", Some("decimal(10,2)".into())),
+        Some("decimal(10,2)".into())
+    );
+    assert_eq!(
+        full_type_if_distinct("int", Some("int unsigned".into())),
+        Some("int unsigned".into())
+    );
+    assert_eq!(
+        full_type_if_distinct("ARRAY", Some("integer[]".into())),
+        Some("integer[]".into())
+    );
+}
+
+#[test]
+fn full_type_if_distinct_drops_repeats_and_blanks() {
+    assert_eq!(full_type_if_distinct("text", Some("text".into())), None);
+    assert_eq!(full_type_if_distinct("TEXT", Some("text".into())), None);
+    assert_eq!(
+        full_type_if_distinct("integer", Some(" integer ".into())),
+        None
+    );
+    assert_eq!(full_type_if_distinct("int", Some(String::new())), None);
+    assert_eq!(full_type_if_distinct("int", Some("   ".into())), None);
+    assert_eq!(full_type_if_distinct("int", None), None);
+}
+
+#[test]
+fn full_type_if_distinct_trims_the_kept_value() {
+    assert_eq!(
+        full_type_if_distinct("char", Some(" char(10) ".into())),
+        Some("char(10)".into())
     );
 }

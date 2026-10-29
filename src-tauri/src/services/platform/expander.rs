@@ -110,38 +110,6 @@ impl ServiceParamExpander for NoopParamExpander {
     }
 }
 
-pub struct GuiParamExpander<R: tauri::Runtime> {
-    app: tauri::AppHandle<R>,
-}
-impl<R: tauri::Runtime> GuiParamExpander<R> {
-    pub fn new(app: tauri::AppHandle<R>) -> Self {
-        Self { app }
-    }
-}
-#[async_trait]
-impl<R: tauri::Runtime> ServiceParamExpander for GuiParamExpander<R> {
-    async fn expand(
-        &self,
-        params: &ConnectionParams,
-        connection_id: &str,
-    ) -> ServiceResult<ConnectionParams> {
-        let params = crate::commands::expand_ssh_connection_params(&self.app, params)
-            .await
-            .map_err(|_| failure(ErrorCode::AuthRequired))?;
-        let params = crate::commands::expand_k8s_connection_params(&self.app, &params)
-            .await
-            .map_err(|_| failure(ErrorCode::AuthRequired))?;
-        let cache =
-            tauri::Manager::try_state::<Arc<crate::credential_cache::CredentialCache>>(&self.app)
-                .map(|state| state.inner().clone());
-        let params =
-            restore_saved_secrets(Arc::new(KeychainSecrets::new(cache)), params, connection_id)
-                .await?;
-        crate::commands::resolve_connection_params_with_id(&params, connection_id)
-            .map_err(|_| failure(ErrorCode::AuthRequired))
-    }
-}
-
 pub struct HeadlessParamExpander {
     profile: PathBuf,
 }

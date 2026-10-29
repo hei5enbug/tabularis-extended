@@ -1240,6 +1240,7 @@ async fn job_list는_이전_감사_기록과_재시작_뒤의_끝나지_않은_�
             tool: "run_query".into(),
             connection_id: Some(h.id.clone()),
             connection_name: None,
+            database: None,
             query: Some("SELECT old".into()),
             query_kind: Some("select".into()),
             duration_ms: 5,

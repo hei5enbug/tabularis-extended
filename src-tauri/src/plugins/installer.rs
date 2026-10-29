@@ -186,9 +186,28 @@ pub async fn download_and_install(
     expected_version: Option<&str>,
     cancellation: &InstallCancellation,
 ) -> Result<(), String> {
-    cancellation.check()?;
     let plugins_dir = get_plugins_dir()?;
-    super::layout::driver_destination(&plugins_dir, plugin_id)?;
+    download_and_install_into(
+        &plugins_dir,
+        plugin_id,
+        download_url,
+        expected_sha256,
+        expected_version,
+        cancellation,
+    )
+    .await
+}
+
+pub async fn download_and_install_into(
+    plugins_dir: &Path,
+    plugin_id: &str,
+    download_url: &str,
+    expected_sha256: Option<&str>,
+    expected_version: Option<&str>,
+    cancellation: &InstallCancellation,
+) -> Result<(), String> {
+    cancellation.check()?;
+    super::layout::driver_destination(plugins_dir, plugin_id)?;
 
     // Download ZIP to memory
     log::info!("Downloading plugin '{}' from: {}", plugin_id, download_url);
@@ -274,7 +293,7 @@ pub async fn download_and_install(
     cancellation.check()?;
 
     install_archive(
-        plugins_dir,
+        plugins_dir.to_path_buf(),
         plugin_id,
         bytes.to_vec(),
         expected_version,
@@ -510,14 +529,18 @@ pub(crate) async fn install_archive(
 
 pub fn uninstall(plugin_id: &str) -> Result<(), String> {
     let plugins_dir = get_plugins_dir()?;
-    if let Ok(path) = super::extensions::resolve(&plugins_dir, plugin_id) {
+    uninstall_from(&plugins_dir, plugin_id)
+}
+
+pub fn uninstall_from(plugins_dir: &Path, plugin_id: &str) -> Result<(), String> {
+    if let Ok(path) = super::extensions::resolve(plugins_dir, plugin_id) {
         fs::remove_dir_all(path).map_err(|e| e.to_string())?;
         super::extensions::disable(plugin_id);
         return Ok(());
     }
-    super::layout::resolve_driver(&plugins_dir, plugin_id)?;
+    super::layout::resolve_driver(plugins_dir, plugin_id)?;
     // Remove fallback copies first so uninstall cannot resurrect an older bundle.
-    for path in super::layout::driver_candidates(&plugins_dir)?.into_iter().rev() {
+    for path in super::layout::driver_candidates(plugins_dir)?.into_iter().rev() {
         if super::layout::driver_identity(&path).as_deref() == Some(plugin_id) {
             fs::remove_dir_all(&path)
                 .map_err(|e| format!("Failed to remove plugin '{}': {}", plugin_id, e))?;
@@ -539,18 +562,29 @@ pub fn resolve_plugin_dir(plugin_id: &str) -> Result<PathBuf, String> {
 
 pub fn list_installed() -> Result<Vec<InstalledPluginInfo>, String> {
     let plugins_dir = get_plugins_dir()?;
+    Ok(list_installed_from(&plugins_dir))
+}
+
+pub fn list_installed_from(plugins_dir: &Path) -> Vec<InstalledPluginInfo> {
     let mut plugins = Vec::new();
 
-    for path in super::layout::driver_directories(&plugins_dir)? {
+    let Ok(paths) = super::layout::driver_directories(plugins_dir) else {
+        return plugins;
+    };
+    for path in paths {
         if let Ok(plugin) = read_plugin_info_from_dir(&path) {
             plugins.push(plugin);
         }
     }
 
-    for path in super::extensions::directories(&plugins_dir)? {
-        plugins.push(super::extensions::info(&path)?);
+    if let Ok(paths) = super::extensions::directories(plugins_dir) {
+        for path in paths {
+            if let Ok(plugin) = super::extensions::info(&path) {
+                plugins.push(plugin);
+            }
+        }
     }
-    Ok(plugins)
+    plugins
 }
 
 struct TemporaryPackage(PathBuf);

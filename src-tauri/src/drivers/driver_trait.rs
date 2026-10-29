@@ -142,7 +142,7 @@ impl DriverServiceCapabilities {
 }
 
 /// SQL dialect declaration used by the frontend statement splitter
-/// (`src/utils/sqlSplitter/`) to pick per-dialect tokenizer rules:
+/// (`packages/web-ui/src/utils/sqlSplitter/`) to pick per-dialect tokenizer rules:
 /// string-literal quoting, identifier quoting (backticks vs brackets),
 /// dollar-quoted strings, `DELIMITER` / `GO` directives, etc.
 ///
@@ -188,6 +188,12 @@ pub struct DriverCapabilities {
     /// Folder-based database (e.g. CSV directory); connection points to a directory instead of a file.
     #[serde(default)]
     pub folder_based: bool,
+    /// File-based driver that also accepts the `:memory:` path, opening a
+    /// temporary database that lives in the driver process (e.g. DuckDB).
+    /// The connection test then skips the file existence check for that
+    /// path. Defaults to `false`.
+    #[serde(default, alias = "inMemory")]
+    pub in_memory: bool,
     /// The driver exposes a single implicit database, so there is nothing to
     /// select or name (e.g. a flat search/document store like Meilisearch).
     /// Skips the database tab and the database-name field in the connection
@@ -236,6 +242,20 @@ pub struct DriverCapabilities {
     /// Omitted/false preserves the host's existing template generation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub table_query_templates: bool,
+    /// The DDL builders honour `ColumnDefinition::comment`, so the column
+    /// editor shows a description field. Omitted/false hides it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub column_comments: bool,
+    /// Opts the explorer's "Drop table" action into the optional
+    /// `get_drop_table_sql` RPC. Omitted/false keeps the generic `DROP TABLE`
+    /// and the RPC is never called.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drop_table_sql: bool,
+    /// Opts the column statistics popover into the optional
+    /// get_column_stats RPC. Omitted/false keeps the host's generic SQL for
+    /// SQL-compatible drivers and hides the entry for the others.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub column_stats: bool,
     // DDL capabilities
     /// Supports ALTER TABLE MODIFY/ALTER COLUMN on existing tables.
     #[serde(default)]
@@ -292,12 +312,31 @@ pub struct DriverCapabilities {
     /// that needs to tell "explicitly postgres" apart from "unspecified."
     /// The frontend's own splitter still applies the historical
     /// postgres-default at its point of use (`?? "postgres"` in
-    /// `src/utils/identifiers.ts`/`sqlSplitter`); this Rust-side field
+    /// `packages/web-ui/src/utils/identifiers.ts`/`sqlSplitter`); this Rust-side field
     /// stays a strict `Option` so security-relevant Rust consumers (the SSL
     /// mode migration, the MCP schema default) can't inherit that default
     /// by accident.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// A dialect this host doesn't know falls back to `Generic` with a
+    /// warning instead of refusing the whole manifest.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::drivers::sql_dialect::deserialize_lenient"
+    )]
     pub sql_dialect: Option<SqlDialect>,
+    /// Declarative SQL syntax extending a preset (`extends`, default
+    /// `sql_dialect`) for engines no preset describes: quotes, comments,
+    /// triple-quoted strings, procedural blocks, literal escaping, formatter
+    /// and autocomplete words. Separate from `sql_dialect` so older hosts
+    /// ignore it and keep using `sql_dialect`. Invalid fields are dropped
+    /// with a warning, never failing the manifest; resolve it with
+    /// [`crate::drivers::sql_syntax::SqlSyntax::resolve`].
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::drivers::sql_syntax::deserialize_lenient"
+    )]
+    pub sql_syntax: Option<crate::drivers::sql_syntax::SqlSyntaxDescriptor>,
 }
 
 fn default_double_quote() -> String {
@@ -322,6 +361,10 @@ pub struct UIExtensionEntry {
     /// matches this identifier (e.g. `"wordpress"`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub driver: Option<String>,
+    /// `@tabularis/plugin-api` version used to build the UI bundle.
+    /// Absent for legacy bundles, which remain supported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
 }
 
 /// An EXPLAIN parser bundle declared in a plugin's manifest.
@@ -393,6 +436,34 @@ pub fn deprecation_for_builtin(builtin_id: &str) -> Option<DeprecationInfo> {
     }
 }
 
+/// Optional presentation overrides for one of the host-owned connection
+/// fields. Omitted values preserve the host defaults so manifests written
+/// before this contract continue to render exactly as they do today.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ConnectionFieldOverride {
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+}
+
+/// Driver-specific overrides for the common network connection fields.
+#[derive(Debug, Serialize, Deserialize, Clone, Default)]
+pub struct ConnectionFieldOverrides {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<ConnectionFieldOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<ConnectionFieldOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<ConnectionFieldOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<ConnectionFieldOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<ConnectionFieldOverride>,
+}
+
 /// Metadata describing a registered driver plugin.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct PluginManifest {
@@ -441,6 +512,10 @@ pub struct PluginManifest {
     /// Plugin-owned EXPLAIN parser bundles. Absent for built-in drivers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explain_parsers: Option<Vec<ExplainParserManifestEntry>>,
+    /// Optional hide/relabel/placeholder overrides for the common connection
+    /// fields. Absent for built-ins and legacy plugins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_fields: Option<ConnectionFieldOverrides>,
     /// Static type mappings applied by `map_inferred_type`. Keys are generic
     /// inferred types (uppercase, e.g. `"DATETIME"`), values are driver-specific
     /// types (e.g. `"TIMESTAMP"`). Empty for built-in drivers which override the
@@ -508,6 +583,18 @@ pub trait DatabaseDriver: Send + Sync {
     /// Drop cached discovery results on reconnect. Static drivers do nothing.
     async fn invalidate_connection_metadata(&self, _connection_id: Option<&str>) {}
 
+    /// Bind resolved connection params (with the browsed database already
+    /// applied) to a driver snapshot, so SQL builders whose signature carries
+    /// no params (create table/column/index, routine template) can still
+    /// forward the connection context. Static drivers return `None` and keep
+    /// using the registered instance. No RPC is made.
+    fn bind_connection_params(
+        &self,
+        _params: &ConnectionParams,
+    ) -> Option<std::sync::Arc<dyn DatabaseDriver>> {
+        None
+    }
+
     /// Returns the list of data types supported by this driver.
     fn get_data_types(&self) -> Vec<DataTypeInfo>;
 
@@ -528,6 +615,13 @@ pub trait DatabaseDriver: Send + Sync {
     /// Shuts down any background resources held by this driver (e.g. a plugin subprocess).
     /// Built-in sqlx-based drivers hold no background process; the default is a no-op.
     async fn shutdown(&self) {}
+
+    /// Like [`shutdown`](Self::shutdown), but stops the background process at
+    /// once instead of letting in-flight calls finish. For a host that is
+    /// exiting, when no caller is left to read their results.
+    async fn terminate(&self) {
+        self.shutdown().await
+    }
 
     /// Returns the OS process ID of the subprocess backing this driver, if any.
     /// Built-in drivers always return `None`.
@@ -695,11 +789,18 @@ pub trait DatabaseDriver: Send + Sync {
         schema: Option<&str>,
     ) -> Result<Vec<RoutineInfo>, String>;
 
+    /// `identity_args` narrows the lookup to ONE routine where a name is not
+    /// enough to name one. PostgreSQL overloads, so a schema and a name there
+    /// identify a set, and every read below used to take `LIMIT 1` out of it
+    /// and answer about whichever row came back (#893). Carries the signature
+    /// `get_routines` reported for the row the user clicked; `None` asks for
+    /// the old behaviour, still right on the dialects that cannot overload.
     async fn get_routine_parameters(
         &self,
         params: &ConnectionParams,
         routine_name: &str,
         schema: Option<&str>,
+        identity_args: Option<&str>,
     ) -> Result<Vec<RoutineParameter>, String>;
 
     async fn get_routine_definition(
@@ -708,6 +809,7 @@ pub trait DatabaseDriver: Send + Sync {
         routine_name: &str,
         routine_type: &str,
         schema: Option<&str>,
+        identity_args: Option<&str>,
     ) -> Result<String, String>;
 
     // --- Routine management (gated by `DriverCapabilities::routine_management`)
@@ -765,8 +867,9 @@ pub trait DatabaseDriver: Send + Sync {
         routine_name: &str,
         routine_type: &str,
         schema: Option<&str>,
+        identity_args: Option<&str>,
     ) -> Result<String, String> {
-        self.get_routine_definition(params, routine_name, routine_type, schema)
+        self.get_routine_definition(params, routine_name, routine_type, schema, identity_args)
             .await
     }
 
@@ -779,6 +882,9 @@ pub trait DatabaseDriver: Send + Sync {
         routine_name: &str,
         routine_type: &str,
         schema: Option<&str>,
+        /* Unused by the generic statement: a dialect that needs a signature to
+           name one routine overrides this, as the PostgreSQL driver does */
+        _identity_args: Option<&str>,
     ) -> Result<(), String> {
         let sql = crate::drivers::common::generic_drop_routine_sql(
             routine_name,
@@ -861,6 +967,28 @@ pub trait DatabaseDriver: Send + Sync {
             .execute_query(params, query, limit, page, schema)
             .await?;
         Ok((result, false))
+    }
+
+    /// `execute_query` with the database itself refusing writes.
+    ///
+    /// Used for MCP queries that run without the user's approval because
+    /// they were classified as reads. Keyword classification cannot see what
+    /// a function call does, so built-in drivers run the statement in a
+    /// read-only transaction that is always rolled back, and the database
+    /// rejects any write the classifier missed.
+    ///
+    /// The default implementation delegates to [`Self::execute_query`]:
+    /// plugin drivers have no read-only mode, so for them classification is
+    /// the only safeguard.
+    async fn execute_read_only_query(
+        &self,
+        params: &ConnectionParams,
+        query: &str,
+        limit: Option<u32>,
+        page: u32,
+        schema: Option<&str>,
+    ) -> Result<QueryResult, String> {
+        self.execute_query(params, query, limit, page, schema).await
     }
 
     /// `execute_batch` with the caller's connection carried across calls.
@@ -988,6 +1116,16 @@ pub trait DatabaseDriver: Send + Sync {
         Ok(None)
     }
 
+    /// Optional column statistics (issue #1137). None asks the host to use
+    /// its generic SQL, or to report that the driver has no statistics.
+    async fn get_column_stats(
+        &self,
+        _params: &ConnectionParams,
+        _request: &crate::models::ColumnStatsRequest,
+    ) -> Result<Option<crate::models::ColumnStatsResult>, String> {
+        Ok(None)
+    }
+
     // --- DDL generation (SQL preview) ----------------------------------------
 
     async fn get_create_table_sql(
@@ -1042,6 +1180,33 @@ pub trait DatabaseDriver: Send + Sync {
         _schema: Option<&str>,
     ) -> Result<Vec<String>, String> {
         Err("DDL generation not supported".into())
+    }
+
+    /// Statement that drops `table`, for engines where a plain `DROP TABLE`
+    /// is wrong for some table kinds (snapshots, external tables, ...).
+    /// `None` means the host builds its generic `DROP TABLE`. Only plugins
+    /// declaring `capabilities.drop_table_sql` are asked.
+    async fn get_drop_table_sql(
+        &self,
+        _params: &ConnectionParams,
+        _table: &str,
+        _schema: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        Ok(None)
+    }
+
+    /// Returns the DDL (e.g. `CREATE TABLE ...`) for an *existing* table, as
+    /// used by `dump_database` to write a schema-preserving dump. Distinct
+    /// from `get_create_table_sql`, which generates a brand-new statement
+    /// from a column list the caller is proposing (used by the Create Table
+    /// UI) rather than reflecting a table that already exists.
+    async fn get_table_ddl(
+        &self,
+        _params: &ConnectionParams,
+        _table: &str,
+        _schema: Option<&str>,
+    ) -> Result<String, String> {
+        Err("Fetching existing table DDL is not supported by this driver".into())
     }
 
     async fn drop_index(
@@ -1110,9 +1275,7 @@ pub trait DatabaseDriver: Send + Sync {
 
     /// Returns the privilege keywords accepted by `apply_db_user_privileges`,
     /// split by scope, so the frontend renders the dialect's own catalog.
-    async fn get_db_privilege_catalog(
-        &self,
-    ) -> Result<crate::models::DbPrivilegeCatalog, String> {
+    async fn get_db_privilege_catalog(&self) -> Result<crate::models::DbPrivilegeCatalog, String> {
         Err("User management is not supported by this driver".into())
     }
 

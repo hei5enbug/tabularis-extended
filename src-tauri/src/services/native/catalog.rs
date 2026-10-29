@@ -11,7 +11,6 @@ use crate::{
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{collections::HashMap, sync::Arc, time::Duration};
-use tauri::Manager;
 
 #[derive(Serialize)]
 pub struct ServiceTableColumn {
@@ -73,26 +72,6 @@ pub async fn driver_capabilities(
         }
         Err(error) => Err(error),
     }
-}
-pub async fn for_connection<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-    id: &str,
-) -> Result<Option<Arc<NativeCore>>, String> {
-    let core = app
-        .try_state::<Arc<NativeCore>>()
-        .map(|state| state.inner().clone())
-        .ok_or_else(|| command_error(failure(ErrorCode::CapabilityUnavailable)))?;
-    let connection = core
-        .platform
-        .runtime
-        .connections
-        .get(id)
-        .await
-        .map_err(command_error)?;
-    Ok(driver_capabilities(&connection.driver)
-        .await
-        .map_err(command_error)?
-        .map(|_| core))
 }
 pub fn database(core: &NativeCore, id: &str, explicit: Option<String>) -> ServiceResult<String> {
     if let Some(database) = explicit {
@@ -204,7 +183,10 @@ pub fn columns(data: &Value) -> ServiceResult<Vec<ServiceTableColumn>> {
                     is_generated: boolean("is_generated", "generated", false),
                     default_value: value["default_value"].as_str().map(str::to_owned),
                     character_maximum_length: value["character_maximum_length"].as_u64(),
+                    numeric_precision: None,
+                    numeric_scale: None,
                     comment: value["comment"].as_str().map(str::to_owned),
+                    full_type: None,
                 },
                 primary_key_position,
             })

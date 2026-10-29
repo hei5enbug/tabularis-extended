@@ -1,7 +1,7 @@
 //! Application proxy configuration and runtime helpers.
 //!
-//! Global settings + per-scope checkboxes, with connection / AI-provider
-//! overrides. HTTP callers use [`http`]; TCP (DB / SSH) uses [`tcp_forward`].
+//! Global per-scope modes with connection / AI-provider overrides.
+//! HTTP callers use [`http`]; TCP (DB / SSH) uses [`tcp_forward`].
 
 pub mod http;
 pub mod registry;
@@ -18,16 +18,16 @@ pub use registry::{
 };
 pub use resolve::{
     endpoint_to_proxy_url, keychain_ai, keychain_connection, resolve, resolve_for_ai_provider,
-    resolve_for_connection, resolve_global_scope, KEYCHAIN_GLOBAL,
+    resolve_for_connection, resolve_global_scope, resolve_http_policy, KEYCHAIN_GLOBAL,
 };
 pub use tcp_forward::{ensure_forward, stop_all_forwards};
 pub use types::{
-    GlobalProxySettings, ProxyEndpoint, ProxyMode, ProxyOverride, ProxyProtocol,
+    GlobalProxySettings, HttpProxyMode, HttpProxyPolicy, ProxyEndpoint, ProxyMode, ProxyOverride,
+    ProxyProtocol, ProxyScopeModes, TcpProxyMode,
 };
 
 use crate::keychain_utils;
 
-#[tauri::command]
 pub fn set_proxy_password(slot: String, password: String) -> Result<(), String> {
     if !is_valid_proxy_slot(&slot) {
         return Err(format!("Invalid proxy password slot: {slot}"));
@@ -39,7 +39,6 @@ pub fn set_proxy_password(slot: String, password: String) -> Result<(), String> 
     }
 }
 
-#[tauri::command]
 pub fn proxy_password_is_set(slot: String) -> Result<bool, String> {
     if !is_valid_proxy_slot(&slot) {
         return Err(format!("Invalid proxy password slot: {slot}"));
@@ -49,7 +48,6 @@ pub fn proxy_password_is_set(slot: String) -> Result<bool, String> {
         .unwrap_or(false))
 }
 
-#[tauri::command]
 pub fn delete_proxy_password(slot: String) -> Result<(), String> {
     if !is_valid_proxy_slot(&slot) {
         return Err(format!("Invalid proxy password slot: {slot}"));

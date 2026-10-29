@@ -275,6 +275,7 @@ fn plugin_manifest() -> PluginManifest {
             routine_management: true,
             file_based: false,
             folder_based: false,
+            in_memory: false,
             connection_string: true,
             connection_string_example: "postgres://user:pass@localhost:5432/db".into(),
             connection_string_examples: Vec::new(),
@@ -286,6 +287,9 @@ fn plugin_manifest() -> PluginManifest {
             serial_type: "SERIAL".into(),
             inline_pk: false,
             table_query_templates: false,
+            column_comments: false,
+            drop_table_sql: false,
+            column_stats: false,
             alter_column: true,
             create_foreign_keys: true,
             no_connection_required: false,
@@ -296,6 +300,7 @@ fn plugin_manifest() -> PluginManifest {
             supports_ssl: true,
             user_management: false,
             sql_dialect: Some(SqlDialect::Postgres),
+            sql_syntax: None,
         },
         is_builtin: false,
         engine: Some("postgresql".to_string()),
@@ -306,6 +311,7 @@ fn plugin_manifest() -> PluginManifest {
         settings: vec![],
         ui_extensions: None,
         explain_parsers: None,
+        connection_fields: None,
         type_mappings: {
             let mut m = HashMap::new();
             m.insert("DATETIME".to_string(), "TIMESTAMP".to_string());

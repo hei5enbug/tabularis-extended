@@ -32,7 +32,7 @@ fn 배포_호스트_버전과_컴파일러_최소_버전은_다섯_메타데이�
         serde_json::from_str(include_str!("../../tauri.conf.json")).expect("Tauri metadata");
     let cargo = include_str!("../../Cargo.toml");
     let lock = include_str!("../../Cargo.lock");
-    let frontend = include_str!("../../../src/version.ts");
+    let frontend = include_str!("../../../packages/web-ui/src/version.ts");
     // when
     let actual = (
         package["version"].as_str(),

@@ -1,6 +1,8 @@
 use super::build_mysql_pk_where;
 use super::{is_text_protocol_stmt, push_mysql_update_value, MysqlDriver, TextProto};
-use super::helpers::{inline_str_placeholders, mysql_bytes_literal, mysql_string_literal};
+use super::helpers::{
+    inline_str_placeholders, mysql_bytes_literal, mysql_column_types, mysql_string_literal,
+};
 use crate::drivers::driver_trait::DatabaseDriver;
 use crate::models::{ConnectionParams, DatabaseSelection};
 
@@ -246,6 +248,61 @@ fn spaced_definer_view_with_routine_words_in_body_is_not_text_protocol() {
     }
 }
 
+mod mysql_column_types_tests {
+    use super::*;
+
+    fn types(data_type: &str, column_type: &str) -> (String, Option<String>) {
+        mysql_column_types(data_type.to_string(), column_type.to_string())
+    }
+
+    #[test]
+    fn keeps_the_base_name_and_moves_the_column_type_to_full_type() {
+        assert_eq!(
+            types("varchar", "varchar(255)"),
+            ("varchar".to_string(), Some("varchar(255)".to_string()))
+        );
+        assert_eq!(
+            types("decimal", "decimal(10,2)"),
+            ("decimal".to_string(), Some("decimal(10,2)".to_string()))
+        );
+        assert_eq!(
+            types("tinyint", "tinyint(1)"),
+            ("tinyint".to_string(), Some("tinyint(1)".to_string()))
+        );
+        assert_eq!(
+            types("int", "int unsigned"),
+            ("int".to_string(), Some("int unsigned".to_string()))
+        );
+        assert_eq!(
+            types("int", "int(11)"),
+            ("int".to_string(), Some("int(11)".to_string()))
+        );
+        assert_eq!(
+            types("datetime", "datetime(3)"),
+            ("datetime".to_string(), Some("datetime(3)".to_string()))
+        );
+    }
+
+    #[test]
+    fn omits_full_type_when_the_column_type_adds_nothing() {
+        assert_eq!(types("text", "text"), ("text".to_string(), None));
+        assert_eq!(types("json", "json"), ("json".to_string(), None));
+        assert_eq!(types("int", ""), ("int".to_string(), None));
+    }
+
+    #[test]
+    fn enum_and_set_keep_their_values_in_data_type() {
+        assert_eq!(
+            types("enum", "enum('pending','approved')"),
+            ("enum('pending','approved')".to_string(), None)
+        );
+        assert_eq!(
+            types("SET", "set('a','b')"),
+            ("set('a','b')".to_string(), None)
+        );
+    }
+}
+
 mod build_mysql_pk_where_tests {
     use super::*;
     use std::collections::HashMap;
@@ -254,7 +311,7 @@ mod build_mysql_pk_where_tests {
     fn single_column_returns_correct_pair() {
         let mut pk_map = HashMap::new();
         pk_map.insert("id".to_string(), serde_json::json!(42));
-        let pairs = build_mysql_pk_where(&pk_map).unwrap();
+        let pairs = build_mysql_pk_where(&pk_map, &Default::default()).unwrap();
         assert_eq!(pairs.len(), 1);
         assert_eq!(pairs[0].0, "id");
         assert_eq!(pairs[0].1, serde_json::json!(42));
@@ -265,15 +322,52 @@ mod build_mysql_pk_where_tests {
         let mut pk_map = HashMap::new();
         pk_map.insert("z_col".to_string(), serde_json::json!(1));
         pk_map.insert("a_col".to_string(), serde_json::json!(2));
-        let pairs = build_mysql_pk_where(&pk_map).unwrap();
+        let pairs = build_mysql_pk_where(&pk_map, &Default::default()).unwrap();
         assert_eq!(pairs[0].0, "a_col");
         assert_eq!(pairs[1].0, "z_col");
     }
 
     #[test]
+    fn float_identities_widen_without_changing_other_column_values() {
+        let float_columns = std::collections::HashSet::from(["price".to_string()]);
+        for (shown, widened) in [
+            (89.9, 89.9000015258789),
+            (59.99, 59.9900016784668),
+            (29.5, 29.5),
+        ] {
+            let pk_map = HashMap::from([
+                ("price".to_string(), serde_json::json!(shown)),
+                ("double_price".to_string(), serde_json::json!(shown)),
+                ("id".to_string(), serde_json::json!(9007199254740993u64)),
+            ]);
+            let pairs = build_mysql_pk_where(&pk_map, &float_columns).unwrap();
+            assert_eq!(
+                pairs,
+                vec![
+                    ("double_price".to_string(), serde_json::json!(shown)),
+                    ("id".to_string(), serde_json::json!(9007199254740993u64)),
+                    ("price".to_string(), serde_json::json!(widened)),
+                ]
+            );
+        }
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("89.9"),
+            serde_json::json!(true),
+            serde_json::json!(1e100),
+        ] {
+            let pk_map = HashMap::from([("price".to_string(), value.clone())]);
+            assert_eq!(
+                build_mysql_pk_where(&pk_map, &float_columns).unwrap()[0].1,
+                value
+            );
+        }
+    }
+
+    #[test]
     fn empty_pk_map_is_rejected() {
         let pk_map: HashMap<String, serde_json::Value> = HashMap::new();
-        assert!(build_mysql_pk_where(&pk_map).is_err());
+        assert!(build_mysql_pk_where(&pk_map, &Default::default()).is_err());
     }
 }
 

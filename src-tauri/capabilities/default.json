@@ -22,11 +22,13 @@
     "fs:default",
     "fs:allow-write-text-file",
     "fs:allow-read-text-file",
+    "fs:allow-stat",
     "fs:scope-appdata-recursive",
     "notification:default",
     "opener:default",
     "clipboard-manager:allow-read-text",
     "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-write-html",
     "deep-link:default"
   ]
 }

@@ -258,6 +258,7 @@ pub fn manifest(path: &Path) -> Result<PluginManifest, String> {
         icon: config.icon,
         settings: config.settings,
         ui_extensions: config.ui_extensions,
+        connection_fields: None,
         explain_parsers: None,
         type_mappings: HashMap::new(),
         deprecated: None,

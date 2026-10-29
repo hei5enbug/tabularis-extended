@@ -243,58 +243,10 @@ pub fn activate_fork_plus_drivers() -> Result<Vec<String>, String> {
     activate_used_plus_drivers_in(&config, &connections, &plugins_dir)
 }
 
-fn fork_locations() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
+pub(crate) fn fork_locations() -> Result<(std::path::PathBuf, std::path::PathBuf), String> {
     let plugins_dir = crate::paths::get_plugins_dir_checked()?;
     let connections = crate::paths::resolve_connections_path(&crate::paths::get_app_config_dir());
     Ok((connections, plugins_dir))
-}
-
-async fn remap_fork_profile<R: tauri::Runtime>(
-    app: &tauri::AppHandle<R>,
-) -> Result<RemapReport, String> {
-    let (connections, plugins_dir) = fork_locations()?;
-    let report =
-        tokio::task::spawn_blocking(move || remap_connections_in(&connections, &plugins_dir))
-            .await
-            .map_err(|_| "The driver remap task failed.".to_owned())??;
-    if !report.remapped.is_empty() {
-        crate::commands::invalidate_connection_cache(app);
-    }
-    Ok(report)
-}
-
-#[tauri::command]
-pub async fn remap_connections_to_plus_drivers<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-) -> Result<RemapReport, String> {
-    remap_fork_profile(&app).await
-}
-
-/// Plugin manager hook: runs after an install finished and the package loaded.
-/// Failures are logged and never fail the install.
-pub async fn after_plugin_install<R: tauri::Runtime>(app: &tauri::AppHandle<R>, plugin_id: &str) {
-    if !is_plus_package(plugin_id) {
-        return;
-    }
-    match remap_fork_profile(app).await {
-        Ok(report) => {
-            if !report.remapped.is_empty() {
-                log::info!(
-                    "Moved {} connection(s) to plus drivers after installing {}",
-                    report.remapped.len(),
-                    plugin_id
-                );
-            }
-            if !report.unconverted.is_empty() {
-                log::warn!(
-                    "Left {} connection(s) on their legacy driver: {}",
-                    report.unconverted.len(),
-                    report.unconverted.join(",")
-                );
-            }
-        }
-        Err(error) => log::warn!("Driver remap after installing {plugin_id} failed: {error}"),
-    }
 }
 
 #[cfg(test)]

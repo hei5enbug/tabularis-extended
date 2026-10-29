@@ -2,12 +2,9 @@
 //! `connections.json` next to the groups. Tags are purely organizational;
 //! assignment lives on `SavedConnection.tag_ids`.
 
-use tauri::{AppHandle, Runtime};
 use uuid::Uuid;
 
-use crate::commands::{get_config_path, update_connections_and_invalidate};
 use crate::models::{ConnectionTag, ConnectionsFile};
-use crate::persistence;
 
 /// Basic sanity check for a CSS hex color (`#rgb`, `#rrggbb` or `#rrggbbaa`),
 /// so a crafted connections.json entry can't inject arbitrary CSS.
@@ -172,58 +169,6 @@ pub fn merge_imported_tags(
 
 // ---------- Tauri commands ----------
 
-#[tauri::command]
-pub async fn list_connection_tags<R: Runtime>(
-    app: AppHandle<R>,
-) -> Result<Vec<ConnectionTag>, String> {
-    let path = get_config_path(&app)?;
-    Ok(persistence::load_connections_file(&path)?.tags)
-}
-
-#[tauri::command]
-pub async fn create_connection_tag<R: Runtime>(
-    app: AppHandle<R>,
-    name: String,
-    color: String,
-) -> Result<ConnectionTag, String> {
-    let path = get_config_path(&app)?;
-    update_connections_and_invalidate(&app, &path, |file| create_tag_impl(file, &name, &color))
-}
-
-#[tauri::command]
-pub async fn update_connection_tag<R: Runtime>(
-    app: AppHandle<R>,
-    id: String,
-    name: String,
-    color: String,
-) -> Result<(), String> {
-    let path = get_config_path(&app)?;
-    update_connections_and_invalidate(&app, &path, |file| {
-        update_tag_impl(file, &id, &name, &color)
-    })
-}
-
-#[tauri::command]
-pub async fn delete_connection_tag<R: Runtime>(
-    app: AppHandle<R>,
-    id: String,
-) -> Result<(), String> {
-    let path = get_config_path(&app)?;
-    update_connections_and_invalidate(&app, &path, |file| delete_tag_impl(file, &id))
-}
-
-#[tauri::command]
-pub async fn set_connection_tags<R: Runtime>(
-    app: AppHandle<R>,
-    connection_id: String,
-    tag_ids: Vec<String>,
-) -> Result<(), String> {
-    let path = get_config_path(&app)?;
-    update_connections_and_invalidate(&app, &path, |file| {
-        set_connection_tags_impl(file, &connection_id, &tag_ids)
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +179,7 @@ mod tests {
             id: id.to_string(),
             name: id.to_string(),
             params: ConnectionParams::default(),
+            plugin_secret_keys: Vec::new(),
             group_id: None,
             sort_order: None,
             detect_json_in_text_columns: None,

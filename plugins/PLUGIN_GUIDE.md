@@ -22,6 +22,20 @@ An external plugin in Tabularis is a separate executable (binary or script) that
 - **Responses:** The plugin processes the request and writes a JSON-RPC response object to its `stdout`, followed by a newline (`\n`).
 - **Logging:** Any output to `stderr` from the plugin is inherited/logged by Tabularis without interfering with the JSON-RPC communication.
 
+### Selecting a database in a multi-database plugin
+
+The request-level `schema` field holds the item selected in the explorer.
+For plugins with `capabilities.schemas: false`, a connection can also have
+`params.database: ["0", "3"]` (Redis is one example). When `schema` is an
+exact member of that array, the host sends only the selected database as
+`params.database: "3"` for that RPC. Other parameters and the request's
+`schema` stay unchanged.
+
+For plugins with `capabilities.schemas: true`, the host does **not** rewrite
+`params.database`. A schema can have the same name as a database, and the
+plugin must use `schema` to select the namespace within its database.
+Single-database values and requests with no matching selection are unchanged.
+
 ### Lifecycle
 
 1. Tabularis discovers plugins in its data folder at startup:
@@ -30,8 +44,9 @@ An external plugin in Tabularis is a separate executable (binary or script) that
    - **Windows:** `%APPDATA%\tabularis\plugins\`
 2. It reads each plugin's `.tabularium` manifest (or a legacy `manifest.json`) to discover its capabilities and data types.
 3. The plugin is registered as a driver and appears in the "Database Type" list.
-4. When the user opens a connection using the plugin's driver, Tabularis spawns the executable and begins sending JSON-RPC messages.
-5. The same process instance is reused for all operations in that session.
+4. Tabularis spawns the executable when it registers the driver, and sends JSON-RPC messages once a connection uses it. The desktop app and each `tabularis --mcp` server start their own process.
+5. The same process instance is reused for all connections and operations in that session.
+6. When the session ends, Tabularis kills the process. **Exit when `stdin` reaches EOF** as well: if Tabularis is killed (for example an MCP client force-quitting `tabularis --mcp`), EOF may be the only signal the plugin gets. On Windows, Tabularis also places the plugin in a job object that is killed with it.
 
 ---
 
@@ -107,6 +122,7 @@ One manifest tells Tabularis everything about your plugin — and, when you publ
 | `capabilities` | object | Feature flags (see below). |
 | `data_types` | array | List of supported data types (see below). |
 | `type_mappings` | object \| null | Optional map of generic inferred type names to driver-specific types. Used during paste/import to map generic types (e.g. `DATETIME`) to driver-native equivalents (e.g. `TIMESTAMP`). See [Type Mappings](#type-mappings) below. |
+| `connection_fields` | object | Optional hide, label, and placeholder overrides for the common `host`, `port`, `username`, `password`, and `database` fields. Omitted fields preserve the standard UI. See [Connection Fields](#connection-fields) below. |
 
 ### Migrating display names
 
@@ -122,14 +138,20 @@ Upgrade the registry before publishing the new format. Add `id` equal to the **e
 | `routines` | bool | `true` if the database supports stored procedures/functions. |
 | `triggers` | bool | `true` if the database supports triggers. Enables trigger-related UI for drivers that implement the trigger RPCs. |
 | `file_based` | bool | `true` for local file databases (e.g., SQLite, DuckDB). Replaces host/port with a file path input in the connection form. |
+| `in_memory` | bool | Requires `file_based`. `true` if the driver also opens the path `:memory:` as a temporary database (e.g. DuckDB). Adds an in-memory shortcut next to the file path input and skips the file existence check for that path. The database lives in the plugin process: connections that use `:memory:` share it until the plugin process stops. Also accepted as camelCase `inMemory`. Defaults to `false`. |
 | `folder_based` | bool | `true` for plugins that connect to a directory rather than a single file (e.g. CSV plugin). Replaces host/port with a folder picker. |
 | `no_connection_required` | bool | `true` for API-based plugins that need no host, port, or credentials (e.g. a public REST API). Hides the entire connection form — the user only fills in the connection name. |
 | `connection_string` | bool | Set `false` to hide the connection string import UI for this driver. Defaults to `true` for network drivers. `file_based` and `folder_based` drivers skip the import UI automatically regardless of this flag. |
 | `connection_string_example` | string | Optional placeholder example shown in the connection string import field (e.g. `"clickhouse://user:pass@localhost:9000/db"`). Also accepted as camelCase `connectionStringExample`. |
 | `connection_string_examples` | array | Optional connection string presets shown beside the import field. Each item has a required `label` and `value`, plus an optional `description`. Selecting one fills the field; `connection_string_example` remains the placeholder. Also accepted as camelCase `connectionStringExamples`. |
 | `identifier_quote` | string | Character used to quote SQL identifiers. Use `"\""` for ANSI standard or `` "`" `` for MySQL style. |
+| `serial_type` | string | Replacement data type for auto-increment columns in generated DDL (e.g. `"SERIAL"` for PostgreSQL). Empty if not applicable. When set to `"SERIAL"`, the host widens it to match the column's integer width: `smallint` → `SMALLSERIAL`, `integer` → `SERIAL`, `bigint` → `BIGSERIAL`. Plugins whose serial syntax is not width-tied should use a distinct literal (e.g. `"BIGINT GENERATED BY DEFAULT AS IDENTITY"`) to avoid widening. |
 | `table_query_templates` | bool | Opts the Generate SQL dialog into the optional `get_table_query_template` RPC for SELECT/UPDATE/DELETE previews. Defaults to `false`; older plugins and built-in drivers keep the existing host templates. See [Table Query Templates](#table-query-templates). |
-| `sql_dialect` | string | Optional statement-splitting dialect: `postgres`, `mysql`, `mssql`, `sqlite`, `oracle`, or `generic`. Oracle-like plugins, including DM/Dameng, should use `"oracle"`. |
+| `column_comments` | bool | The DDL generation RPCs honour `ColumnDefinition.comment` (for example `OPTIONS(description=...)` or a `COMMENT` clause), so the column editor shows a description field. Defaults to `false`; the field is hidden otherwise and `comment` is omitted from requests when unset. |
+| `column_stats` | bool | Opts the data grid's **Column statistics** popover into the optional `get_column_stats` RPC. Defaults to `false`: plugins whose `sql_syntax.extends` or `sql_dialect` is `postgres`, `mysql` or `sqlite` keep the host's generic SQL, and the others don't show the menu entry. See [Column Statistics](#column-statistics). |
+| `drop_table_sql` | bool | Opts the explorer's **Drop table** action into the optional `get_drop_table_sql` RPC, so the plugin can return its own statement (for example `DROP SNAPSHOT TABLE`). Defaults to `false`: the RPC is never called and the host runs a generic `DROP TABLE` with your `identifier_quote`. See [`get_drop_table_sql`](#get_drop_table_sql). |
+| `sql_dialect` | string | Optional SQL dialect preset: `postgres`, `mysql`, `mssql`, `sqlite`, `oracle`, or `generic`. Drives statement splitting, the AI/MCP read-only check, generated SQL and literals. Oracle-like plugins, including DM/Dameng, should use `"oracle"`. A host loads a dialect it doesn't know as `generic` and logs a warning. For an engine no preset describes, keep the closest preset here and declare `sql_syntax`. |
+| `sql_syntax` | object | Optional declarative SQL syntax that extends a preset: quotes, comments, triple-quoted and prefixed strings, procedural blocks, string and boolean literals, `LIKE … ESCAPE`, formatter and autocomplete words. Hosts that predate it ignore it and use `sql_dialect`. See [SQL Syntax](#sql-syntax-sql_syntax). |
 | `alter_primary_key` | bool | `true` if the database supports altering primary keys after table creation. |
 | `manage_tables` | bool | `true` to enable table and column management UI (Create Table, Add/Modify/Drop Column, Drop Table). Does not control index or FK operations. Defaults to `true`. |
 | `readonly` | bool | When `true`, the driver is read-only: all data modification operations (INSERT, UPDATE, DELETE) are disabled in the UI. The add/delete row buttons, inline cell editing, and context menu edit actions are hidden. Table and column management is also hidden regardless of `manage_tables`. Defaults to `false`. |
@@ -138,6 +160,8 @@ Upgrade the registry before publishing the new format. Add `id` equal to the **e
 
 For drivers with several URL forms, declare the single example as the placeholder and add selectable presets:
 
+For URI passthrough drivers, an opaque placeholder (such as `jdbc:h2:mem:test`) permits opaque inputs. An authority-based placeholder (such as `mongodb://localhost/db`) requires `://` and a host in imported strings.
+
 ```json
 {
   "connection_string_example": "jdbc:h2:tcp://localhost/~/test",
@@ -145,6 +169,118 @@ For drivers with several URL forms, declare the single example as the placeholde
     { "label": "In-memory", "value": "jdbc:h2:mem:test", "description": "A named in-memory database." },
     { "label": "Local file", "value": "jdbc:h2:./data/test" },
     { "label": "TCP server", "value": "jdbc:h2:tcp://localhost/~/test" }
+  ]
+}
+```
+
+### Declare `sql_dialect` (or `sql_syntax`)
+
+Always set `sql_dialect` to the closest preset, and add `sql_syntax` when no preset describes your engine. A plugin that declares neither (or only `generic`) still loads, but the host can't know how its SQL is tokenized, so it assumes the worst:
+
+- **AI/MCP read-only check.** Without a dialect, every query is lexed under every preset's rules, and it only counts as a single read statement when all of them agree. Reads that some dialect tokenizes differently are rejected as possibly unsafe (`unknown` or a write), for example queries containing:
+  - a `#` outside a string (a comment in MySQL, an operator such as `#>` in PostgreSQL);
+  - a backslash inside a string literal (`'C:\temp'`, `'it\'s'`), which only some dialects treat as an escape;
+  - double-quoted or backtick-quoted text whose meaning differs (a string in MySQL, an identifier elsewhere), or `[bracketed]` identifiers;
+  - `$$` / `$tag$` dollar-quoted bodies, `E'…'` strings, nested `/* /* */ */` comments or `/*! … */` executable comments;
+  - `--` not followed by a space (`1--1` is arithmetic in MySQL);
+  - a `;` that any dialect reads as a statement separator, even inside what your engine treats as a string or comment.
+- **Generated SQL and literals.** Filters, dumps, notebook cell CTEs and Copy as INSERT fall back to standard quoting (`'` doubled, backslashes left as is), and dumps write booleans as `1`/`0`. On an engine where `\` is an escape character this is wrong, so declare `mysql` (or `sql_syntax.string_escape`) there; on one that rejects `1`/`0` for a boolean column, declare `sql_syntax.boolean_literals`.
+
+### SQL Syntax (`sql_syntax`)
+
+`sql_dialect` picks one of the host's presets. When your engine lexes SQL differently from all of them (GoogleSQL's triple-quoted strings, `#` comments and procedural scripts, for example), describe the difference in `capabilities.sql_syntax`. It is data only: the host never runs code from it.
+
+- `extends` names the preset to start from. It defaults to `sql_dialect`, so most plugins set it explicitly when `sql_dialect` is only a fallback for older hosts.
+- Every other field is optional and overrides one rule of that preset. Leave a field out to keep the preset's rule.
+- Older hosts ignore `sql_syntax` and keep using `sql_dialect`, so set `sql_dialect` to the closest preset (e.g. `"mysql"` for GoogleSQL: backticks, `#` comments, backslash escapes).
+- An invalid field is logged and ignored (the preset's rule stays); the plugin always loads. Unknown fields are ignored too, so newer descriptors work on this host.
+- Without `sql_syntax`, a driver behaves exactly as before.
+
+| Field | Type | Default | Meaning |
+|-------|------|---------|---------|
+| `extends` | string | `sql_dialect` | Preset to extend: `postgres`, `mysql`, `mssql`, `sqlite`, `oracle` or `generic`. Any other value is ignored. |
+| `quotes` | array | preset | Replaces the quote rules. 1 to 8 objects with a unique `open`: `{ "open", "close"?, "kind", "escape"? }`. `open` is `'`, `"`, `` ` `` or `[`; `close` defaults to (and must equal) `open`, or `]` for `[`. `kind` is `"string"` or `"identifier"`. `escape` is `"double"` (`''`, default), `"backslash"` (`\'`, no doubling), `"both"` or `"none"`. |
+| `triple_quoted_strings` | bool | `false` | `'''…'''` and `"""…"""` strings that may span lines, for the `'` and `"` quotes of kind `string`. Escapes follow that quote's rule. |
+| `string_prefixes` | string[] | `[]` | Letter prefixes accepted before a `string` quote or triple quote, any case (e.g. `r`, `b`, `rb`, `br`). At most 8, each 1 or 2 ASCII letters. A raw `r` prefix keeps a backslash as text, but with a `backslash` escape the backslash still pairs with the next character, so `r'\''` is one literal. |
+| `hash_comments` | bool | preset (`mysql`: `true`) | `#` starts a line comment. |
+| `nested_block_comments` | bool | preset (`postgres`, `mssql`: `true`) | `/* … */` comments nest. |
+| `line_comment_requires_space` | bool | preset (`mysql`: `true`) | `--` only starts a comment when followed by whitespace (`1--1` is arithmetic). |
+| `script_blocks` | bool | `false` | Procedural blocks stay one statement: `BEGIN … END` (not `BEGIN TRANSACTION`), `EXCEPTION WHEN ERROR THEN`, `IF … END IF`, `LOOP`, `WHILE`, `REPEAT`, `FOR … DO`, `CASE … END CASE`, labels and `CREATE PROCEDURE` bodies. |
+| `dollar_quoting` | bool | preset (`postgres`: `true`) | `$tag$ … $tag$` strings. |
+| `string_escape` | string | preset (`mysql`: doubled quote plus doubled backslash; others: `"standard"`) | How the host writes string literals in filters, foreign-key filters, Copy as INSERT / IN list, clipboard import, dumps and notebook cell CTEs: `"standard"` (`'it''s'`) or `"backslash"` (`'it\'s'`, with `\\`, NUL (`\0`), `\n` and `\r` escaped too). On a `mysql` base (`extends: "mysql"`, or `sql_dialect: "mysql"` without `extends`) `"standard"` is ignored with a warning, since the engine still reads `\` as an escape character; `"backslash"` is allowed. |
+| `like_escape` | bool | `true` | Whether `LIKE … ESCAPE '!'` is supported. With `false`, literal LIKE filters escape `%`, `_` and `\` with a backslash (the engine's default LIKE escape) and omit `ESCAPE`. |
+| `boolean_literals` | string | each generator's default (dumps: `TRUE`/`FALSE` on `postgres`, `1`/`0` elsewhere; Copy as INSERT and filters: `TRUE`/`FALSE`; notebook cell CTEs: `'true'`) | How the host writes boolean values in SQL it generates: `"keywords"` (`TRUE` / `FALSE`) or `"numeric"` (`1` / `0`). Applies to dumps, Copy as INSERT / IN list, foreign-key and cell-value filters, filters on `BOOL` / `BOOLEAN` columns (`true`, `false`, `1`, `0`), notebook cell CTEs and the BOOLEAN columns a clipboard import creates. Declare `"keywords"` when the engine has no implicit integer-to-boolean coercion (GoogleSQL rejects `1` for a `BOOL` column). Any other value is ignored. |
+| `formatter` | string | preset | `sql-formatter` language for Format SQL: `bigquery`, `clickhouse`, `db2`, `db2i`, `duckdb`, `hive`, `mariadb`, `mysql`, `n1ql`, `plsql`, `postgresql`, `redshift`, `singlestoredb`, `snowflake`, `spark`, `sql`, `sqlite`, `tidb`, `transactsql` or `trino`. |
+| `keywords` | string[] | `[]` | Extra autocomplete keywords. At most 1000 entries of up to 64 characters: an ASCII letter or `_`, then letters, digits, `_`, `$`, `.` or single inner spaces (`"FOR SYSTEM_TIME AS OF"`, `"SAFE."`). |
+| `functions` | string[] | `[]` | Extra autocomplete function names, same limits as `keywords`. |
+
+Rules a descriptor can't change come from the preset it extends: `E'…'` strings (`postgres`), `DELIMITER` and `/*! … */` executable comments (`mysql`), `GO` batches (`mssql`), `/` terminators, PL/SQL blocks and `q'[…]'` quotes (`oracle`). Extend `generic` to start from none of them.
+
+For the AI/MCP read-only check, a declared syntax adds one tokenization pass to the passes of `sql_dialect` (every pass, for `generic`, `oracle` or no dialect). A query counts as a single read only when every pass agrees, so a descriptor can make the check stricter, never looser. A literal the fallback dialect reads differently, such as `'''it's; ok'''` with a `mysql` fallback, is treated as possibly unsafe.
+
+`sql_syntax` comes from the manifest only; [connection metadata](CONNECTION_METADATA.md) cannot override it. When metadata overrides `sql_dialect`, a descriptor without `extends` extends the overridden dialect.
+
+The GoogleSQL descriptor of a BigQuery driver, with `"sql_dialect": "mysql"` as the fallback for older hosts:
+
+```json
+{
+  "extends": "generic",
+  "quotes": [
+    {"open": "'", "kind": "string", "escape": "backslash"},
+    {"open": "\"", "kind": "string", "escape": "backslash"},
+    {"open": "`", "kind": "identifier", "escape": "backslash"}
+  ],
+  "triple_quoted_strings": true,
+  "string_prefixes": ["r", "b", "rb", "br"],
+  "hash_comments": true,
+  "nested_block_comments": false,
+  "line_comment_requires_space": false,
+  "script_blocks": true,
+  "dollar_quoting": false,
+  "string_escape": "backslash",
+  "like_escape": false,
+  "boolean_literals": "keywords",
+  "formatter": "bigquery",
+  "keywords": [
+    "QUALIFY", "PIVOT", "UNPIVOT", "TABLESAMPLE SYSTEM", "UNNEST",
+    "WITH OFFSET", "EXCEPT", "REPLACE", "WINDOW", "OVER", "PARTITION BY",
+    "CLUSTER BY", "OPTIONS", "FOR SYSTEM_TIME AS OF", "IGNORE NULLS",
+    "RESPECT NULLS", "UNION ALL", "UNION DISTINCT", "INTERSECT DISTINCT",
+    "EXCEPT DISTINCT", "MERGE", "WHEN MATCHED", "WHEN NOT MATCHED",
+    "WHEN NOT MATCHED BY SOURCE", "CREATE OR REPLACE TABLE",
+    "CREATE TEMP TABLE", "CREATE TEMP FUNCTION",
+    "CREATE OR REPLACE PROCEDURE", "CREATE SCHEMA", "RETURNS", "LANGUAGE js",
+    "EXPORT DATA", "LOAD DATA", "ASSERT", "DECLARE", "BEGIN",
+    "BEGIN TRANSACTION", "COMMIT TRANSACTION", "ROLLBACK TRANSACTION",
+    "EXCEPTION WHEN ERROR THEN", "ELSEIF", "END IF", "LOOP", "END LOOP",
+    "WHILE", "END WHILE", "REPEAT", "UNTIL", "END REPEAT", "FOR", "DO",
+    "END FOR", "END CASE", "LEAVE", "BREAK", "CONTINUE", "ITERATE", "RETURN",
+    "CALL", "EXECUTE IMMEDIATE", "RAISE USING MESSAGE", "INT64", "FLOAT64",
+    "NUMERIC", "BIGNUMERIC", "BOOL", "STRING", "BYTES", "DATE", "DATETIME",
+    "TIME", "TIMESTAMP", "INTERVAL", "GEOGRAPHY", "JSON", "STRUCT", "ARRAY",
+    "RANGE"
+  ],
+  "functions": [
+    "SAFE_CAST", "SAFE.", "SAFE_DIVIDE", "IF", "IFNULL", "COALESCE",
+    "NULLIF", "COUNTIF", "ARRAY_AGG", "STRING_AGG", "LOGICAL_AND",
+    "LOGICAL_OR", "ANY_VALUE", "APPROX_COUNT_DISTINCT", "APPROX_QUANTILES",
+    "APPROX_TOP_COUNT", "APPROX_TOP_SUM", "ROW_NUMBER", "RANK", "DENSE_RANK",
+    "LAG", "LEAD", "FIRST_VALUE", "LAST_VALUE", "NTILE", "PERCENTILE_CONT",
+    "ARRAY_LENGTH", "ARRAY_CONCAT", "ARRAY_TO_STRING", "GENERATE_ARRAY",
+    "GENERATE_DATE_ARRAY", "SPLIT", "FORMAT", "STARTS_WITH", "ENDS_WITH",
+    "CONTAINS_SUBSTR", "REGEXP_CONTAINS", "REGEXP_EXTRACT",
+    "REGEXP_EXTRACT_ALL", "REGEXP_REPLACE", "REGEXP_INSTR",
+    "FARM_FINGERPRINT", "GENERATE_UUID", "JSON_VALUE", "JSON_QUERY",
+    "JSON_VALUE_ARRAY", "JSON_QUERY_ARRAY", "JSON_EXTRACT",
+    "JSON_EXTRACT_SCALAR", "PARSE_JSON", "TO_JSON", "TO_JSON_STRING",
+    "CURRENT_DATE", "CURRENT_DATETIME", "CURRENT_TIMESTAMP", "EXTRACT",
+    "DATE_TRUNC", "DATE_ADD", "DATE_SUB", "DATE_DIFF", "DATETIME_TRUNC",
+    "DATETIME_DIFF", "TIMESTAMP_TRUNC", "TIMESTAMP_ADD", "TIMESTAMP_SUB",
+    "TIMESTAMP_DIFF", "FORMAT_DATE", "FORMAT_TIMESTAMP", "PARSE_DATE",
+    "PARSE_TIMESTAMP", "UNIX_SECONDS", "UNIX_MILLIS", "TIMESTAMP_SECONDS",
+    "TIMESTAMP_MILLIS", "LAST_DAY", "ST_GEOGPOINT", "ST_GEOGFROMTEXT",
+    "ST_ASTEXT", "ST_DISTANCE", "ST_DWITHIN", "ST_CONTAINS", "ST_INTERSECTS",
+    "ST_AREA", "ST_LENGTH", "ST_BUFFER"
   ]
 }
 ```
@@ -198,6 +334,38 @@ Since `map_inferred_type()` is a synchronous trait method that cannot issue an R
 - Lookup is case-insensitive (the host uppercases the input before matching)
 - If a type has no mapping, it passes through unchanged
 - If `type_mappings` is omitted or empty, all types pass through unchanged
+
+---
+
+### Connection Fields
+
+The optional `connection_fields` object adapts the host-owned inputs of the connection modal to a driver that does not use them as-is. Each of `host`, `port`, `username`, `password` and `database` accepts:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `hidden` | boolean | Hide the input for this driver. Defaults to `false`. |
+| `label` | string | Driver-specific label (max 80 characters). |
+| `placeholder` | string | Driver-specific placeholder (max 200 characters). |
+
+**Example for a cloud warehouse addressed by project id:**
+
+```json
+{
+  "connection_fields": {
+    "host": { "hidden": true },
+    "port": { "hidden": true },
+    "username": { "hidden": true },
+    "password": { "hidden": true },
+    "database": { "label": "Project ID", "placeholder": "billing-project" }
+  }
+}
+```
+
+**Rules:**
+- Overrides are presentation only: a hidden input is not rendered, but the value already saved for it is left untouched and still sent to the driver.
+- A hidden `database` input is not required on Test Connection or Save.
+- Hiding `host` also hides the "Load databases" action next to the database input.
+- Use the `connection-modal.extra_fields` slot for the inputs the driver needs instead, and `setSecretField` for credentials (see [SlotContext](#slotcontext)).
 
 ---
 
@@ -331,15 +499,18 @@ Add an optional `ui_extensions` array to your manifest:
     {
       "slot": "row-editor-sidebar.field.after",
       "module": "ui/field-preview.js",
+      "api_version": "0.1.1",
       "order": 50
     },
     {
       "slot": "data-grid.toolbar.actions",
-      "module": "ui/export-button.js"
+      "module": "ui/export-button.js",
+      "api_version": "0.1.1"
     },
     {
       "slot": "settings.plugin.before_settings",
       "module": "ui/auth-panel.js",
+      "api_version": "0.1.1",
       "driver": "my-plugin"
     }
   ]
@@ -354,6 +525,7 @@ Add an optional `ui_extensions` array to your manifest:
 | `module` | string | yes | Relative path to the pre-built IIFE JavaScript bundle inside the plugin folder. |
 | `order` | number | no | Sort order within the slot. Lower values render first. Default: `100`. |
 | `driver` | string | no | If set, the contribution is only active when the active connection's driver matches this value. Useful for plugins that should only appear for their own driver. |
+| `api_version` | string | recommended | Exact `@tabularis/plugin-api` version used to build the bundle. Incompatible bundles are skipped before execution. Omit only for legacy compatibility. |
 
 ### Available Slots
 
@@ -369,7 +541,7 @@ Add an optional `ui_extensions` array to your manifest:
 | `settings.plugin.actions` | Per-plugin actions in Settings modal | `targetPluginId` | Diagnostics, re-auth buttons |
 | `settings.plugin.before_settings` | Content above plugin settings form | `targetPluginId` | OAuth panels, status banners |
 | `connection-modal.connection_content` | Inside the connection form | `driver` | Custom connection fields |
-| `connection-modal.extra_fields` | Below host/port in the connection form | `driver`, `extra`, `setExtraField`, `credentialFieldsHidden`, `setCredentialFieldsHidden`, `passwordFieldHidden`, `setPasswordFieldHidden` | Plugin-specific connection fields (e.g. AWS region). `setCredentialFieldsHidden(true)` hides and clears the host username/password inputs for drivers that authenticate without a login; while hidden the host also ignores the login of an imported connection string and drops the stored password on save. `setPasswordFieldHidden(true)` hides and clears only the password input, so the username stays visible and keeps its value; while hidden the host ignores the password of an imported connection string and drops the stored password on save. The host resets both flags when the driver changes |
+| `connection-modal.extra_fields` | Below host/port in the connection form | `driver`, `extra`, `setExtraField`, `credentialFieldsHidden`, `setCredentialFieldsHidden`, `passwordFieldHidden`, `setPasswordFieldHidden`, `secretFields`, `setSecretField` | Plugin-specific connection fields (e.g. AWS region), including values stored per connection in the OS keychain. `setCredentialFieldsHidden(true)` hides and clears the host username/password inputs for drivers that authenticate without a login; while hidden the host also ignores the login of an imported connection string and drops the stored password on save. `setPasswordFieldHidden(true)` hides and clears only the password input, so the username stays visible and keeps its value; while hidden the host ignores the password of an imported connection string and drops the stored password on save. The host resets both flags when the driver changes |
 
 ### SlotContext
 
@@ -389,7 +561,43 @@ interface SlotContext {
 }
 ```
 
+For `connection-modal.extra_fields`, `setSecretField(key, value)` keeps the
+value out of `connections.json` and stores it under the saved connection in the
+OS keychain. Passing an empty value explicitly clears the entry. On edit,
+`secretFields[key]` exposes only `{ value, hasStoredValue, dirty }`: an existing
+secret is represented by `hasStoredValue` and is never returned to plugin UI.
+Keys are 1-64 ASCII letters, digits, `.`, `_` or `-`.
+
+At runtime the host resolves stored values into `params.extra[key]` before
+calling the driver (every RPC method, Test Connection, Load Databases and the
+MCP server), so the JSON-RPC method shapes remain backward compatible. Export
+with credentials and backups carry the values; duplicating a connection copies
+them; deleting it removes them; switching the connection to another driver
+drops them.
+
+A stored secret can be unavailable at runtime: the connections file was synced
+to a machine whose keychain does not have the entry, the keychain was reset, or
+it is locked or denies access. The host never fails the call for that. It logs
+a warning naming the key (never the value) and calls the driver with
+`params.extra[key]` unset, so the plugin must check for the value and return a
+clear error asking the user to set the credential again. Duplicating such a
+connection copies only the values that can be read, and an import skips secret
+keys with an invalid name instead of rejecting the whole file. Imported values
+are written to the keychain only after the connections file has been saved.
+
+Older Tabularis versions do not know `plugin_secret_keys` and drop it when they
+rewrite `connections.json`. After a downgrade (or with an older install sharing
+the same file) the keychain entries stay but are no longer referenced, so the
+plugin sees the secret as unset. Setting it again from the connection modal
+restores it.
+
+Both properties are optional in the public TypeScript contract. A plugin that
+also supports older hosts must guard their presence (for example by falling
+back to the host `password` input when `setSecretField` is undefined).
+
 ### Building UI Extension Bundles
+
+Installed UI extensions execute as trusted application code rather than sandboxed widgets. Review the [plugin UI extension trust model](../docs/security/plugin-ui-extensions.md) before distributing or installing third-party bundles.
 
 Plugin UI components must be pre-built as **IIFE bundles** (Immediately Invoked Function Expression). The host provides `React`, `ReactJSXRuntime`, and the plugin API as globals — your bundle must **not** bundle its own copies of these.
 
@@ -706,7 +914,7 @@ When a call exceeds the configured plugin call timeout, Tabularis stops waiting 
 
 ## 5. Required Methods
 
-Your plugin must respond to the following JSON-RPC methods. For unsupported features, return an empty array `[]` or a `-32601` (Method not found) error: return code `-32601` and a message containing `Method not found` (e.g. `Method not found: execute_query_batch`). Most fallbacks for optional methods match on the message; a few, such as `get_connection_metadata` and `get_table_query_template`, match on the code.
+Your plugin must respond to the following JSON-RPC methods. For unsupported features, return an empty array `[]` or a `-32601` (Method not found) error: return code `-32601` and a message containing `Method not found` (e.g. `Method not found: execute_query_batch`). Most fallbacks for optional methods match on the message; a few, such as `get_connection_metadata`, `get_table_query_template` and `get_column_stats`, match on the code.
 
 ### Connection
 
@@ -787,12 +995,19 @@ Get column information for a table.
     "default_value": null,
     "is_pk": true,
     "is_auto_increment": true,
+    "character_maximum_length": null,
+    "numeric_precision": null,
+    "numeric_scale": null,
     "comment": null
   }
 ]
 ```
 
 > **Metadata comments:** `comment` is optional in both `get_tables` and `get_columns`. Older plugins may omit it or return `null`; Tabularis treats both forms as “description unavailable”. This is an additive response field and does not require a manifest capability or `min_runtime_version`. When present, the host displays it in the schema inspector, explorer tooltips, and table-browse grid headers.
+>
+> **Type precision/length fields:** `character_maximum_length`, `numeric_precision`, and `numeric_scale` are optional additive fields (same backward-compatibility rules as `comment`). When present, Tabularis preserves them in generated `CREATE TABLE` DDL — e.g. `numeric(10,2)` or `varchar(50)` instead of the bare type name — and the host may surface them in the column inspector. Omit them or return `null` for types that have no such modifier.
+>
+> **Full column type:** `full_type` is an optional additive field (same backward-compatibility rules as `comment`) carrying the full declared type with its modifiers, e.g. `varchar(255)`, `decimal(10,2)`, `int unsigned` or `integer[]`. When present, the explorer's Columns list, the table schema view and the ER diagram show it instead of `data_type`; keep the base type name in `data_type`, since value handling, editing and DDL generation match on it. Send it only when it says more than `data_type`. Without it, the host shows `data_type` with `character_maximum_length` / `numeric_precision` / `numeric_scale` appended when present (e.g. `varchar(50)`, `numeric(10,2)`), so a plugin whose `data_type` already embeds the modifiers needs no change.
 >
 > **JSON / JSONB columns:** Set `data_type` to `"JSON"` or `"JSONB"` (matched case-insensitively) to make Tabularis render the cell with syntax highlighting and expose the JSON editor window. In `execute_query` row data, send the cell as either a native JSON value (object/array/scalar) or a JSON-formatted string — both are accepted. For text-typed columns that hold JSON, end users can opt in per connection via the **Detect JSON in text columns** setting; no plugin change required.
 
@@ -808,15 +1023,18 @@ Get foreign key relationships for a table.
 ```json
 [
   {
-    "constraint_name": "fk_user_id",
+    "name": "fk_user_id",
     "column_name": "user_id",
-    "referenced_table": "users",
-    "referenced_column": "id",
+    "ref_table": "users",
+    "ref_column": "id",
     "on_update": "CASCADE",
-    "on_delete": "SET NULL"
+    "on_delete": "SET NULL",
+    "seq_in_fk": 1
   }
 ]
 ```
+
+> **Composite foreign keys:** For a multi-column foreign key, return one entry per column, all sharing the same `name`; set `seq_in_fk` to the 1-based position of each column within its constraint. Tabularis groups entries by `name` (ordered by `seq_in_fk`, falling back to row order) and emits a single multi-column `FOREIGN KEY (a, b) REFERENCES t (x, y)` clause. `seq_in_fk` is optional and additive; older plugins may omit it for single-column FKs.
 
 ---
 
@@ -955,13 +1173,45 @@ List stored procedures and functions.
 ]
 ```
 
+##### Overloaded routines: `identity_args`
+
+A name does not identify a routine in every dialect. Where yours overloads, add
+`identity_args` to each entry with that routine's argument signature:
+
+```json
+[
+  { "name": "f", "routine_type": "FUNCTION", "identity_args": "" },
+  { "name": "f", "routine_type": "FUNCTION", "identity_args": "a integer" },
+  { "name": "f", "routine_type": "FUNCTION", "identity_args": "a text" }
+]
+```
+
+Tabularis labels the sidebar and palette entries with it, so overloads are
+distinguishable, and sends it back as `identity_args` on the two reads below and
+on the optional `get_routine_edit_script` and `drop_routine` management RPCs, so
+each one acts on the routine the user clicked. Without it, every read takes the
+first match and the reader cannot tell which one they got.
+
+Three rules, because the field is a key and not a label:
+
+- **Omit it where a name is enough.** MySQL and SQLite do; there is no overload
+  to disambiguate and an empty label is noise.
+- **An EMPTY string is a value, not an absence.** It is the signature of a
+  routine that takes no arguments, and it is what tells `f()` apart from
+  `f(a integer)`. Only a missing field means "this dialect does not overload".
+- **Round-trip it unchanged.** Tabularis treats it as opaque: it stores what you
+  send and sends it back verbatim. Use whatever your dialect accepts for
+  identifying one routine - the PostgreSQL driver uses
+  `pg_get_function_identity_arguments`, which `DROP`, `ALTER` and a catalog
+  lookup all take.
+
 ---
 
 #### `get_routine_parameters`
 
 Get parameters of a stored routine.
 
-**Params:** `{ "params": ConnectionParams, "schema": string | null, "routine": string }`
+**Params:** `{ "params": ConnectionParams, "schema": string | null, "routine": string, "identity_args": string | null }`
 
 **Result:**
 ```json
@@ -970,13 +1220,18 @@ Get parameters of a stored routine.
 ]
 ```
 
+`identity_args` is the signature your `get_routines` reported for the row the
+user clicked, or `null` where you reported none. Filter on it: a parameter list
+that mixes two overloads is worse than an empty one, because the Run dialog
+offers those arguments under one overload's name.
+
 ---
 
 #### `get_routine_definition`
 
 Get the SQL body of a stored routine.
 
-**Params:** `{ "params": ConnectionParams, "schema": string | null, "routine": string }`
+**Params:** `{ "params": ConnectionParams, "schema": string | null, "routine": string, "identity_args": string | null }`
 
 **Result:** `"BEGIN ... END"`
 
@@ -1392,15 +1647,158 @@ already-ingested manifest after updating the schema.
 
 ---
 
+### Column Statistics
+
+The data grid's column header menu has a **Column statistics** entry on table
+tabs. It opens a popover with the row count, NULL count, distinct count,
+min / max and the most frequent values of the column, for the rows that match
+the tab's current filter.
+
+Which source the host uses depends on the driver's capabilities:
+
+| Driver | Statistics come from |
+|--------|----------------------|
+| Plugin with `capabilities.column_stats: true` | the plugin's `get_column_stats` RPC |
+| Built-in driver, or plugin whose `sql_syntax.extends` or `sql_dialect` is `postgres`, `mysql` or `sqlite` | the host's generic SQL (`COUNT(*)`, `COUNT(DISTINCT col)`, `MIN` / `MAX`, then `GROUP BY col ORDER BY 2 DESC, 1 LIMIT 10`) |
+| Any other plugin | nowhere: the menu entry is hidden |
+
+"SQL-compatible" means an **explicitly declared** `sql_syntax.extends` or
+`sql_dialect` that the generic SQL runs on (a valid `extends` wins when both are set;
+an `extends` that isn't a known dialect is ignored, as for the syntax preset).
+Declaring neither doesn't count (the statement splitter treats it as
+`postgres`, but that is a splitting default, not a promise that the engine
+runs arbitrary SQL). `mssql` and `oracle` have no
+`LIMIT`, and `generic` promises no particular syntax, so those plugins need
+`column_stats` to get the popover. A plugin that borrows a dialect only for
+quoting or splitting (for example a non-SQL engine declaring `mysql` for
+backtick identifiers) should opt in, or its users get a failing query.
+
+`get_column_stats` is an **optional, additive**, read-only RPC, called only
+when `capabilities.column_stats` is `true`.
+
+**Params:**
+
+```json
+{
+  "params": { "driver": "surrealdb", "connection_id": "...", "database": "app" },
+  "request": {
+    "table": "orders",
+    "schema": null,
+    "column": "total",
+    "data_type": "decimal",
+    "filter": "status = 'open'",
+    "top_values_limit": 10,
+    "include": { "distinct": true, "min_max": true, "top_values": true }
+  }
+}
+```
+
+- `params` is the usual resolved `ConnectionParams`, with the tab's database.
+- `table`, `schema` and `column` are **unquoted identifiers**; the driver quotes
+  and escapes them. `schema` is null unless the driver has `schemas: true`.
+- `data_type` is the column type the grid shows, or null when unknown.
+- `filter` is the tab's current filter, a WHERE clause without the keyword,
+  exactly as the grid query applies it (so in the plugin's own dialect), or
+  null. Sort and LIMIT are not applied.
+- `include` says which optional parts to compute. The host turns parts off for
+  types where they make no sense (no min / max for text, no top values for
+  binary or JSON columns) and for **masked columns**, which never get min / max
+  or top values. Skip what isn't asked for; the host drops it anyway.
+- The request carries no session context: the tab's `sessionId` is not sent, so
+  session-local state (temporary tables, `SET search_path`) is not visible to
+  `get_column_stats`. The same applies to `get_table_query_template`.
+
+**Result:**
+
+```json
+{
+  "row_count": 120,
+  "null_count": 3,
+  "distinct_count": 40,
+  "min": 1.5,
+  "max": 980,
+  "top_values": [{ "value": 25, "count": 12 }, { "value": 30, "count": 9 }],
+  "sample_size": null
+}
+```
+
+- `row_count` and `null_count` are required unsigned integers (rows matching the
+  filter, and those where the column is NULL or missing), with
+  `null_count <= row_count`.
+- `distinct_count`, `min`, `max` and `top_values` may be null or omitted when not
+  computed. `min` / `max` and the top `value`s are any JSON value; the popover
+  shows strings as they are and other values as JSON.
+- `top_values` lists the most frequent non-NULL values, most frequent first, at
+  most `top_values_limit` of them. Clicking one filters the table by
+  `column = value` through the usual filter clause.
+- `sample_size` (optional): set it when `distinct_count`, `min`, `max` and
+  `top_values` were computed over a sample of that many non-NULL values instead
+  of all of them. `row_count` and `null_count` must stay exact. The popover then
+  says the value statistics come from a sample, computes the top value shares
+  against the sample and doesn't claim the column is unique.
+
+Compatibility:
+
+- Missing/false capability: no RPC is sent; the rules in the table above apply.
+- Remote JSON-RPC error **code** `-32601`: the host falls back to its generic SQL
+  when the plugin is SQL-compatible, and otherwise shows "doesn't provide column
+  statistics" in the popover. Transport errors, other remote errors and
+  malformed results are shown as errors.
+- The Tauri command `get_column_stats` returns the result or `null`; null is
+  the host's fallback signal, **not** a valid plugin success result.
+- Cancellation: closing the popover doesn't cancel the RPC (there is no
+  per-request cancel, and `cancel_query` would stop the whole connection). The
+  host drops a result that arrives after the popover closed. Keep the method
+  cheap on large tables, for example by sampling.
+- Built-in drivers are unchanged. Older hosts ignore the capability and never
+  call the method.
+- The capability is a static manifest opt-in, not a connection-metadata override.
+
+Registry rollout: as for `table_query_templates`, add an optional boolean
+`column_stats` (default false) to the driver kind's `capabilities.properties`
+in Tabularium before publishing a plugin that sets it.
+
+---
+
 ### DDL Generation
 
 These methods generate SQL statements. Tabularis may display the SQL to the user before executing it. When `get_tables` / `get_columns` return comments, the host preserves them in generated inspection SQL for MySQL-family dialects and dialects that use `COMMENT ON` (currently PostgreSQL and Oracle). Other dialects continue to receive the existing DDL without comments; no manifest change is required.
 
+**Connection context.** Every DDL generation request carries `params`
+(`ConnectionParams`) with the database the user is browsing already applied:
+in a multi-database connection `params.database` is the selected database (for
+example a project), not the first one saved on the connection. Plugins can use
+it to qualify names (`project.dataset.table`) or pick a dialect variant. The
+field is additive: older plugins that ignore it keep working. These are pure
+SQL builders: Tabularis does not open SSH/SSM/K8s tunnels for them, so
+`host`/`port` are the saved values (not a local tunnel endpoint). The keychain
+password, the connection URI and the plugin-owned secrets
+(`params.extra[key]`, see [`setSecretField`](#slotcontext)) are passed when
+they can be read; a secret that is missing or unreadable is left unset and the
+request is still sent. Build the SQL without connecting when you can. A builder
+that needs the backend (for example `get_drop_table_sql` looking up the table
+kind) must handle an unset credential by falling back to a generic statement or
+returning a clear error. Results are an array of statements, executed in
+order.
+
+`ColumnDefinition`:
+
+```json
+{ "name": "email", "data_type": "VARCHAR(255)", "is_nullable": true, "is_pk": false,
+  "is_auto_increment": false, "default_value": null, "comment": "Primary contact address" }
+```
+
+`comment` is optional and only present when the user entered a description
+(the field is shown only when the plugin declares `capabilities.column_comments`).
+In `get_alter_column_sql`, compare `old_column.comment` with
+`new_column.comment`: a missing `new_column.comment` while the old one was set
+means the description was cleared.
+
 #### `get_create_table_sql`
 
-**Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string }`
+**Params:** `{ "params": ConnectionParams, "schema": string | null, "table_name": string, "columns": ColumnDefinition[] }`
 
-**Result:** `"CREATE TABLE users (...)"`
+**Result:** `["CREATE TABLE users (...)"]`
 
 ---
 
@@ -1408,31 +1806,65 @@ These methods generate SQL statements. Tabularis may display the SQL to the user
 
 **Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string, "column": ColumnDefinition }`
 
-**Result:** `"ALTER TABLE users ADD COLUMN ..."`
+**Result:** `["ALTER TABLE users ADD COLUMN ..."]`
 
 ---
 
 #### `get_alter_column_sql`
 
-**Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string, "column": ColumnDefinition }`
+**Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string, "old_column": ColumnDefinition, "new_column": ColumnDefinition }`
 
-**Result:** `"ALTER TABLE users MODIFY COLUMN ..."`
+**Result:** `["ALTER TABLE users MODIFY COLUMN ..."]`
 
 ---
 
 #### `get_create_index_sql`
 
-**Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string, "index": IndexDefinition }`
+**Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string, "index_name": string, "columns": string[], "is_unique": boolean }`
 
-**Result:** `"CREATE INDEX idx_email ON users(email)"`
+**Result:** `["CREATE INDEX idx_email ON users(email)"]`
 
 ---
 
 #### `get_create_foreign_key_sql`
 
-**Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string, "fk": ForeignKeyDefinition }`
+**Params:** `{ "params": ConnectionParams, "schema": string | null, "table": string, "fk_name": string, "column": string, "ref_table": string, "ref_column": string, "on_delete": string | null, "on_update": string | null }`
 
-**Result:** `"ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)"`
+**Result:** `["ALTER TABLE orders ADD CONSTRAINT fk_user FOREIGN KEY (user_id) REFERENCES users(id)"]`
+
+---
+
+#### `routine_create_template`
+
+Optional. Returns the editor template for a new routine. A `-32601` falls back
+to a generic `CREATE PROCEDURE`/`CREATE FUNCTION` skeleton.
+
+**Params:** `{ "params": ConnectionParams, "schema": string | null, "routine_type": "PROCEDURE" | "FUNCTION" }`
+
+**Result:** `"CREATE PROCEDURE my_routine() ..."`
+
+---
+
+#### `get_drop_table_sql`
+
+Optional, and only called when the manifest declares
+`capabilities.drop_table_sql: true`. Returns the statement the explorer runs
+when the user drops a table, for engines where a plain `DROP TABLE` is wrong
+for some table kinds (for example `DROP SNAPSHOT TABLE` or
+`DROP EXTERNAL TABLE`). `database` is the database the user is browsing (also
+applied to `params.database`), or `null`.
+
+**Params:** `{ "params": ConnectionParams, "table": string, "schema": string | null, "database": string | null }`
+
+**Result:** ``"DROP SNAPSHOT TABLE `project.dataset.daily`"``
+
+Return `null` (or a `-32601` Method not found error) to let Tabularis build its
+generic `DROP TABLE <quoted schema>.<quoted table>` with your
+`identifier_quote`. A blank string or any non-string result (an array, an
+object, ...) is ignored the same way, with a warning in the host log. Any other
+error is shown to the user and nothing is executed. Plugins without the
+capability, and built-in drivers, never receive this call; older hosts ignore
+the flag and always run the generic statement.
 
 ---
 

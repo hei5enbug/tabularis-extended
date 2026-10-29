@@ -426,23 +426,17 @@ async fn 서비스를_거친_결과도_toon_출력_형식을_따른다() {
 async fn database와_schema를_쓰면_서비스를_거쳐도_실제_값을_알린다() {
     // given
     let served = Served::new().await;
-    served
-        .harness
-        .state
-        .databases
-        .lock()
-        .unwrap()
-        .push("other".into());
+    // A caller can only pick a database the saved connection already selects.
     // when
     let (result, audit) = served
         .run(
             &AppConfig::default(),
-            json!({"query":"SELECT 1","database":"other","schema":"app"}),
+            json!({"query":"SELECT 1","database":"fixture","schema":"app"}),
         )
         .await;
     // then
     result.unwrap();
-    assert_eq!(audit.effective_database.as_deref(), Some("other"));
+    assert_eq!(audit.effective_database.as_deref(), Some("fixture"));
     assert_eq!(audit.effective_schema.as_deref(), Some("app"));
     assert_eq!(
         served
@@ -453,7 +447,7 @@ async fn database와_schema를_쓰면_서비스를_거쳐도_실제_값을_알�
             .unwrap()
             .last()
             .unwrap(),
-        "other"
+        "fixture"
     );
 }
 

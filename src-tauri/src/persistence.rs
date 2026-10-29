@@ -1,4 +1,4 @@
-use crate::models::{ConnectionGroup, ConnectionsFile, SavedConnection};
+use crate::models::{ConnectionGroup, ConnectionParams, ConnectionsFile, SavedConnection};
 use crate::services::{
     contracts::{ErrorCode, Outcome},
     error::{failure, ServiceResult},
@@ -366,6 +366,9 @@ fn publish_connections(
     let mut sanitized = file.clone();
     advance_changed_revisions(previous, &mut sanitized);
     for connection in &mut sanitized.connections {
+        for key in &connection.plugin_secret_keys {
+            connection.params.extra.remove(key);
+        }
         if connection.params.save_in_keychain.unwrap_or(false) {
             connection.params.password = None;
             connection.params.ssh_password = None;
@@ -398,6 +401,53 @@ pub fn transact_connections<T>(
         publish_connections(path, &file, &raw, &previous)?;
     }
     Ok(result)
+}
+
+/// Writes `contents` so that, on Unix, the file is readable and writable only
+/// by the current user (`0o600`). An existing file is tightened to that mode
+/// as well. Other platforms fall back to a normal write.
+pub fn write_private_file(path: &Path, contents: impl AsRef<[u8]>) -> Result<(), String> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        // `mode` only applies when the file is created, so tighten an existing
+        // file before the new contents land in it.
+        if path.exists() {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| e.to_string())?;
+        file.write_all(contents.as_ref()).map_err(|e| e.to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, contents).map_err(|e| e.to_string())
+    }
+}
+
+/// Keeps connection secrets out of the config file after a successful keychain
+/// write. When the keychain is unavailable, the secrets stay on `params` and
+/// `save_in_keychain` is cleared so the file is the source of truth and the
+/// save can still succeed.
+pub fn apply_secret_persistence(params: &mut ConnectionParams, keychain_stored: bool) {
+    if !params.save_in_keychain.unwrap_or(false) {
+        return;
+    }
+    if keychain_stored {
+        params.password = None;
+        params.ssh_password = None;
+        params.ssh_key_passphrase = None;
+    } else {
+        params.save_in_keychain = Some(false);
+    }
 }
 
 /// Fields of `raw` the current binary's structs do not know: anything present

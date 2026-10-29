@@ -14,6 +14,7 @@ fn event(id: &str, connection: &str, status: &str, query: &str) -> AiActivityEve
         tool: "query.execute".into(),
         connection_id: Some(connection.into()),
         connection_name: None,
+        database: None,
         query: Some(query.into()),
         query_kind: Some("select".into()),
         duration_ms: 5,

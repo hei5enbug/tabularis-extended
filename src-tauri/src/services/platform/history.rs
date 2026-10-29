@@ -114,6 +114,7 @@ impl QueryHistory {
                 tool: meta.operation.clone(),
                 connection_id: meta.connection_id.clone(),
                 connection_name: None,
+                database: None,
                 query_kind: query
                     .as_deref()
                     .map(|query| ai_activity::classify_query_kind(query).to_owned()),

@@ -295,6 +295,7 @@ async fn stdio(
 }
 
 pub async fn run_mcp() -> i32 {
+    crate::mcp::termination::stop_plugins_on_termination_signal();
     let signal = CancellationSignal::default();
     let control = signal.clone();
     let interrupt = tokio::spawn(async move {

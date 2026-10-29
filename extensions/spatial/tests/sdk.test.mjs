@@ -22,7 +22,7 @@ test('저장소 안의 SDK 파일과 라이선스가 고정된 출처 원장과 
   // when
   const actual = verifySdk(root);
   // then
-  assert.equal(actual.provenance.files.length, 22);
+  assert.equal(actual.provenance.files.length, 23);
   assert.equal(actual.provenance.api_version, '0.2.0');
   assert.equal(actual.provenance.service_protocol, 1);
 });

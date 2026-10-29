@@ -9,7 +9,10 @@ use crate::config::{
 use crate::credential_cache;
 use crate::drivers::driver_trait::{DatabaseDriver, SqlDialect};
 use crate::drivers::registry as driver_registry;
+#[cfg(test)]
+use crate::drivers::{mysql, postgres, sqlite};
 use crate::heartbeat;
+use crate::keychain_utils;
 use crate::models::{ConnectionParams, K8sConnection, SshConnection};
 use crate::paths;
 use crate::persistence;
@@ -19,18 +22,25 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod cooldown;
+mod database_scope;
 pub mod install;
+mod keychain;
 mod output;
 pub mod preflight;
 pub mod protocol;
 pub mod service_adapter;
 mod service_route;
+pub(crate) mod termination;
 use cooldown::{DISABLE_CHECK_COOLDOWN, RELOAD_COOLDOWN};
+use database_scope::{reject_unsupported_database_override, select_listed_database};
+use keychain::{read_stored_secret, StoredSecret};
 use output::{OutputFormatError, ToolOutputFormat};
 use protocol::*;
 
 #[cfg(test)]
 mod golden_tests;
+#[cfg(test)]
+mod keychain_tests;
 #[cfg(test)]
 mod output_tests;
 #[cfg(test)]
@@ -43,6 +53,7 @@ struct CallAudit {
     tool: String,
     connection_id: Option<String>,
     connection_name: Option<String>,
+    database: Option<String>,
     query: Option<String>,
     query_kind: Option<String>,
     rows: Option<usize>,
@@ -61,6 +72,7 @@ impl CallAudit {
             tool: tool.to_string(),
             connection_id: None,
             connection_name: None,
+            database: None,
             query: None,
             query_kind: None,
             rows: None,
@@ -162,11 +174,10 @@ pub(crate) async fn expand_ssh_params_for_mcp_in(
     }
 
     if ssh.save_in_keychain.unwrap_or(false) {
-        let cache = std::sync::Arc::new(credential_cache::CredentialCache::default());
         let id = ssh.id.clone();
         let (pwd_r, pass_r) = tokio::task::spawn_blocking(move || {
-            let pwd = credential_cache::get_ssh_password_cached(&cache, &id);
-            let pass = credential_cache::get_ssh_key_passphrase_cached(&cache, &id);
+            let pwd = keychain_utils::find_ssh_password(&id);
+            let pass = keychain_utils::find_ssh_key_passphrase(&id);
             (pwd, pass)
         })
         .await
@@ -176,12 +187,19 @@ pub(crate) async fn expand_ssh_params_for_mcp_in(
             data: None,
         })?;
 
-        if let Ok(v) = pwd_r {
+        // Only password auth can't do without its secret. A key may not be
+        // encrypted, so a failed passphrase read is left to the SSH layer.
+        let owner = format!("SSH connection \"{}\"", ssh.name);
+        let password_auth = ssh.auth_type.as_deref() == Some("password");
+        if let Some(v) =
+            read_stored_secret(pwd_r, StoredSecret::SshPassword, &owner, password_auth)?
+        {
             if !v.trim().is_empty() {
                 ssh.password = Some(v);
             }
         }
-        if let Ok(v) = pass_r {
+        if let Some(v) = read_stored_secret(pass_r, StoredSecret::SshKeyPassphrase, &owner, false)?
+        {
             if !v.trim().is_empty() {
                 ssh.key_passphrase = Some(v);
             }
@@ -295,19 +313,19 @@ async fn resolve_db_params(
     // connect — never from the keychain, where a stale token would survive.
     let iam_auth = conn.params.use_iam_auth.unwrap_or(false);
     if !iam_auth && conn.params.save_in_keychain.unwrap_or(false) {
-        let cache = std::sync::Arc::new(credential_cache::CredentialCache::default());
         let id = conn.id.clone();
-        let pwd = tokio::task::spawn_blocking(move || {
-            credential_cache::get_db_password_cached(&cache, &id)
-        })
-        .await
-        .map_err(|e| JsonRpcError {
-            code: -32000,
-            message: e.to_string(),
-            data: None,
-        })?;
+        let pwd = tokio::task::spawn_blocking(move || keychain_utils::find_db_password(&id))
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: e.to_string(),
+                data: None,
+            })?;
 
-        if let Ok(p) = pwd {
+        // A missing entry keeps the password unset as before, but a keychain
+        // failure must not reach the driver as an empty password.
+        let owner = format!("connection \"{}\"", conn.name);
+        if let Some(p) = read_stored_secret(pwd, StoredSecret::Password, &owner, true)? {
             if !p.trim().is_empty() {
                 conn.params.password = Some(p);
             }
@@ -326,10 +344,27 @@ async fn resolve_db_params(
     // password branches above: the URI has its own keychain entry and its own
     // marker, so it must not depend on how the password happens to be stored.
     if conn.params.connection_uri_in_keychain.unwrap_or(false) {
-        let cache = std::sync::Arc::new(credential_cache::CredentialCache::default());
         let id = conn.id.clone();
-        let uri = tokio::task::spawn_blocking(move || {
-            credential_cache::get_connection_uri_cached(&cache, &id, true)
+        let uri = tokio::task::spawn_blocking(move || keychain_utils::find_connection_uri(&id))
+            .await
+            .map_err(|e| JsonRpcError {
+                code: -32000,
+                message: e.to_string(),
+                data: None,
+            })?;
+        let owner = format!("connection \"{}\"", conn.name);
+        if let Some(value) = read_stored_secret(uri, StoredSecret::ConnectionUri, &owner, true)? {
+            conn.params.connection_uri = Some(value);
+        }
+    }
+
+    // Plugin-owned secrets live only in the keychain and must reach the
+    // plugin driver through `params.extra`, exactly as in the app.
+    if !conn.plugin_secret_keys.is_empty() {
+        conn = tokio::task::spawn_blocking(move || {
+            let cache = credential_cache::CredentialCache::default();
+            crate::plugin_secrets::hydrate_connection(&cache, &mut conn);
+            conn
         })
         .await
         .map_err(|e| JsonRpcError {
@@ -337,9 +372,6 @@ async fn resolve_db_params(
             message: e.to_string(),
             data: None,
         })?;
-        if let Ok(Some(value)) = uri {
-            conn.params.connection_uri = Some(value);
-        }
     }
 
     let expanded = expand_ssh_params_for_mcp(&conn.params).await?;
@@ -358,20 +390,14 @@ async fn resolve_db_params(
 /// MCP can only reach mysql/sqlite connections — every other driver fails
 /// with "Unsupported driver".
 pub(crate) async fn register_drivers_for_mcp() {
-    driver_registry::register_startup_drivers(
-        plugins::manager::reload_plugins_from_disk_config(),
+    if let Err(error) = crate::runtime::bootstrap::bootstrap_application(
+        crate::runtime::RuntimeContext::system(),
+        crate::runtime::bootstrap::BootstrapOptions::default(),
     )
-    .await;
-
-    // Must run after driver registration above — the migration resolves each
-    // connection's driver dialect via the same registry, so it needs plugin
-    // drivers already loaded. This is the standalone MCP process's own entry
-    // point for a migration that previously only ran from the GUI process's
-    // Tauri commands (issue #639) — never blocks server startup on failure.
-    let conn_path = paths::resolve_connections_path(&paths::get_app_config_dir());
-    crate::connection_migrations::migrate_postgres_ssl_mode_spelling_at_path(&conn_path)
-        .await
-        .ok();
+    .await
+    {
+        log::error!("Failed to bootstrap MCP application services: {error}");
+    }
 }
 
 /// Resolve the driver for an MCP-known connection. Returns the connection,
@@ -840,6 +866,7 @@ fn emit_audit(
         tool: audit.tool.clone(),
         connection_id: audit.connection_id.clone(),
         connection_name: audit.connection_name.clone(),
+        database: audit.database.clone(),
         query: audit.query.clone(),
         query_kind: audit.query_kind.clone(),
         duration_ms: start.elapsed().as_millis() as u64,
@@ -953,13 +980,7 @@ async fn select_database(
             message,
             data: None,
         })?;
-    if !listed.iter().any(|name| name == database) {
-        return Err(invalid(
-            "INVALID_ARGUMENT: database is not one the driver lists for this connection",
-        ));
-    }
-    params.database = crate::models::DatabaseSelection::Single(database.to_string());
-    Ok(())
+    select_listed_database(params, &listed, database)
 }
 
 /// A tool result whose payload also tells the effective database and schema
@@ -1054,6 +1075,13 @@ async fn tool_list_connections(
     tool_result(&json!(list), format)
 }
 
+/// The `database` argument of a tool call, if the caller named one.
+fn database_arg(args: &serde_json::Map<String, Value>) -> Option<&str> {
+    args.get("database")
+        .and_then(|v| v.as_str())
+        .filter(|d| !d.is_empty())
+}
+
 async fn tool_list_tables(
     args: &serde_json::Map<String, Value>,
     config: &AppConfig,
@@ -1075,6 +1103,9 @@ async fn tool_list_tables(
     let (conn, mut db_params, driver) =
         resolve_db_driver(conn_id, config.active_external_drivers.as_deref()).await?;
     audit.connection_name = Some(conn.name.clone());
+    let database = database_arg(args);
+    audit.database = database.map(str::to_string);
+    reject_unsupported_database_override(database, &driver.manifest().capabilities)?;
     select_database(args, &driver, &mut db_params).await?;
 
     let effective_schema = resolve_default_schema(&driver, schema);
@@ -1157,6 +1188,9 @@ async fn tool_describe_table(
     let (conn, mut db_params, driver) =
         resolve_db_driver(conn_id, config.active_external_drivers.as_deref()).await?;
     audit.connection_name = Some(conn.name.clone());
+    let database = database_arg(args);
+    audit.database = database.map(str::to_string);
+    reject_unsupported_database_override(database, &driver.manifest().capabilities)?;
     select_database(args, &driver, &mut db_params).await?;
 
     let effective_schema = resolve_default_schema(&driver, schema);
@@ -1243,13 +1277,22 @@ async fn tool_run_query(
 
     audit.connection_id = Some(conn_id.to_string());
     audit.query = Some(query.to_string());
-    let kind = ai_activity::classify_query_kind(query);
-    audit.query_kind = Some(kind.to_string());
+    // Dialect-agnostic first, so the audit entry has a kind even when the
+    // connection cannot be resolved; refined below once the driver's
+    // `sql_dialect` / `sql_syntax` are known.
+    audit.query_kind = Some(ai_activity::classify_query_kind(query).to_string());
 
     let schema = args.get("schema").and_then(|v| v.as_str());
     let (conn, mut db_params, driver) =
         resolve_db_driver(conn_id, config.active_external_drivers.as_deref()).await?;
+    let capabilities = driver.manifest().capabilities.clone();
+    let kind = ai_activity::classify_query_kind_for_capabilities(query, Some(&capabilities));
+    audit.query_kind = Some(kind.to_string());
     audit.connection_name = Some(conn.name.clone());
+    let database = database_arg(args);
+    audit.database = database.map(str::to_string);
+    // File, folder and single-database drivers reject the name before any driver access.
+    reject_unsupported_database_override(database, &capabilities)?;
 
     if approval_mode_of(config) != "all" {
         let request = service_route::Request {
@@ -1339,6 +1382,7 @@ async fn tool_run_query(
             session_id: session_id.to_string(),
             connection_id: conn.id.clone(),
             connection_name: conn.name.clone(),
+            database: database.map(str::to_string),
             query: query.to_string(),
             query_kind: kind.to_string(),
             client_hint: ai_activity::get_client_hint(),
@@ -1381,7 +1425,10 @@ async fn tool_run_query(
                         // payload) and slip past the gate that runs against
                         // the *original* query above.
                         effective_query = edited.to_string();
-                        let new_kind = ai_activity::classify_query_kind(&effective_query);
+                        let new_kind = ai_activity::classify_query_kind_for_capabilities(
+                            &effective_query,
+                            Some(&capabilities),
+                        );
                         audit.query = Some(effective_query.clone());
                         audit.query_kind = Some(new_kind.to_string());
 
@@ -1452,7 +1499,23 @@ async fn tool_run_query(
         }
     }
 
-    let execution = driver.execute_query(&db_params, &effective_query, Some(max_rows), 1, schema);
+    // A query that reached this point without the user approving it is only
+    // here because it was classified as a read, and so is anything sent to a
+    // read-only connection. Classification cannot see what a function call
+    // does, so have the database refuse writes too.
+    let run_read_only = config::is_connection_readonly(config, &conn.id)
+        || (approval_mode_of(config) != "off" && !needs_approval);
+    let execution = async {
+        if run_read_only {
+            driver
+                .execute_read_only_query(&db_params, &effective_query, Some(max_rows), 1, schema)
+                .await
+        } else {
+            driver
+                .execute_query(&db_params, &effective_query, Some(max_rows), 1, schema)
+                .await
+        }
+    };
     let result = match timeout_ms {
         Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms), execution)
             .await

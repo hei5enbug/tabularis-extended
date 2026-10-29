@@ -1,4 +1,6 @@
 use super::*;
+use crate::logger::test_env::with_rust_log;
+use log::LevelFilter;
 
 fn checked(arguments: &[&str]) -> Result<Args, String> {
     let args = Args::try_parse_from(arguments).map_err(|_| "Invalid arguments".to_owned())?;
@@ -200,16 +202,45 @@ fn 드라이버_목록_플래그는_psn_인자가_있어도_파싱한다() {
     let actual = arguments.map(|arguments| parse_args(argv(&arguments)).unwrap());
     // then
     assert!(actual[0].list_drivers && actual[1].list_drivers);
-    assert!(actual.iter().all(|args| args.command.is_none() && !args.mcp));
-    assert!(!actual[2].list_drivers, "an unknown argument falls back to GUI defaults");
+    assert!(actual
+        .iter()
+        .all(|args| args.command.is_none() && !args.mcp));
+    assert!(
+        !actual[2].list_drivers,
+        "an unknown argument falls back to GUI defaults"
+    );
 }
 #[test]
 fn 드라이버_목록은_기본_실행과_서비스_모드에서_꺼져_있고_서비스와는_배타적이다() {
     // given
     let default = parse_args(argv(&["tabularis-extended"])).unwrap();
     let service = parse_args(argv(&["tabularis-extended", "service", "--stdio"])).unwrap();
-    let mixed = parse_args(argv(&["tabularis-extended", "--list-drivers", "service", "--stdio"]));
+    let mixed = parse_args(argv(&[
+        "tabularis-extended",
+        "--list-drivers",
+        "service",
+        "--stdio",
+    ]));
     // then
     assert!(!default.list_drivers && !service.list_drivers);
     assert!(mixed.is_err());
+}
+
+#[test]
+fn debug_flag_raises_the_log_level_to_debug() {
+    let args = Args::try_parse_from(["tabularis", "--debug"]).unwrap();
+    assert_eq!(args.log_level(), LevelFilter::Debug);
+}
+
+#[test]
+fn log_level_stays_info_without_the_debug_flag() {
+    // `Args::log_level` consults `RUST_LOG` whenever `--debug` is absent, so this
+    // test has to own the variable: clear it under the same shared lock the
+    // logger tests use. Without that it races with them, and it fails outright
+    // whenever `RUST_LOG` is set in the environment (`RUST_LOG=warn cargo test`
+    // reports `left: Warn, right: Info`).
+    with_rust_log(None, || {
+        let args = Args::try_parse_from(["tabularis"]).unwrap();
+        assert_eq!(args.log_level(), LevelFilter::Info);
+    });
 }

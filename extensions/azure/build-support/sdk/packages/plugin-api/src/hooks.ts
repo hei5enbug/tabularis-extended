@@ -1,22 +1,22 @@
-import { getHost } from "./host";
+import {getHost} from './host';
 import type {
-  UsePluginConnectionReturn,
-  UsePluginModalReturn,
-  UsePluginQueryReturn,
-  UsePluginSettingReturn,
-  UsePluginThemeReturn,
-  UsePluginToastReturn,
-  PluginTranslator,
-  UsePluginServiceReturn,
-  UsePluginAssetsReturn,
-} from "./types";
+    UsePluginConnectionReturn,
+    UsePluginModalReturn,
+    UsePluginQueryReturn,
+    UsePluginSettingReturn,
+    UsePluginThemeReturn,
+    UsePluginToastReturn,
+    PluginTranslator,
+    UsePluginServiceReturn,
+    UsePluginAssetsReturn,
+} from './types';
 
 export function usePluginService(): UsePluginServiceReturn {
-  return getHost().usePluginService();
+    return getHost().usePluginService();
 }
 
 export function usePluginAssets(pluginId: string): UsePluginAssetsReturn {
-  return getHost().usePluginAssets(pluginId);
+    return getHost().usePluginAssets(pluginId);
 }
 
 /**
@@ -25,21 +25,21 @@ export function usePluginAssets(pluginId: string): UsePluginAssetsReturn {
  * `{ columns, rows }` or throws a plain Error with the host's error message.
  */
 export function usePluginQuery(): UsePluginQueryReturn {
-  return getHost().usePluginQuery();
+    return getHost().usePluginQuery();
 }
 
 /**
  * Active connection metadata. Fields are null when no connection is active.
  */
 export function usePluginConnection(): UsePluginConnectionReturn {
-  return getHost().usePluginConnection();
+    return getHost().usePluginConnection();
 }
 
 /**
  * Show system-level info/warning/error notifications.
  */
 export function usePluginToast(): UsePluginToastReturn {
-  return getHost().usePluginToast();
+    return getHost().usePluginToast();
 }
 
 /**
@@ -47,7 +47,7 @@ export function usePluginToast(): UsePluginToastReturn {
  * Pass your plugin id (the one declared in the `.tabularium` manifest).
  */
 export function usePluginSetting(pluginId: string): UsePluginSettingReturn {
-  return getHost().usePluginSetting(pluginId);
+    return getHost().usePluginSetting(pluginId);
 }
 
 /**
@@ -55,21 +55,21 @@ export function usePluginSetting(pluginId: string): UsePluginSettingReturn {
  * namespace — the host registers it automatically from locales/*.json.
  */
 export function usePluginTranslation(pluginId: string): PluginTranslator {
-  return getHost().usePluginTranslation(pluginId);
+    return getHost().usePluginTranslation(pluginId);
 }
 
 /**
  * Open and close host-managed modals with custom content.
  */
 export function usePluginModal(): UsePluginModalReturn {
-  return getHost().usePluginModal();
+    return getHost().usePluginModal();
 }
 
 /**
  * Current theme metadata plus the full design-token color map.
  */
 export function usePluginTheme(): UsePluginThemeReturn {
-  return getHost().usePluginTheme();
+    return getHost().usePluginTheme();
 }
 
 /**
@@ -77,5 +77,5 @@ export function usePluginTheme(): UsePluginThemeReturn {
  * Plugin components should use this instead of window.open for external URLs.
  */
 export async function openUrl(url: string): Promise<void> {
-  return getHost().openUrl(url);
+    return getHost().openUrl(url);
 }

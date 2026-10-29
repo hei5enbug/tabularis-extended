@@ -24,7 +24,7 @@
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+
 use url::Url;
 
 /// Tauri-managed state holding the most recent install request that has not
@@ -140,59 +140,6 @@ fn is_valid_slug(s: &str) -> bool {
     bytes.iter().all(valid_char) && bytes.first().is_some_and(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
-/// Dispatch a single URL to the frontend. Called from:
-///   * the deep-link plugin's `on_open_url` handler (warm handoff),
-///   * the cold-start `get_current()` path on app boot,
-///   * the `single_instance` callback when a second launch forwards args.
-///
-/// We both **emit** an event (so an already-mounted listener reacts
-/// immediately) AND **stash** the request in `PendingInstall` so a fresh
-/// React subscription can drain it on mount. Without the stash a cold-start
-/// URL is delivered before the webview's event listener exists and silently
-/// dropped.
-pub fn handle_url(app: &AppHandle, raw: &str) {
-    let Some(req) = parse_install_url(raw) else {
-        log::info!("Ignoring tabularis-extended:// URL: {}", raw);
-        return;
-    };
-
-    // Stash for cold-start replay; the frontend pulls this on mount via
-    // `consume_pending_deep_link_install`.
-    if let Some(state) = app.try_state::<PendingInstall>() {
-        if let Ok(mut slot) = state.0.lock() {
-            *slot = Some(req.clone());
-        }
-    }
-
-    if let Err(err) = app.emit(PLUGIN_INSTALL_EVENT, &req) {
-        log::error!(
-            "Failed to emit {}: {} (request: {:?})",
-            PLUGIN_INSTALL_EVENT,
-            err,
-            req
-        );
-    } else {
-        log::info!("Emitted {} for slug '{}'", PLUGIN_INSTALL_EVENT, req.slug);
-    }
-
-    // Focus the main window so the user sees the confirmation modal —
-    // a second launch may otherwise leave Tabularis in the background.
-    if let Some(win) = app.get_webview_window("main") {
-        let _ = win.unminimize();
-        let _ = win.set_focus();
-    }
-}
-
-/// Drains the pending deep-link install request, if any. Called from the
-/// frontend immediately after the listener mounts to recover URLs that
-/// arrived during cold-start before the event subscription existed.
-#[tauri::command]
-pub fn consume_pending_deep_link_install(
-    state: tauri::State<'_, PendingInstall>,
-) -> Option<PluginInstallRequest> {
-    state.0.lock().ok().and_then(|mut slot| slot.take())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,8 +191,8 @@ mod tests {
             config["plugins"]["deep-link"]["desktop"]["schemes"],
             serde_json::json!([DEEP_LINK_SCHEME])
         );
-        let lib = include_str!("../lib.rs");
-        assert!(lib.contains("deep_link.register(plugins::deep_link::DEEP_LINK_SCHEME)"));
+        let lib = include_str!("../transport/desktop/mod.rs");
+        assert!(lib.contains("deep_link.register(crate::plugins::deep_link::DEEP_LINK_SCHEME)"));
         assert!(!lib.contains("register(\"tabularis\")"));
         assert!(lib.contains("starts_with(&scheme_prefix)"));
         assert!(!lib.contains("starts_with(\"tabularis:\")"));
