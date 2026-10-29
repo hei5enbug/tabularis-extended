@@ -373,3 +373,50 @@ The tests use the emulator's public development key and an HTTP endpoint confine
 saved connections or Azure credentials, and they do not validate Entra sign-in or refresh, Azure RBAC, RU charges,
 index policy, or native cloud continuation. The workflow runs `pnpm test:containers` only on the Linux runner of
 `ext-azure.yml`; this local observation does not include that job.
+
+## Long query job with a mid-run Entra token refresh - 2026-10-29
+
+This run checked issue #7's Cosmos DB item against the same pinned emulator image (`linux/arm64`).
+It ran on macOS ARM64 with Docker Desktop and Node `24.11.0`.
+A real account was not reachable: the development account's firewall returned HTTP 403 to this host.
+The account was used for reads only, so its firewall was not changed.
+
+### Setup
+
+- The driver ran in process from `dist/` (built from main at `771c9fb6`): `createClientProvider`,
+  `createQueryHandlers` and `createCosmosRuntime`, with the official Cosmos SDK.
+- The emulator accepts any Entra bearer token, including an expired one.
+- So a local HTTPS proxy sat between the SDK and the emulator. The SDK sends bearer tokens only to `https` URLs.
+  - The proxy rejected any request whose token `exp` had passed with HTTP 401.
+  - It recorded which token each query request carried.
+  - It added 500 ms to each query request.
+- The container held 900 documents in one partition.
+- Each connection ran one `query_page` of `SELECT DISTINCT VALUE c.g FROM c`, with `page_size` 1 and
+  `deadline_ms` 600,000. The driver read every page within that one call: 900 backend requests.
+- Token A expired 442 s after the start. That is just over the 7 minutes the shared expiry rule requires:
+  min(deadline, 120,000) + 300,000.
+- At 82 s, one connection received token B (60 minutes) through `service_refresh_auth`. The host's refresher
+  sends it at the same point: one minute before the driver's 5-minute margin.
+- A second connection received no refresh.
+
+### Results
+
+| Connection | Observed result |
+| --- | --- |
+| With refresh | `service_refresh_auth` returned `refreshed: true` at 82 s. The query succeeded after 472 s. Requests 1-612 carried token A; from 323 s, requests 613-900 carried token B. |
+| Without refresh | The query failed at 442 s with `AUTH_EXPIRED` ("The host must refresh the Entra token before this request.") after 840 requests with token A. |
+
+- The proxy rejected no request for an expired token. The driver never sent token A after it expired.
+- The SDK switched to token B 2 minutes before token A expired. That is when the SDK requests a new token.
+  It did not switch when the refresh arrived.
+- Without the refresh, the job failed at token A's expiry, although about 160 s of its deadline remained.
+
+### Limits
+
+- The host's own refresher did not run here; this run sent the same control call at the same point.
+  The Rust runtime tests cover the refresher's timing.
+- The emulator does not validate Entra tokens. The proxy checked only `exp`.
+- Azure RBAC, RU charges, and native cloud continuation were not part of this run.
+- While choosing the query, `SELECT c.g, COUNT(1) AS k FROM c GROUP BY c.g` and `SELECT * FROM c ORDER BY c.n DESC`
+  each sent one backend request and then waited until their 120 s deadline. The cause was not isolated.
+  This run did not use them.
