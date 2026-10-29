@@ -1,6 +1,6 @@
 use super::super::{
     backend::CancellationSignal,
-    contracts::{ErrorCode, ServiceError},
+    contracts::{ErrorCode, ServiceError, MAX_JOB_DEADLINE_MS},
     dispatch::{CallerContext, CallerTransport},
     error::{failure, redact_error, ServiceResult},
 };
@@ -104,6 +104,20 @@ pub fn legacy_error_frame(id: Value, failure: LegacyFailure) -> Value {
     json!({"jsonrpc":"2.0","id":id,"error":error})
 }
 
+/// How long a request may run, before the grace added for the write: the
+/// deadline it asked for, capped at the longest a job may run, and for MCP the
+/// time the caller waits for the job.
+pub(super) fn request_window_ms(envelope: &Value, mode: Mode) -> u64 {
+    envelope["deadline_ms"]
+        .as_u64()
+        .unwrap_or(30_000)
+        .clamp(1, MAX_JOB_DEADLINE_MS)
+        .saturating_add(if mode == Mode::Mcp {
+            envelope["wait_ms"].as_u64().unwrap_or(5_000).min(60_000)
+        } else {
+            0
+        })
+}
 fn rpc_error(id: Value, error: ServiceError) -> Value {
     let error = redact_error(error);
     let code = serde_json::to_value(error.code)
@@ -431,15 +445,7 @@ impl ServiceTransport {
                         continue;
                     }
                 };
-                let deadline_ms = envelope["deadline_ms"]
-                    .as_u64()
-                    .unwrap_or(30_000)
-                    .clamp(1, 120_000)
-                    .saturating_add(if mode == Mode::Mcp {
-                        envelope["wait_ms"].as_u64().unwrap_or(5_000).min(60_000)
-                    } else {
-                        0
-                    });
+                let deadline_ms = request_window_ms(&envelope, mode);
                 let deadline = Instant::now() + Duration::from_millis(deadline_ms + 2_000);
                 drain_deadline = drain_deadline.max(deadline);
                 deadline_updates.send_replace(drain_deadline);
@@ -484,14 +490,31 @@ impl ServiceTransport {
                 drain_deadline = drain_deadline.min(Instant::now() + Duration::from_secs(2));
             }
             deadline_updates.send_replace(drain_deadline);
+            let draining = !(interrupted || disconnected.is_cancelled());
+            let mut checked = Instant::now();
             loop {
-                match timeout_at(drain_deadline, tasks.join_next_with_id()).await {
+                let wake = if draining {
+                    drain_deadline.min(Instant::now() + Duration::from_secs(1))
+                } else {
+                    drain_deadline
+                };
+                let joined = timeout_at(wake, tasks.join_next_with_id()).await;
+                // A request waiting for approval does not spend its deadline,
+                // so the time it waits does not count against the drain either.
+                let now = Instant::now();
+                if draining && self.awaiting_approval() {
+                    drain_deadline += now.saturating_duration_since(checked);
+                    deadline_updates.send_replace(drain_deadline);
+                }
+                checked = now;
+                match joined {
                     Ok(Some(result)) => {
                         if let Some(code) = settle(&mut in_flight, &mut task_keys, result) {
                             exit = code;
                         }
                     }
                     Ok(None) => break,
+                    Err(_) if now < drain_deadline => {}
                     Err(_) => {
                         active.cancel();
                         tasks.abort_all();

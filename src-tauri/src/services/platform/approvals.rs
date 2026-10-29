@@ -14,9 +14,25 @@ use crate::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 
 const CREATE_SCOPE: &str = "__connection_create__";
+/// An approval waits for a person for as long as it takes. The binding's
+/// `deadline_at_ms` is only a lease that proves a waiter is still alive: the
+/// waiter renews it, and a binding whose lease ran out belonged to a waiter
+/// that died, so it is cleaned up and can no longer be decided.
+const APPROVAL_LEASE_MS: u64 = 30_000;
+const APPROVAL_RENEW_MS: u64 = 5_000;
+/// The pending file's modification time is refreshed this often so the
+/// cleanup of stale approval files never removes one that is still awaited.
+const PENDING_TOUCH_MS: u64 = 10 * 60 * 1000;
 #[derive(Serialize, Deserialize)]
 struct ApprovalBinding {
     caller_id: String,
@@ -33,6 +49,8 @@ pub struct ServiceApprovals {
     profile: PathBuf,
     bindings: PrivateStore,
     local_caller_id: String,
+    renew_ms: AtomicU64,
+    touch_ms: AtomicU64,
 }
 impl ServiceApprovals {
     pub fn new(profile: PathBuf, local_caller_id: String) -> ServiceResult<Arc<Self>> {
@@ -40,7 +58,14 @@ impl ServiceApprovals {
             bindings: PrivateStore::new(profile.join("service-approval-bindings-v1"), 1024 * 1024)?,
             profile,
             local_caller_id,
+            renew_ms: AtomicU64::new(APPROVAL_RENEW_MS),
+            touch_ms: AtomicU64::new(PENDING_TOUCH_MS),
         }))
+    }
+    #[cfg(test)]
+    pub(crate) fn set_timing(&self, renew_ms: u64, touch_ms: u64) {
+        self.renew_ms.store(renew_ms, Ordering::SeqCst);
+        self.touch_ms.store(touch_ms, Ordering::SeqCst);
     }
     pub fn profile(&self) -> &std::path::Path {
         &self.profile
@@ -92,6 +117,19 @@ impl ServiceApprovals {
             return Err(failure(ErrorCode::WriteNotAllowed));
         }
         Ok(Some(parsed))
+    }
+    /// Refreshes the modification time of the pending file without touching
+    /// its bytes.
+    fn touch_pending(&self, id: &str) {
+        let Ok(path) = self.path(id, "pending") else {
+            return;
+        };
+        if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_file()) {
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()));
+        }
     }
     fn cleanup_locked(&self, id: &str) {
         let _ = self.bindings.remove(id);
@@ -162,7 +200,7 @@ impl ServiceApprovals {
         }
         let id = uuid::Uuid::new_v4().to_string();
         let created = now_ms();
-        let deadline = created.saturating_add(request.deadline_ms);
+        let mut lease_deadline = created.saturating_add(APPROVAL_LEASE_MS);
         let operation_value = serde_json::to_value(request.operation)
             .map_err(|_| failure(ErrorCode::WriteNotAllowed))?;
         let operation = operation_value
@@ -193,7 +231,7 @@ impl ServiceApprovals {
             request_id: request.request_id.clone(),
             request_hash: request_hash.into(),
             created_at_ms: created,
-            deadline_at_ms: deadline,
+            deadline_at_ms: lease_deadline,
             pending,
         };
         let _cleanup = ApprovalCleanup {
@@ -220,10 +258,9 @@ impl ServiceApprovals {
             )
             .map_err(|_| failure(ErrorCode::WriteNotAllowed))?;
         }
+        let mut renewed_at = created;
+        let mut touched_at = created;
         loop {
-            if now_ms() >= deadline {
-                return Err(failure(ErrorCode::DeadlineExceeded));
-            }
             {
                 let _lock = self.bindings.lock()?;
                 let current = self
@@ -236,11 +273,29 @@ impl ServiceApprovals {
                     || current.request_id != request.request_id
                     || current.request_hash != request_hash
                     || current.created_at_ms != created
-                    || current.deadline_at_ms != deadline
+                    || current.deadline_at_ms != lease_deadline
                     || current.pending != binding.pending
                     || self.read_pending(&id)?.as_ref() != Some(&binding.pending)
                 {
                     return Err(failure(ErrorCode::WriteNotAllowed));
+                }
+                let now = now_ms();
+                let current =
+                    if now.saturating_sub(renewed_at) >= self.renew_ms.load(Ordering::SeqCst) {
+                        lease_deadline = now.saturating_add(APPROVAL_LEASE_MS);
+                        renewed_at = now;
+                        let renewed = ApprovalBinding {
+                            deadline_at_ms: lease_deadline,
+                            ..current
+                        };
+                        self.bindings.write(&id, &renewed)?;
+                        renewed
+                    } else {
+                        current
+                    };
+                if now.saturating_sub(touched_at) >= self.touch_ms.load(Ordering::SeqCst) {
+                    touched_at = now;
+                    self.touch_pending(&id);
                 }
                 if let Some(decision) = self.read_decision(&id)? {
                     validate_decision(&id, &decision, &current)?;
@@ -258,11 +313,7 @@ impl ServiceApprovals {
                     });
                 }
             }
-            tokio::time::sleep(
-                Duration::from_millis(20)
-                    .min(Duration::from_millis(deadline.saturating_sub(now_ms()))),
-            )
-            .await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
     pub async fn configuration(

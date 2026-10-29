@@ -14,6 +14,7 @@ active = {}
 identities = []
 sessions = set()
 invalidations = []
+refreshes = []
 
 
 def emit(request, result=None, error=None):
@@ -55,11 +56,13 @@ def serve(request):
                 rejected(request)
                 return
             caps = {"protocol_version": 1, "documents_v1": True, "query_page_v1": True,
-                    "cancel_v1": True, "sessions_v1": False}
+                    "cancel_v1": True, "sessions_v1": False,
+                    "auth_refresh_v1": settings.get("auth_refresh", True)}
         else:
             caps = {"service_protocol": 2 if mode == "protocol2" else 1, "exact_query": True,
                     "spatial_v1": True, "sessions": True, "cancel_v1": True,
                     "catalog": True, "rows": True, "exact_affected_rows": mode != "wrapped",
+                    "auth_refresh_v1": bool(settings.get("auth_refresh")),
                     "readonly_guarantee": "restricted_database_principal" if mode == "wrapped" else "read_only_transaction"}
         result = {"service_capabilities": caps}
         emit(request, {"result": result} if mode == "wrapped" else result)
@@ -87,7 +90,8 @@ def serve(request):
         with lock:
             emit(request, {"initializations": initializations, "queries": queries,
                            "active": [list(key) for key in active], "identities": list(identities),
-                           "sessions": len(sessions), "invalidations": list(invalidations)})
+                           "sessions": len(sessions), "invalidations": list(invalidations),
+                           "refreshes": list(refreshes)})
         return
     if method in ("spatial_columns", "spatial_transform_values", "spatial_query_table", "spatial_read_feature"):
         if input_value.get("probe") == "wait":
@@ -122,6 +126,18 @@ def serve(request):
             minimal = wire["params"].get("host") is None and wire["params"].get("password") is None and not wire["params"].get("extra") and "auth" not in context and "session_handle" not in context
             invalidations.append({"connection_id": context["connection_id"], "minimal": minimal})
         emit(request, {})
+        return
+    if method == "service_refresh_auth":
+        with lock:
+            refreshes.append({"connection_id": context["connection_id"], "request_id": context["request_id"],
+                              "identity": (auth or {}).get("identity"), "expires_at_ms": (auth or {}).get("expires_at_ms"),
+                              "input": input_value})
+        emit(request, {"protocol_version": 1, "request_id": context["request_id"],
+                       "connection_id": context["connection_id"], "status": "succeeded", "error": None,
+                       "data": {"refreshed": settings.get("refreshed", True)},
+                       "page": {"next_token": None, "has_more": False, "resume_mode": "none"},
+                       "result_id": None, "job_id": None, "metrics": {"elapsed_ms": 0, "request_charge": 0, "retry_count": 0},
+                       "limits": {"truncated": False, "reasons": []}, "warnings": []})
         return
     if method in ("service_catalog", "service_row"):
         emit(request, {"operation": input_value["operation"], "database": wire["params"]["database"]})

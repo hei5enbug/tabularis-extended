@@ -20,10 +20,16 @@ use super::{
 use async_trait::async_trait;
 use serde_json::Value;
 use std::{
-    sync::{Arc, OnceLock, Weak},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock, Weak,
+    },
     time::Duration,
 };
 use tokio::time::{timeout_at, Instant};
+
+/// The least time a status call may take while the job waits for approval.
+const APPROVAL_CALL_FLOOR: Duration = Duration::from_secs(2);
 
 pub use super::policy::mcp_forbidden;
 pub use mcp::{ArtifactResource, LegacyFailure, LegacyMcpBackend, ResourceRead};
@@ -99,6 +105,22 @@ pub struct ServiceTransport {
     legacy: OnceLock<Arc<dyn LegacyMcpBackend>>,
     metadata: OnceLock<Arc<dyn CatalogMetadata>>,
     catalog: Vec<tool_catalog::ToolSpec>,
+    /// Foreground calls whose job is waiting for approval right now.
+    approval_waits: Arc<AtomicUsize>,
+}
+
+/// Counts one foreground call as waiting for approval while it lives.
+struct ApprovalWait(Arc<AtomicUsize>);
+impl ApprovalWait {
+    fn new(waits: &Arc<AtomicUsize>) -> Self {
+        waits.fetch_add(1, Ordering::SeqCst);
+        Self(waits.clone())
+    }
+}
+impl Drop for ApprovalWait {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl ServiceTransport {
@@ -117,7 +139,13 @@ impl ServiceTransport {
             legacy: OnceLock::new(),
             metadata: OnceLock::new(),
             catalog: tool_catalog::build()?,
+            approval_waits: Arc::new(AtomicUsize::new(0)),
         }))
+    }
+
+    /// Whether some foreground call is waiting for a person to approve its job.
+    pub(crate) fn awaiting_approval(&self) -> bool {
+        self.approval_waits.load(Ordering::SeqCst) > 0
     }
 
     pub fn set_catalog_metadata(&self, metadata: Arc<dyn CatalogMetadata>) -> ServiceResult<()> {
@@ -246,7 +274,7 @@ impl ServiceTransport {
         }
         let started = Instant::now();
         let original_deadline = started + Duration::from_millis(decoded.deadline_ms);
-        let deadline = started
+        let mut deadline = started
             + Duration::from_millis(
                 decoded
                     .deadline_ms
@@ -286,8 +314,20 @@ impl ServiceTransport {
             response
         };
         let mut cancelled = false;
+        // While the job waits for a person to approve it, the wait does not
+        // count against the caller's deadline: the deadline moves later by
+        // the time spent waiting, so what is left afterwards is what was left
+        // when the wait began.
+        let mut awaiting_since: Option<Instant> = None;
+        let mut approval_wait: Option<ApprovalWait> = None;
         loop {
-            let remaining = deadline
+            let awaiting = awaiting_since.is_some();
+            let call_deadline = if awaiting {
+                deadline.max(Instant::now() + APPROVAL_CALL_FLOOR)
+            } else {
+                deadline
+            };
+            let remaining = call_deadline
                 .saturating_duration_since(Instant::now())
                 .as_millis() as u64;
             if remaining == 0 {
@@ -302,7 +342,8 @@ impl ServiceTransport {
                     &owner,
                     remaining,
                 );
-                match timeout_at(deadline, self.submit_request(control, caller.clone())).await {
+                match timeout_at(call_deadline, self.submit_request(control, caller.clone())).await
+                {
                     Ok(Ok(response)) if response.error.is_none() => {}
                     _ => return Ok(unknown()),
                 }
@@ -310,7 +351,7 @@ impl ServiceTransport {
             let get =
                 request::control_request(&decoded, Operation::JobGet, &job_id, &owner, remaining);
             let response =
-                match timeout_at(deadline, self.submit_request(get, caller.clone())).await {
+                match timeout_at(call_deadline, self.submit_request(get, caller.clone())).await {
                     Ok(Ok(response)) if response.error.is_none() => response,
                     _ => return Ok(unknown()),
                 };
@@ -321,6 +362,20 @@ impl ServiceTransport {
                 Ok(status) => status,
                 Err(_) => return Ok(unknown()),
             };
+            let now = Instant::now();
+            awaiting_since = if response.data["awaiting_approval"] == true {
+                if let Some(since) = awaiting_since {
+                    deadline += now.saturating_duration_since(since);
+                }
+                Some(now)
+            } else {
+                None
+            };
+            if awaiting_since.is_none() {
+                approval_wait = None;
+            } else if approval_wait.is_none() {
+                approval_wait = Some(ApprovalWait::new(&self.approval_waits));
+            }
             if request::terminal(status) {
                 let get = request::control_request(
                     &decoded,
@@ -330,7 +385,8 @@ impl ServiceTransport {
                     remaining,
                 );
                 let stored =
-                    match timeout_at(deadline, self.submit_request(get, caller.clone())).await {
+                    match timeout_at(call_deadline, self.submit_request(get, caller.clone())).await
+                    {
                         Ok(Ok(response)) if response.error.is_none() => response,
                         _ => return Ok(unknown()),
                     };
@@ -357,7 +413,7 @@ impl ServiceTransport {
             tokio::select! {
                 _ = signal.cancelled(), if !cancelled => {},
                 _ = tokio::time::sleep(Duration::from_millis(50)) => {},
-                _ = tokio::time::sleep_until(deadline) => return Ok(unknown()),
+                _ = tokio::time::sleep_until(call_deadline), if awaiting_since.is_none() => return Ok(unknown()),
             }
         }
     }

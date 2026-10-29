@@ -516,7 +516,7 @@ async fn 취소되거나_기한이_지난_lease는_쓰기_게시_표시를_거�
         .begin(&second, &caller(), false, false)
         .await
         .unwrap();
-    expired.deadline_at_ms = 0;
+    expired.set_deadline_at_ms(0);
     // when
     let actual = dispatch_guards(&mut cancelled, &mut expired);
     // then

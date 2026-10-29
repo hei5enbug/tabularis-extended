@@ -12,7 +12,7 @@ use std::{
     collections::HashMap,
     path::PathBuf,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex, OnceLock, Weak,
     },
 };
@@ -22,6 +22,9 @@ pub const GLOBAL_CONCURRENCY: usize = 8;
 pub const CONNECTION_CONCURRENCY: usize = 4;
 pub const QUEUE_CAPACITY: usize = 64;
 pub const JOB_TTL_MS: u64 = 15 * 60 * 1000;
+/// How long a job that waits for approval stays readable without a renewal.
+/// The wait itself has no limit, so the runtime renews this while it waits.
+pub(crate) const APPROVAL_RECORD_LEASE_MS: u64 = JOB_TTL_MS;
 const MAX_JOB_RECORDS: usize = 256;
 const MAX_JOB_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -354,7 +357,7 @@ impl JobManager {
             waiting: !control,
             persisted: !control,
             completed: AtomicBool::new(false),
-            deadline_at_ms: now_ms().saturating_add(request.deadline_ms),
+            deadline_at_ms: AtomicU64::new(now_ms().saturating_add(request.deadline_ms)),
         };
         if !control {
             self.persist(&record)?;
@@ -368,7 +371,7 @@ impl JobManager {
         if lease.signal().is_cancelled() {
             return Err(failure(ErrorCode::Cancelled));
         }
-        if now_ms() >= lease.deadline_at_ms {
+        if now_ms() >= lease.deadline_at_ms() {
             return Err(failure(ErrorCode::DeadlineExceeded));
         }
         if lease.waiting {
@@ -394,7 +397,7 @@ impl JobManager {
             let signal = lease.signal();
             let permits = tokio::select! {
                 _ = signal.cancelled() => return Err(failure(ErrorCode::Cancelled)),
-                result = tokio::time::timeout(std::time::Duration::from_millis(lease.deadline_at_ms.saturating_sub(now_ms())), acquire) => result.map_err(|_| failure(ErrorCode::DeadlineExceeded))??,
+                result = tokio::time::timeout(std::time::Duration::from_millis(lease.deadline_at_ms().saturating_sub(now_ms())), acquire) => result.map_err(|_| failure(ErrorCode::DeadlineExceeded))??,
             };
             lease.connection_permit = permits.0;
             lease.global_permit = Some(permits.1);
@@ -541,9 +544,53 @@ pub struct JobLease {
     waiting: bool,
     persisted: bool,
     completed: AtomicBool,
-    pub deadline_at_ms: u64,
+    deadline_at_ms: AtomicU64,
 }
 impl JobLease {
+    /// The instant the job's execution must end. Time spent waiting for
+    /// approval moves it later, see `end_approval`.
+    pub fn deadline_at_ms(&self) -> u64 {
+        self.deadline_at_ms.load(Ordering::SeqCst)
+    }
+    #[cfg(test)]
+    pub(crate) fn set_deadline_at_ms(&self, deadline_at_ms: u64) {
+        self.deadline_at_ms.store(deadline_at_ms, Ordering::SeqCst);
+    }
+    pub fn awaiting_approval(&self) -> bool {
+        self.active.awaiting_approval.load(Ordering::SeqCst)
+    }
+    /// The job now waits for a human, which has no time limit: the persisted
+    /// record stays readable until `renew_approval` stops being called.
+    pub fn begin_approval(&self) {
+        self.active.awaiting_approval.store(true, Ordering::SeqCst);
+        self.renew_approval();
+    }
+    /// Keeps the persisted record of a job that waits for approval readable.
+    /// A process that dies mid-wait stops renewing, so the record still ends.
+    pub fn renew_approval(&self) {
+        if let Ok(mut record) = self.active.record.lock() {
+            record.expires_at_ms = now_ms().saturating_add(APPROVAL_RECORD_LEASE_MS);
+            if self.persisted {
+                let _ = self.manager.persist(&record);
+            }
+        }
+    }
+    /// The wait for approval ended. The deadline moves later by the time the
+    /// wait took, so the driver still gets what was left when the wait began,
+    /// and only then is the job no longer awaiting approval.
+    pub fn end_approval(&self, waited_ms: u64) {
+        let extended = self
+            .deadline_at_ms
+            .fetch_add(waited_ms, Ordering::SeqCst)
+            .saturating_add(waited_ms);
+        self.active.awaiting_approval.store(false, Ordering::SeqCst);
+        if let Ok(mut record) = self.active.record.lock() {
+            record.expires_at_ms = running_expiry_ms(now_ms(), extended.saturating_sub(now_ms()));
+            if self.persisted {
+                let _ = self.manager.persist(&record);
+            }
+        }
+    }
     pub fn signal(&self) -> CancellationSignal {
         self.active.signal.clone()
     }
@@ -558,7 +605,7 @@ impl JobLease {
         if self.signal().is_cancelled() {
             return Err(failure(ErrorCode::Cancelled));
         }
-        if now_ms() >= self.deadline_at_ms {
+        if now_ms() >= self.deadline_at_ms() {
             return Err(failure(ErrorCode::DeadlineExceeded));
         }
         let mut record = self
@@ -625,9 +672,6 @@ impl JobLease {
                 }
             }
         }
-    }
-    pub fn set_awaiting_approval(&self, waiting: bool) {
-        self.active.awaiting_approval.store(waiting, Ordering::SeqCst);
     }
     pub fn write_dispatched(&self) -> bool {
         self.active

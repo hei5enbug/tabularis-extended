@@ -1,7 +1,7 @@
 use super::super::{
     contracts::{
         ErrorCode, JobStatus, Operation, Outcome, SchemaValidator, ServiceError, ServiceRequest,
-        ServiceResponse,
+        ServiceResponse, MAX_JOB_DEADLINE_MS,
     },
     dispatch::CallerContext,
     error::{failure, redact_error, ServiceResult},
@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use std::io::{self, Write};
 
 pub const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
-pub const MAX_FOREGROUND_MS: u64 = 122_000;
+pub const MAX_FOREGROUND_MS: u64 = MAX_JOB_DEADLINE_MS + 2_000;
 
 struct CountBytes(usize);
 impl Write for CountBytes {

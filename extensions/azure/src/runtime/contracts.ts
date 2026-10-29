@@ -2,7 +2,9 @@ import type { JsonObject, JsonValue, ServiceError, ServiceResponse } from "@tabu
 import type { ConnectionSettings, TransientAuthContext } from "../connection/index.js";
 import type { MetricsAccumulator } from "./metrics.js";
 
-export const rpcMethods = ["initialize", "ping", "shutdown", "test_connection", "get_databases", "get_tables", "get_columns", "get_foreign_keys", "get_indexes", "get_schemas", "get_connection_metadata", "execute_query", "query_page", "read_document", "create_document", "replace_document", "delete_document", "cancel", "cancel_request", "service_invalidate_auth"] as const;
+export const rpcMethods = ["initialize", "ping", "shutdown", "test_connection", "get_databases", "get_tables", "get_columns", "get_foreign_keys", "get_indexes", "get_schemas", "get_connection_metadata", "execute_query", "query_page", "read_document", "create_document", "replace_document", "delete_document", "cancel", "cancel_request", "service_invalidate_auth", "service_refresh_auth"] as const;
+// Longest query_execute job the host admits (MAX_JOB_DEADLINE_MS in src-tauri/src/services/contracts.rs).
+export const MAX_JOB_DEADLINE_MS = 3_600_000;
 export type RpcMethod = (typeof rpcMethods)[number];
 export interface RpcRequest { jsonrpc: "2.0"; id?: string | number | null; method: string; params?: JsonObject }
 export interface RpcRequestContext {

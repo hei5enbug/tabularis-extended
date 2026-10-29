@@ -579,6 +579,38 @@ async fn 한_시간짜리_작업은_15분이_지나도_기한과_취소_유예�
     assert_eq!(actual, [false, false, true]);
 }
 
+#[tokio::test]
+async fn 승인_대기_중_작업_기록은_갱신되고_승인이_끝나면_늘어난_기한으로_다시_제한된다() {
+    // given
+    let directory = TestDirectory::new();
+    let manager = JobManager::new("owner".into(), directory.0.clone()).unwrap();
+    let mut input = query("SELECT 1");
+    input.deadline_ms = 30_000;
+    let lease = manager
+        .begin(&input, &caller(), false, false)
+        .await
+        .unwrap();
+    let deadline = lease.deadline_at_ms();
+
+    // when
+    lease.begin_approval();
+    let waiting = manager.get(&lease.id(), "owner", &caller()).unwrap();
+    let during = (
+        manager.awaiting_approval(&lease.id()),
+        waiting.expired_at(now_ms() + JOB_TTL_MS - 60_000),
+        waiting.expired_at(now_ms() + JOB_TTL_MS + 60_000),
+    );
+    lease.end_approval(10_000);
+    let finished = manager.get(&lease.id(), "owner", &caller()).unwrap();
+
+    // then
+    assert_eq!(during, (true, false, true));
+    assert!(!manager.awaiting_approval(&lease.id()));
+    assert_eq!(lease.deadline_at_ms(), deadline + 10_000);
+    assert!(finished.expires_at_ms >= lease.deadline_at_ms() + CANCEL_GRACE_MS - 1_000);
+    assert!(!finished.expired_at(lease.deadline_at_ms()));
+}
+
 #[test]
 fn 짧은_작업의_실행_중_만료는_기존_15분을_유지한다() {
     // given

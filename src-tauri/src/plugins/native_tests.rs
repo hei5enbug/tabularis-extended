@@ -625,6 +625,25 @@ async fn full_queue_control(driver: Arc<RpcDriver>) -> (ServiceError, ServiceRes
         )
         .await
         .unwrap();
+    let mut refresh = context("conn", "refresh");
+    refresh.transient_auth = Some(TransientAuth::EntraToken {
+        access_token: Secret::new(b"SECRET_CANARY_REFRESH".to_vec()).unwrap(),
+        expires_at_ms: 4242,
+        tenant_id: "tenant".into(),
+        client_id: "client".into(),
+        principal_id: "principal".into(),
+        scope: "scope".into(),
+    });
+    let refreshed = driver
+        .service_call(
+            ServiceRpcMethod::RefreshAuth,
+            &params(&driver.manifest.id),
+            &refresh,
+            json!({}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(refreshed["data"], json!({"refreshed":true}));
     driver.service_cancel("conn", "queued-0").await.unwrap();
     let first = tasks.remove(0).await.unwrap();
     for signal in signals.iter().skip(1) {
@@ -648,7 +667,8 @@ async fn full_queue_control(driver: Arc<RpcDriver>) -> (ServiceError, ServiceRes
 #[tokio::test]
 async fn 네이티브_호출_상한에서_추가_SQL은_송신하지_않고_취소_제어는_계속_동작한다() {
     // given
-    let driver = Arc::new(child_driver("bounded-pending", "native", json!({})).await);
+    let driver =
+        Arc::new(child_driver("bounded-pending", "native", json!({"auth_refresh":true})).await);
     driver.service_capabilities().await.unwrap();
     // when
     let (denied, cancelled, stats) = full_queue_control(driver).await;
@@ -657,4 +677,32 @@ async fn 네이티브_호출_상한에서_추가_SQL은_송신하지_않고_취�
     assert_eq!(denied.outcome, Outcome::NotStarted);
     assert!(cancelled.is_ok());
     assert_eq!(stats["queries"], 64);
+    assert_eq!(stats["refreshes"].as_array().unwrap().len(), 1);
+    assert_eq!(stats["refreshes"][0]["expires_at_ms"], 4242);
+}
+#[tokio::test]
+async fn 토큰_갱신_기능은_auth_refresh_v1을_광고한_드라이버만_지원한다() {
+    // given
+    let advertising = child_driver("refresh-capable", "native", json!({"auth_refresh":true})).await;
+    let plain = child_driver("refresh-incapable", "native", json!({})).await;
+
+    // when
+    let capable = advertising.service_capabilities().await.unwrap();
+    let incapable = plain.service_capabilities().await.unwrap();
+    let denied = plain
+        .service_call(
+            ServiceRpcMethod::RefreshAuth,
+            &params("refresh-incapable"),
+            &context("conn", "refresh"),
+            json!({}),
+        )
+        .await
+        .unwrap_err();
+    advertising.shutdown().await;
+    plain.shutdown().await;
+
+    // then
+    assert!(capable.supports(ServiceRpcMethod::RefreshAuth) && capable.auth_refresh);
+    assert!(!incapable.supports(ServiceRpcMethod::RefreshAuth));
+    assert_eq!(denied.code, ErrorCode::CapabilityUnavailable);
 }

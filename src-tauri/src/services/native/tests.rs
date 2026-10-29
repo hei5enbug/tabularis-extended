@@ -347,6 +347,7 @@ impl DatabaseDriver for MockDriver {
             documents: false,
             query_page: false,
             cancel: true,
+            auth_refresh: false,
             sessions: false,
             catalog: true,
             rows: true,

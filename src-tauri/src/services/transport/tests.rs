@@ -63,6 +63,20 @@ impl ApprovalBackend for Approvals {
         })
     }
 }
+struct GatedApprovals(tokio::sync::Semaphore);
+#[async_trait]
+impl ApprovalBackend for GatedApprovals {
+    async fn consume(
+        &self,
+        connection: &SavedConnection,
+        caller: &CallerContext,
+        request: &ServiceRequest,
+        hash: &str,
+    ) -> ServiceResult<ApprovalGrant> {
+        self.0.acquire().await.unwrap().forget();
+        Approvals.consume(connection, caller, request, hash).await
+    }
+}
 struct Harness {
     _directory: TestDirectory,
     transport: Arc<ServiceTransport>,
@@ -72,11 +86,14 @@ struct Harness {
 }
 impl Harness {
     fn new() -> Self {
+        Self::with_approvals(Arc::new(Approvals))
+    }
+    fn with_approvals(approvals: Arc<dyn ApprovalBackend>) -> Self {
         let directory = TestDirectory::new();
         let connections = Arc::new(TestConnections::new());
         let driver = Arc::new(TestDriver::new());
         let access = Arc::new(Access(AtomicBool::new(false)));
-        let policy = Arc::new(ApprovalPolicy::new(access.clone(), Arc::new(Approvals)));
+        let policy = Arc::new(ApprovalPolicy::new(access.clone(), approvals));
         let runtime = ServiceRuntime::new(
             directory.0.clone(),
             "owner".into(),
@@ -348,6 +365,35 @@ async fn query_execute는_한_시간짜리_기한을_드라이버까지_전달�
         "{delivered:?}"
     );
 }
+#[test]
+fn 포그라운드_대기_상한은_한_시간짜리_작업과_유예를_담는다() {
+    // given
+    let hour = 3_600_000;
+
+    // when
+    let actual = request::MAX_FOREGROUND_MS;
+
+    // then
+    assert_eq!(actual, hour + 2_000);
+}
+#[test]
+fn stdio_요청_기한은_한_시간까지_자르지_않고_MCP_대기_시간만_더한다() {
+    // given
+    let hour = 3_600_000;
+    let envelope = |deadline: Value, wait: Value| json!({"deadline_ms":deadline,"wait_ms":wait});
+
+    // when
+    let actual = [
+        stdio::request_window_ms(&envelope(json!(hour), json!(null)), Mode::Cli),
+        stdio::request_window_ms(&envelope(json!(hour + 1), json!(null)), Mode::Cli),
+        stdio::request_window_ms(&envelope(json!(hour), json!(7_000)), Mode::Mcp),
+        stdio::request_window_ms(&envelope(json!(null), json!(null)), Mode::Cli),
+        stdio::request_window_ms(&envelope(json!(0), json!(null)), Mode::Cli),
+    ];
+
+    // then
+    assert_eq!(actual, [hour, hour, hour + 7_000, 30_000, 1]);
+}
 #[tokio::test]
 async fn 다른_작업은_120001_이상의_기한을_거부한다() {
     // given
@@ -475,6 +521,42 @@ async fn 명시적_쓰기_의도와_사람의_승인은_한번만_소비된다()
     assert_eq!(error_code(&actual.1), Some(ErrorCode::WriteNotAllowed));
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 1);
     assert!(!h.driver.contexts.lock().unwrap()[0].1);
+}
+#[tokio::test]
+async fn 승인_대기_시간은_호출자_기한을_소모하지_않아_승인_뒤_남은_시간으로_실행을_끝낸다() {
+    // given
+    let gate = Arc::new(GatedApprovals(tokio::sync::Semaphore::new(0)));
+    let h = Harness::with_approvals(gate.clone());
+    h.allow_write();
+    let held = TestGate::new();
+    h.driver
+        .gates
+        .lock()
+        .unwrap()
+        .insert("held".into(), held.clone());
+    let mut raw = serde_json::to_value(support::write_query("held")).unwrap();
+    raw["deadline_ms"] = json!(500);
+    let transport = h.transport.clone();
+    let task = tokio::spawn(async move {
+        transport
+            .run_one(raw, support::caller(), true, None)
+            .await
+            .unwrap()
+    });
+
+    // when
+    tokio::time::sleep(Duration::from_millis(3_000)).await;
+    let waiting = !task.is_finished();
+    gate.0.add_permits(1);
+    held.wait_entered().await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    held.release();
+    let actual = task.await.unwrap();
+
+    // then
+    assert!(waiting);
+    assert_eq!(actual.status, JobStatus::Succeeded);
+    assert_eq!(h.driver.calls.load(Ordering::SeqCst), 1);
 }
 #[tokio::test]
 async fn 의도가_없는_쿼리는_읽기전용_물리_경로로_전달된다() {
@@ -1282,6 +1364,54 @@ async fn MCP는_막힌_도구_호출을_기다리지_않고_제어_호출에_먼
     for id in [2, 3, 4, 5] {
         assert!(answered.contains(&json!(id)), "{id}");
     }
+}
+#[tokio::test]
+async fn 입력을_닫은_stdio_요청도_승인을_기다리는_동안은_drain_기한에_끊기지_않는다() {
+    // given
+    let gate = Arc::new(GatedApprovals(tokio::sync::Semaphore::new(0)));
+    let h = Harness::with_approvals(gate.clone());
+    h.allow_write();
+    let held = TestGate::new();
+    h.driver
+        .gates
+        .lock()
+        .unwrap()
+        .insert("held".into(), held.clone());
+    let mut raw = serde_json::to_value(support::write_query("held")).unwrap();
+    raw["deadline_ms"] = json!(500);
+    let mut input = serde_json::to_vec(&raw).unwrap();
+    input.push(b'\n');
+    let output = Output::default();
+    let transport = h.transport.clone();
+    let written = output.clone();
+    let task = tokio::spawn(async move {
+        transport
+            .run_stdio(
+                tokio::io::BufReader::new(std::io::Cursor::new(input)),
+                written,
+                support::caller(),
+                Mode::Cli,
+                true,
+                Default::default(),
+            )
+            .await
+            .unwrap()
+    });
+
+    // when
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    let waiting = !task.is_finished();
+    gate.0.add_permits(1);
+    held.wait_entered().await;
+    held.release();
+    let actual = task.await.unwrap();
+
+    // then
+    assert!(waiting);
+    assert_eq!(actual, 0);
+    assert!(String::from_utf8(output.0.lock().unwrap().clone())
+        .unwrap()
+        .contains("\"succeeded\""));
 }
 #[tokio::test]
 async fn 초과_프레임은_입력을_중단하고_내용을_오류에_노출하지_않는다() {

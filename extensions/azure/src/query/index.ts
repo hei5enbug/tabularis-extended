@@ -6,7 +6,7 @@ import type { ClientProvider } from "../connection/index.js";
 import { connectionContext } from "../connection/index.js";
 import { metadataFromResource, type ContainerMetadata } from "../connection/metadata.js";
 import { extractPartitionComponents, fullPartitionKey, validateDocumentId } from "../documents/identity.js";
-import type { RpcHandler, RpcRequestContext } from "../runtime/contracts.js";
+import { MAX_JOB_DEADLINE_MS, type RpcHandler, type RpcRequestContext } from "../runtime/contracts.js";
 import { assertRequestActive, DriverError, mapSdkError, safeError, serviceResponse } from "../runtime/errors.js";
 import { MetricsAccumulator, withRequestMetrics } from "../runtime/metrics.js";
 import { jsonObject, onlyKeys } from "../runtime/validation.js";
@@ -78,7 +78,7 @@ async function documentRows(values: JsonValue[], container: Container, paths: st
 export function createQueryHandlers(clients: ClientProvider): QueryHandlers {
   async function execute(query: QueryInput, context: RpcRequestContext, previous?: QueryCursor): Promise<QueryDriverOutput> {
     const now = context.now ?? Date.now;
-    if (!Number.isSafeInteger(context.deadline_ms) || context.deadline_ms < 1 || context.deadline_ms > 120_000) throw new DriverError("INVALID_ARGUMENT", "The query deadline is invalid.");
+    if (!Number.isSafeInteger(context.deadline_ms) || context.deadline_ms < 1 || context.deadline_ms > MAX_JOB_DEADLINE_MS) throw new DriverError("INVALID_ARGUMENT", "The query deadline is invalid.");
     const deadline = Math.min(context.deadline_at_ms ?? Infinity, now() + context.deadline_ms);
     const controller = new AbortController();
     const tracked: RpcRequestContext = { ...context, now, deadline_at_ms: deadline, signal: AbortSignal.any([context.signal, controller.signal]), metrics: context.metrics ?? new MetricsAccumulator(now(), now) };

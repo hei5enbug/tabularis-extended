@@ -1,10 +1,11 @@
 use super::{
     super::{
-        auth::{AuthConfig, AuthManager},
-        backend::TransientAuth,
+        auth::{AuthConfig, AuthManager, OAuthGrant, REFRESH_MARGIN_MS},
+        backend::{CancellationSignal, TransientAuth},
         contracts::ErrorCode,
         credentials::{Secret, SecretSlot, SecretStore, SessionSecretStore},
         dispatch::CallerTransport,
+        error::{failure, ServiceResult},
         oauth::{
             AzureOAuthProvider, MicrosoftPrincipalResolver, OAuthHttpBackend, OAuthProvider,
             OAuthTransportError,
@@ -671,4 +672,117 @@ async fn device_login의_session_선택은_keychain에_비밀을_저장하지_�
         .await
         .unwrap()
         .is_some());
+}
+
+struct StagedOAuth {
+    grants: Mutex<VecDeque<(&'static str, u64)>>,
+}
+#[async_trait]
+impl OAuthProvider for StagedOAuth {
+    async fn device_begin(
+        &self,
+        _: &AuthConfig,
+    ) -> ServiceResult<oauth2::StandardDeviceAuthorizationResponse> {
+        Err(failure(ErrorCode::AuthRequired))
+    }
+    async fn device_finish(
+        &self,
+        _: &AuthConfig,
+        _: oauth2::StandardDeviceAuthorizationResponse,
+        _: CancellationSignal,
+    ) -> ServiceResult<OAuthGrant> {
+        Err(failure(ErrorCode::AuthRequired))
+    }
+    async fn client_credentials(
+        &self,
+        config: &AuthConfig,
+        _: &Secret,
+    ) -> ServiceResult<OAuthGrant> {
+        let (access, ttl_ms) = self
+            .grants
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| failure(ErrorCode::AuthRequired))?;
+        Ok(OAuthGrant {
+            access_token: Secret::new(access.as_bytes().to_vec()).unwrap(),
+            refresh_token: None,
+            expires_at_ms: now_ms() + ttl_ms,
+            principal_id: config.client_id.clone(),
+        })
+    }
+    async fn refresh(
+        &self,
+        _: &AuthConfig,
+        _: &Secret,
+        _: Option<&str>,
+    ) -> ServiceResult<OAuthGrant> {
+        Err(failure(ErrorCode::AuthRequired))
+    }
+}
+fn access_of(auth: Option<TransientAuth>) -> String {
+    match auth {
+        Some(TransientAuth::EntraToken { access_token, .. }) => access_token.expose().to_string(),
+        _ => panic!("expected an Entra token"),
+    }
+}
+async fn staged_manager(grants: Vec<(&'static str, u64)>) -> Arc<AuthManager> {
+    let persistent = Arc::new(SessionSecretStore::default());
+    persistent
+        .set(
+            "conn-a",
+            SecretSlot::EntraClientSecret,
+            Secret::new(b"synthetic".to_vec()).unwrap(),
+        )
+        .await
+        .unwrap();
+    AuthManager::new(
+        Arc::new(StagedOAuth {
+            grants: Mutex::new(grants.into()),
+        }),
+        persistent,
+        Arc::new(SessionSecretStore::default()),
+        Arc::new(TestLifecycle(Default::default())),
+    )
+}
+
+#[tokio::test]
+async fn 캐시된_토큰의_만료_여유_안쪽에서_다시_요청하면_더_늦게_만료되는_새_토큰을_반환한다() {
+    // given
+    let saved = entra_connection("entra_service_principal");
+    let manager = staged_manager(vec![
+        ("first-token", REFRESH_MARGIN_MS + 30_000 + 500),
+        ("second-token", 3_600_000),
+    ])
+    .await;
+    let first = access_of(manager.context(&saved, 30_000).await.unwrap());
+    let cached = access_of(manager.context(&saved, 30_000).await.unwrap());
+
+    // when
+    let refreshed = access_of(manager.context(&saved, 120_000).await.unwrap());
+
+    // then
+    assert_eq!(
+        (first.as_str(), cached.as_str()),
+        ("first-token", "first-token")
+    );
+    assert_eq!(refreshed, "second-token");
+}
+
+#[tokio::test]
+async fn 만료_여유_밖의_캐시된_토큰은_같은_창으로_다시_요청해도_재사용한다() {
+    // given
+    let saved = entra_connection("entra_service_principal");
+    let manager = staged_manager(vec![
+        ("first-token", 3_600_000),
+        ("second-token", 3_600_000),
+    ])
+    .await;
+    manager.context(&saved, 30_000).await.unwrap();
+
+    // when
+    let actual = access_of(manager.context(&saved, 120_000).await.unwrap());
+
+    // then
+    assert_eq!(actual, "first-token");
 }

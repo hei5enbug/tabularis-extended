@@ -97,7 +97,7 @@ impl SpatialDataDomain {
         {
             return Err(failure(ErrorCode::PermissionDenied));
         }
-        let remaining = lease.deadline_at_ms.saturating_sub(now_ms()).min(120_000);
+        let remaining = lease.deadline_at_ms().saturating_sub(now_ms()).min(120_000);
         let transient_auth = runtime.auth.context(&connection, remaining).await?;
         let map_fence = if let Some(id) = &request.map_id {
             let store = self
@@ -143,7 +143,7 @@ impl SpatialDataDomain {
             permission,
             request: request.clone(),
             caller: caller.clone(),
-            deadline_at_ms: lease.deadline_at_ms,
+            deadline_at_ms: lease.deadline_at_ms(),
             map_fence,
         };
         self.revalidate(&execution).await?;

@@ -21,7 +21,7 @@ test("production 진입점은 한글 초기화와 미지원 요청을 독립 응
   // then
   assert.equal(actual.stderr, "");
   assert.equal(actual.stdout.trim().split("\n").length, 2);
-  assert.deepEqual(actual.stdout.trim().split("\n").map((line) => JSON.parse(line)).find((response) => response.id === "한글").result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, sessions_v1: false });
+  assert.deepEqual(actual.stdout.trim().split("\n").map((line) => JSON.parse(line)).find((response) => response.id === "한글").result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, auth_refresh_v1: true, sessions_v1: false });
   assert.equal(actual.stdout.trim().split("\n").map((line) => JSON.parse(line)).find((response) => response.id === 2).error.data.code, "UNSUPPORTED_OPERATION");
 });
 

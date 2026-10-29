@@ -348,6 +348,8 @@ pub struct TestDriver {
     pub contexts: Mutex<Vec<(String, bool, Option<String>)>>,
     pub deadlines: Mutex<Vec<u64>>,
     pub finish_read_only: Mutex<Vec<bool>>,
+    /// Expiry of every token handed over through `refresh_auth`.
+    pub refreshed: Mutex<Vec<u64>>,
     sessions: Mutex<HashMap<String, Arc<AtomicUsize>>>,
     pub session_peak: AtomicUsize,
     pub gates: Mutex<HashMap<String, Arc<TestGate>>>,
@@ -386,6 +388,7 @@ impl TestDriver {
             contexts: Mutex::new(Vec::new()),
             deadlines: Mutex::new(Vec::new()),
             finish_read_only: Mutex::new(Vec::new()),
+            refreshed: Mutex::new(Vec::new()),
             sessions: Mutex::new(HashMap::new()),
             session_peak: AtomicUsize::new(0),
             gates: Mutex::new(HashMap::new()),
@@ -642,6 +645,16 @@ impl DriverBackend for TestDriver {
     async fn invalidate_auth(&self, _connection_id: &str, _principal: Option<&str>) {
         self.invalidations.fetch_add(1, Ordering::SeqCst);
     }
+    async fn refresh_auth(
+        &self,
+        _connection: &SavedConnection,
+        context: DriverContext,
+    ) -> ServiceResult<bool> {
+        if let Some(TransientAuth::EntraToken { expires_at_ms, .. }) = context.transient_auth {
+            self.refreshed.lock().unwrap().push(expires_at_ms);
+        }
+        Ok(true)
+    }
 }
 
 fn native_output(rows: Vec<Value>, tail: Vec<Value>, page_size: usize) -> DriverOutput {
@@ -683,6 +696,8 @@ pub struct TestOAuth {
     pub exchanges: AtomicUsize,
     pub refreshes: AtomicUsize,
     pub short_expiry: AtomicBool,
+    /// Lifetimes in ms for the next grants, before the default applies.
+    pub ttls: Mutex<std::collections::VecDeque<u64>>,
     pub principal: Mutex<String>,
 }
 impl TestOAuth {
@@ -691,6 +706,7 @@ impl TestOAuth {
             exchanges: AtomicUsize::new(0),
             refreshes: AtomicUsize::new(0),
             short_expiry: AtomicBool::new(false),
+            ttls: Mutex::new(Default::default()),
             principal: Mutex::new("11111111-1111-4111-8111-111111111111".into()),
         }
     }
@@ -699,11 +715,13 @@ impl TestOAuth {
             access_token: Secret::new(b"synthetic-access-canary-581".to_vec()).unwrap(),
             refresh_token: Some(Secret::new(b"synthetic-refresh-canary-582".to_vec()).unwrap()),
             expires_at_ms: now_ms()
-                + if self.short_expiry.load(Ordering::SeqCst) {
-                    1000
-                } else {
-                    3_600_000
-                },
+                + self.ttls.lock().unwrap().pop_front().unwrap_or(
+                    if self.short_expiry.load(Ordering::SeqCst) {
+                        1000
+                    } else {
+                        3_600_000
+                    },
+                ),
             principal_id: self.principal.lock().unwrap().clone(),
         }
     }
@@ -771,6 +789,7 @@ pub struct Harness {
     pub policy: Arc<TestPolicy>,
     pub driver: Arc<TestDriver>,
     pub secrets: Arc<SessionSecretStore>,
+    pub oauth: Arc<TestOAuth>,
 }
 impl Harness {
     pub fn new() -> Self {
@@ -800,6 +819,7 @@ impl Harness {
             policy,
             driver,
             secrets,
+            oauth,
         }
     }
     pub fn allow_write(&self) {

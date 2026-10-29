@@ -251,7 +251,7 @@ async fn unsafe_decision(harness: &Harness) -> ServiceError {
 }
 
 #[tokio::test]
-async fn 승인_대기_기한이_지나면_pending_decision_binding을_정리한다() {
+async fn 승인_대기는_요청_deadline_ms가_지나도_유지되고_늦은_승인을_소비한다() {
     // given
     let harness = Harness::new().await;
     let mut request = request(
@@ -260,15 +260,189 @@ async fn 승인_대기_기한이_지나면_pending_decision_binding을_정리한
     );
     request.deadline_ms = 30;
     let connection = harness.connections.get("fixture").await.unwrap();
+    let remote = caller(CallerTransport::Mcp);
     let hash = value_hash(&serde_json::to_value(&request).unwrap());
+    let approvals = harness.approvals.clone();
+    let task = tokio::spawn(async move {
+        approvals
+            .consume(&connection, &remote, &request, &hash)
+            .await
+    });
+    let pending = pending(&harness.approvals).await;
     // when
-    let actual = harness
-        .approvals
-        .consume(&connection, &caller(CallerTransport::Mcp), &request, &hash)
-        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let waiting = (task.is_finished(), queue_counts(&harness.directory.0));
+    let approved = harness.approvals.approve_pending(
+        &pending.id,
+        &decision(&pending.id, true),
+        &caller(CallerTransport::Gui),
+    );
+    let actual = task.await.unwrap();
     // then
-    assert_eq!(actual.err().unwrap().code, ErrorCode::DeadlineExceeded);
+    assert_eq!(waiting, (false, (1, 0, 1)));
+    assert!(approved.is_ok());
+    assert!(actual.is_ok());
     assert_eq!(queue_counts(&harness.directory.0), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn 대기_중인_승인은_binding_lease를_갱신한다() {
+    // given
+    let harness = Harness::new().await;
+    harness.approvals.set_timing(100, 100);
+    let request = request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":"DELETE FROM fixture","parameters":[],"page_size":10}),
+    );
+    let connection = harness.connections.get("fixture").await.unwrap();
+    let remote = caller(CallerTransport::Mcp);
+    let hash = value_hash(&serde_json::to_value(&request).unwrap());
+    let approvals = harness.approvals.clone();
+    let task = tokio::spawn(async move {
+        approvals
+            .consume(&connection, &remote, &request, &hash)
+            .await
+    });
+    let pending = pending(&harness.approvals).await;
+    let first = binding_lease(&harness, &pending.id);
+    // when
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let renewed = binding_lease(&harness, &pending.id);
+    let approved = harness.approvals.approve_pending(
+        &pending.id,
+        &decision(&pending.id, true),
+        &caller(CallerTransport::Gui),
+    );
+    let actual = task.await.unwrap();
+    // then
+    assert!(renewed > first);
+    assert!(approved.is_ok());
+    assert!(actual.is_ok());
+}
+fn binding_lease(harness: &Harness, id: &str) -> u64 {
+    let path = harness
+        .directory
+        .0
+        .join("service-approval-bindings-v1")
+        .join(format!("{id}.json"));
+    let binding: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    binding["deadline_at_ms"].as_u64().unwrap()
+}
+
+#[tokio::test]
+async fn 대기하던_프로세스가_사라진_binding은_결정을_거부하고_다음_대기가_정리한다() {
+    // given
+    let harness = Harness::new().await;
+    let connection = harness.connections.get("fixture").await.unwrap();
+    let remote = caller(CallerTransport::Mcp);
+    let first = request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":"DELETE FROM fixture","parameters":[],"page_size":10}),
+    );
+    let hash = value_hash(&serde_json::to_value(&first).unwrap());
+    let approvals = harness.approvals.clone();
+    let waiter = connection.clone();
+    let waiter_remote = remote.clone();
+    let task = tokio::spawn(async move {
+        approvals
+            .consume(&waiter, &waiter_remote, &first, &hash)
+            .await
+    });
+    let pending = pending(&harness.approvals).await;
+    let pending_path = harness
+        .directory
+        .0
+        .join("pending_approvals")
+        .join(format!("{}.pending.json", pending.id));
+    let binding_path = harness
+        .directory
+        .0
+        .join("service-approval-bindings-v1")
+        .join(format!("{}.json", pending.id));
+    let pending_bytes = std::fs::read(&pending_path).unwrap();
+    let mut binding: Value =
+        serde_json::from_slice(&std::fs::read(&binding_path).unwrap()).unwrap();
+    task.abort();
+    let _ = task.await;
+    binding["deadline_at_ms"] = json!(crate::services::storage::now_ms() - 1);
+    persistence::service_write_atomic(&pending_path, &pending_bytes).unwrap();
+    persistence::service_write_atomic(&binding_path, &serde_json::to_vec(&binding).unwrap())
+        .unwrap();
+    // when
+    let late = harness.approvals.approve_pending(
+        &pending.id,
+        &decision(&pending.id, true),
+        &caller(CallerTransport::Gui),
+    );
+    let leftover = queue_counts(&harness.directory.0);
+    let next = request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":"DELETE FROM fixture","parameters":[],"page_size":10}),
+    );
+    let next_hash = value_hash(&serde_json::to_value(&next).unwrap());
+    let approvals = harness.approvals.clone();
+    let next_task = tokio::spawn(async move {
+        approvals
+            .consume(&connection, &remote, &next, &next_hash)
+            .await
+    });
+    let live = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let list = crate::ai_approval::list_pending_in(harness.approvals.profile()).unwrap();
+            if list.len() == 1 && list[0].id != pending.id {
+                return list[0].id.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let counts = queue_counts(&harness.directory.0);
+    next_task.abort();
+    let _ = next_task.await;
+    // then
+    assert_eq!(late.unwrap_err().code, ErrorCode::WriteNotAllowed);
+    assert_eq!(leftover, (1, 0, 1));
+    assert_ne!(live, pending.id);
+    assert_eq!(counts, (1, 0, 1));
+    assert_eq!(queue_counts(&harness.directory.0), (0, 0, 0));
+}
+
+#[tokio::test]
+async fn 대기_중인_승인의_pending_파일_수정_시각을_갱신한다() {
+    // given
+    let harness = Harness::new().await;
+    harness.approvals.set_timing(100, 100);
+    let request = request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":"DELETE FROM fixture","parameters":[],"page_size":10}),
+    );
+    let connection = harness.connections.get("fixture").await.unwrap();
+    let hash = value_hash(&serde_json::to_value(&request).unwrap());
+    let approvals = harness.approvals.clone();
+    let task = tokio::spawn(async move {
+        approvals
+            .consume(&connection, &caller(CallerTransport::Mcp), &request, &hash)
+            .await
+    });
+    let pending = pending(&harness.approvals).await;
+    let path = harness
+        .directory
+        .0
+        .join("pending_approvals")
+        .join(format!("{}.pending.json", pending.id));
+    let bytes = std::fs::read(&path).unwrap();
+    let old = std::time::SystemTime::now() - Duration::from_secs(3 * 3_600);
+    filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(old)).unwrap();
+    // when
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let removed = crate::ai_approval::cleanup_expired_in(&harness.directory.0, 3_600).unwrap();
+    let kept = std::fs::read(&path).ok();
+    task.abort();
+    let _ = task.await;
+    // then
+    assert_eq!(removed, 0);
+    assert_eq!(kept, Some(bytes));
 }
 
 #[tokio::test]
@@ -334,6 +508,67 @@ async fn cancel_pending_job(
         &caller(CallerTransport::Gui),
     );
     (response, late)
+}
+
+#[tokio::test]
+async fn 지연된_승인_뒤_드라이버는_승인_대기_전에_남은_deadline을_그대로_받는다() {
+    // given
+    let harness = Harness::new().await;
+    let saved = harness.connections.get("fixture").await.unwrap();
+    harness
+        .connections
+        .update("fixture", saved.version, json!({"allow_writes":true}))
+        .await
+        .unwrap();
+    let mut request = request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":"DELETE FROM fixture","parameters":[],"page_size":10}),
+    );
+    request.deadline_ms = 3000;
+    let remote = caller(CallerTransport::Mcp);
+    harness
+        .policy
+        .register_query_write(&remote, &request)
+        .unwrap();
+    // when
+    let queued = harness.runtime.submit(request, remote.clone()).await;
+    let pending = pending(&harness.approvals).await;
+    tokio::time::sleep(Duration::from_millis(3_500)).await;
+    let job_id = queued.job_id.unwrap();
+    let waiting = harness.runtime.jobs.awaiting_approval(&job_id);
+    harness
+        .approvals
+        .approve_pending(
+            &pending.id,
+            &decision(&pending.id, true),
+            &caller(CallerTransport::Gui),
+        )
+        .unwrap();
+    let response = finished_job(&harness, &job_id, &remote).await;
+    // then
+    let granted = harness.driver.last_deadline_ms.load(Ordering::SeqCst);
+    let expected = 3000 + crate::services::runtime::CANCEL_GRACE_MS;
+    assert!(waiting);
+    assert_eq!(response.status, JobStatus::Succeeded);
+    assert!(granted <= expected && granted + 500 >= expected);
+    assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 1);
+}
+async fn finished_job(harness: &Harness, job_id: &str, remote: &CallerContext) -> ServiceResponse {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let record = harness
+                .runtime
+                .jobs
+                .get(job_id, "platform-owner", remote)
+                .unwrap();
+            if let Some(response) = record.response {
+                return response;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap()
 }
 
 #[tokio::test]

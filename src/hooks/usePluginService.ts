@@ -13,6 +13,13 @@ export interface ServiceCapabilities {
   gui_instance_id?: string;
 }
 
+// Mirror MAX_DEADLINE_MS and MAX_JOB_DEADLINE_MS of @tabularis/service-contracts: its runtime
+// entry reads schema files with node:fs, so the GUI bundle imports only its types.
+const MAX_DEADLINE_MS = 120_000;
+const MAX_JOB_DEADLINE_MS = 3_600_000;
+const FOREGROUND_GRACE_MS = 2000;
+const APPROVAL_CALL_FLOOR_MS = 2000;
+
 const terminal = (status: JobStatus) => status !== "queued" && status !== "running";
 const pause = () => new Promise<void>((resolve) => setTimeout(resolve, 50));
 
@@ -40,8 +47,16 @@ export function usePluginService() {
     },
     async call(request: ServiceRequest, options?: { signal?: AbortSignal }): Promise<ServiceResponse> {
       if (options?.signal?.aborted) throw new DOMException("The request was aborted.", "AbortError");
-      const duration = Math.min(120000, Math.max(1, request.deadline_ms ?? 30000));
-      const deadline = performance.now() + duration + 2000;
+      const cap = request.operation === "query.execute" ? MAX_JOB_DEADLINE_MS : MAX_DEADLINE_MS;
+      const duration = Math.min(cap, Math.max(1, request.deadline_ms ?? 30000));
+      // While the job waits for a person to approve it the deadline moves later by the time spent
+      // waiting, so what is left afterwards is what was left when the wait began.
+      let deadline = performance.now() + duration + FOREGROUND_GRACE_MS;
+      let awaitingSince: number | null = null;
+      const timeLeft = () => {
+        const left = deadline - performance.now();
+        return awaitingSince === null ? left : Math.max(left, APPROVAL_CALL_FLOOR_MS);
+      };
       let jobId: string | null = null;
       let owner: string | null = null;
       let cancelRequested = false;
@@ -50,7 +65,7 @@ export function usePluginService() {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
           return await Promise.race([pending, new Promise<never>((_, reject) => {
-            timer = setTimeout(() => reject(expired), Math.max(0, deadline - performance.now()));
+            timer = setTimeout(() => reject(expired), Math.max(0, timeLeft()));
           })]);
         } finally { if (timer !== undefined) clearTimeout(timer); }
       };
@@ -63,7 +78,7 @@ export function usePluginService() {
       });
       const control = (operation: "job.get" | "job.result" | "job.cancel"): ServiceRequest => ({
         protocol_version: 1, operation, request_id: crypto.randomUUID(), connection_id: request.connection_id,
-        deadline_ms: Math.min(30000, Math.max(1, Math.floor(deadline - performance.now()))),
+        deadline_ms: Math.min(30000, Math.max(1, Math.floor(timeLeft()))),
         input: { job_id: jobId!, owner_instance_id: owner! },
       });
       const cancel = () => {
@@ -87,6 +102,14 @@ export function usePluginService() {
           const progressData = progress.data;
           const status = progressData && typeof progressData === "object" && !Array.isArray(progressData) ? progressData.status : null;
           if (typeof status !== "string") throw new Error("The service returned an invalid job status.");
+          const awaiting = !!progressData && typeof progressData === "object" && !Array.isArray(progressData) && progressData.awaiting_approval === true;
+          if (awaiting) {
+            const now = performance.now();
+            if (awaitingSince !== null) deadline += now - awaitingSince;
+            awaitingSince = now;
+          } else {
+            awaitingSince = null;
+          }
           if (status !== "queued" && status !== "running") {
             response = await bounded(invoke<ServiceResponse>("service_call", { request: control("job.result") }));
             if (response.error) return unknown(response.error);

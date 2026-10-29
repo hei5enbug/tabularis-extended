@@ -1,12 +1,12 @@
 use super::{
-    auth::{AuthLifecycle, AuthManager},
+    auth::{AuthLifecycle, AuthManager, REFRESH_MARGIN_MS},
     backend::{
         ConnectionBackend, DriverBackend, DriverContext, DriverOutput, PermissionScope,
-        PolicyBackend, ReadOnlyGuarantee, SavedConnection, SessionFinish,
+        PolicyBackend, ReadOnlyGuarantee, SavedConnection, SessionFinish, TransientAuth,
     },
     contracts::{
         ErrorCode, JobStatus, Limits, Metrics, Operation, Outcome, Page, ServiceRequest,
-        ServiceResponse,
+        ServiceResponse, MAX_DEADLINE_MS,
     },
     credentials::{SecretInputs, SecretSlot, SecretStore, SessionSecretStore},
     dispatch::{CallerContext, CallerTransport, ServiceDispatcher, ServiceHandler},
@@ -36,6 +36,13 @@ use std::{
 /// How long a request waits after its deadline for the driver to answer the
 /// cancellation it was asked to perform.
 pub const CANCEL_GRACE_MS: u64 = 5_000;
+/// How long before a driver would reject its Entra token (`REFRESH_MARGIN_MS`
+/// before expiry) the host hands it a newer one during a running call.
+pub const AUTH_REFRESH_LEAD_MS: u64 = 60_000;
+/// How long a failed token refresh waits before it tries again.
+const AUTH_REFRESH_RETRY_MS: u64 = 15_000;
+/// The deadline of one token refresh call to the driver.
+const AUTH_REFRESH_CALL_MS: u64 = 30_000;
 
 pub const SERVICE_OPERATIONS: &[Operation] = &[
     Operation::ConnectionList,
@@ -415,7 +422,7 @@ impl ServiceRuntime {
         if lease.signal().is_cancelled() {
             return Err(failure(ErrorCode::Cancelled));
         }
-        if now_ms() >= lease.deadline_at_ms {
+        if now_ms() >= lease.deadline_at_ms() {
             return Err(failure(ErrorCode::DeadlineExceeded));
         }
         let extension = self
@@ -550,23 +557,24 @@ impl ServiceRuntime {
             let hash = value_hash(
                 &serde_json::to_value(request).map_err(|_| failure(ErrorCode::InvalidArgument))?,
             );
-            lease.set_awaiting_approval(true);
+            let waited_from = now_ms();
+            lease.begin_approval();
             let approved = if is_write {
-                before_publication(
+                await_approval(
                     lease,
                     self.policy
                         .consume_write_approval(&connection, caller, request, &hash),
                 )
                 .await
             } else {
-                before_publication(
+                await_approval(
                     lease,
                     self.policy
                         .consume_read_approval(&connection, caller, request, &hash),
                 )
                 .await
             };
-            lease.set_awaiting_approval(false);
+            lease.end_approval(now_ms().saturating_sub(waited_from));
             approved?;
             self.recheck_after_approval(request, caller, &connection, is_write)
                 .await?;
@@ -582,7 +590,7 @@ impl ServiceRuntime {
         let mut context = DriverContext {
             connection_id: connection.id.clone(),
             request_id: request.request_id.clone(),
-            deadline_ms: lease.deadline_at_ms.saturating_sub(now_ms()),
+            deadline_ms: lease.deadline_at_ms().saturating_sub(now_ms()),
             signal: lease.signal(),
             transient_auth: None,
             read_only: !is_write && !write_session_read,
@@ -811,7 +819,7 @@ impl ServiceRuntime {
             guarantee_label(guarantee)
         };
         context.transient_auth = self.auth.context(&connection, context.deadline_ms).await?;
-        context.deadline_ms = lease.deadline_at_ms.saturating_sub(now_ms());
+        context.deadline_ms = lease.deadline_at_ms().saturating_sub(now_ms());
         if context.deadline_ms == 0 {
             return Err(failure(ErrorCode::DeadlineExceeded));
         }
@@ -989,6 +997,60 @@ impl ServiceRuntime {
         };
         Ok(from_page(request, page))
     }
+    /// Keeps a driver call that outlives its Entra token supplied with a newer
+    /// one: shortly before the driver would reject the token it holds, the host
+    /// fetches a fresh token and hands it over. It never completes, so the
+    /// caller drops it together with the call, and it stops for good when the
+    /// driver cannot take a refreshed token.
+    async fn refresh_auth_while_running(
+        &self,
+        connection: &SavedConnection,
+        context: &DriverContext,
+    ) -> std::convert::Infallible {
+        let Some(TransientAuth::EntraToken {
+            mut expires_at_ms, ..
+        }) = context.transient_auth.clone()
+        else {
+            return std::future::pending().await;
+        };
+        let call_ends = now_ms().saturating_add(context.deadline_ms);
+        loop {
+            let refresh_at = expires_at_ms
+                .saturating_sub(REFRESH_MARGIN_MS.saturating_add(AUTH_REFRESH_LEAD_MS));
+            if refresh_at >= call_ends {
+                return std::future::pending().await;
+            }
+            tokio::time::sleep(Duration::from_millis(refresh_at.saturating_sub(now_ms()))).await;
+            if let Ok(Some(
+                auth @ TransientAuth::EntraToken {
+                    expires_at_ms: next,
+                    ..
+                },
+            )) = self.auth.context(connection, MAX_DEADLINE_MS).await
+            {
+                if next > expires_at_ms {
+                    let refresh = DriverContext {
+                        connection_id: context.connection_id.clone(),
+                        request_id: uuid::Uuid::new_v4().to_string(),
+                        deadline_ms: AUTH_REFRESH_CALL_MS,
+                        signal: context.signal.clone(),
+                        transient_auth: Some(auth),
+                        read_only: context.read_only,
+                        session_handle: None,
+                    };
+                    match self.driver.refresh_auth(connection, refresh).await {
+                        Ok(true) => {
+                            expires_at_ms = next;
+                            continue;
+                        }
+                        Ok(false) => return std::future::pending().await,
+                        Err(_) => {}
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(AUTH_REFRESH_RETRY_MS)).await;
+        }
+    }
     async fn driver_call(
         &self,
         connection: &SavedConnection,
@@ -1002,13 +1064,24 @@ impl ServiceRuntime {
             .deadline_ms
             .saturating_add(self.cancel_grace().as_millis() as u64)
             .clamp(1, request.operation.max_deadline_ms());
-        let result = match cursor {
-            Some(cursor) => {
-                self.driver
-                    .continue_cursor(connection, cursor, context)
-                    .await
+        let refresh = self.refresh_auth_while_running(connection, &context);
+        let call = async {
+            match cursor {
+                Some(cursor) => {
+                    self.driver
+                        .continue_cursor(connection, cursor, context.clone())
+                        .await
+                }
+                None => {
+                    self.driver
+                        .execute(connection, request, context.clone())
+                        .await
+                }
             }
-            None => self.driver.execute(connection, request, context).await,
+        };
+        let result = tokio::select! {
+            result = call => result,
+            never = refresh => match never {},
         };
         match result {
             Ok(output) if output.confirmed_cancelled => {
@@ -1348,17 +1421,13 @@ impl ServiceRuntime {
         lease: &Arc<JobLease>,
         is_write: bool,
     ) -> (ServiceResult<ServiceResponse>, Option<&'static str>) {
-        let remaining = Duration::from_millis(lease.deadline_at_ms.saturating_sub(now_ms()));
         let Some(runtime) = self.me.upgrade() else {
             return (
-                match tokio::time::timeout(
-                    remaining,
-                    self.execute(request, caller, lease, is_write),
-                )
-                .await
+                match run_until_deadline(lease, self.execute(request, caller, lease, is_write))
+                    .await
                 {
-                    Ok(result) => result,
-                    Err(_) => Err(failure(ErrorCode::DeadlineExceeded)),
+                    Some(result) => result,
+                    None => Err(failure(ErrorCode::DeadlineExceeded)),
                 },
                 None,
             );
@@ -1369,7 +1438,7 @@ impl ServiceRuntime {
                 runtime.execute(&request, &caller, &lease, is_write).await
             })
         };
-        if let Ok(result) = tokio::time::timeout(remaining, task.join()).await {
+        if let Some(result) = run_until_deadline(lease, task.join()).await {
             return (result, None);
         }
         let grace = self.cancel_grace();
@@ -1744,6 +1813,54 @@ struct SecretInputCleanup<'a> {
     inputs: &'a SecretInputs,
     caller: &'a CallerContext,
     request: &'a ServiceRequest,
+}
+/// How often a job that waits for approval renews its persisted record.
+const APPROVAL_RENEW_INTERVAL: Duration = Duration::from_secs(60);
+/// How often the deadline is looked at again while a job waits for approval.
+const APPROVAL_DEADLINE_RECHECK: Duration = Duration::from_millis(100);
+
+/// Waits for `action` until the lease deadline. A job that awaits approval
+/// has no deadline: its wait is not part of the execution time, so the
+/// deadline is looked at again whenever it moves. `None` means it passed.
+async fn run_until_deadline<T>(
+    lease: &JobLease,
+    action: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::pin!(action);
+    loop {
+        let remaining = if lease.awaiting_approval() {
+            APPROVAL_DEADLINE_RECHECK
+        } else {
+            Duration::from_millis(lease.deadline_at_ms().saturating_sub(now_ms()))
+        };
+        if let Ok(result) = tokio::time::timeout(remaining, &mut action).await {
+            return Some(result);
+        }
+        if !lease.awaiting_approval() && now_ms() >= lease.deadline_at_ms() {
+            return None;
+        }
+    }
+}
+/// Waits for a human decision, which has no time limit, until the job is
+/// cancelled. The persisted job record is renewed while the wait lasts.
+async fn await_approval<T>(
+    lease: &JobLease,
+    action: impl std::future::Future<Output = ServiceResult<T>>,
+) -> ServiceResult<T> {
+    let signal = lease.signal();
+    tokio::pin!(action);
+    let mut renew = tokio::time::interval_at(
+        tokio::time::Instant::now() + APPROVAL_RENEW_INTERVAL,
+        APPROVAL_RENEW_INTERVAL,
+    );
+    loop {
+        tokio::select! {
+            biased;
+            _ = signal.cancelled() => return Err(failure(ErrorCode::Cancelled)),
+            result = &mut action => return result,
+            _ = renew.tick() => lease.renew_approval(),
+        }
+    }
 }
 async fn before_publication<T>(
     lease: &JobLease,

@@ -3,10 +3,12 @@ use super::{
         backend::{ConnectionBackend, SessionFinish},
         contracts::*,
         credentials::{Secret, SecretSlot, SecretStore},
+        auth::REFRESH_MARGIN_MS,
         jobs::JobManager,
         results::ResultStore,
-        runtime::ServiceRuntime,
+        runtime::{ServiceRuntime, AUTH_REFRESH_LEAD_MS},
         sessions::SessionManager,
+        storage::now_ms,
     },
     support::*,
 };
@@ -1332,4 +1334,57 @@ async fn auth_begin의_허용되지_않은_저장_방식은_인증을_시작하�
         .await
         .unwrap()
         .is_none());
+}
+
+#[tokio::test]
+async fn 토큰보다_오래_도는_드라이버_호출에는_거부되기_전에_새_entra_토큰을_넘긴다() {
+    // given
+    let harness = Harness::new();
+    harness
+        .connections
+        .saved
+        .lock()
+        .unwrap()
+        .insert("conn-a".into(), entra_connection("entra_service_principal"));
+    harness
+        .secrets
+        .set(
+            "conn-a",
+            SecretSlot::EntraClientSecret,
+            Secret::new(b"synthetic-client-secret".to_vec()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let first_ttl = REFRESH_MARGIN_MS + AUTH_REFRESH_LEAD_MS + 300;
+    harness.oauth.ttls.lock().unwrap().push_back(first_ttl);
+    let gate = TestGate::new();
+    harness
+        .driver
+        .gates
+        .lock()
+        .unwrap()
+        .insert("long".into(), gate.clone());
+    let mut input = query("SELECT 'long'");
+    input.deadline_ms = 5_000;
+    let started = now_ms();
+
+    // when
+    let (actual, refreshed) = tokio::join!(harness.call(&input), async {
+        let refreshed = tokio::time::timeout(Duration::from_secs(4), async {
+            loop {
+                if let Some(expiry) = harness.driver.refreshed.lock().unwrap().first() {
+                    return *expiry;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        gate.release();
+        refreshed
+    });
+
+    // then
+    assert_eq!(actual.status, JobStatus::Succeeded, "{:?}", actual.error);
+    assert!(refreshed.unwrap() > started + first_ttl);
+    assert_eq!(harness.driver.refreshed.lock().unwrap().len(), 1);
 }

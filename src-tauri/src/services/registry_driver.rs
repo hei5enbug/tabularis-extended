@@ -607,6 +607,41 @@ impl DriverBackend for RegistryDriverBackend {
                 .await;
         }
     }
+    async fn refresh_auth(
+        &self,
+        connection: &SavedConnection,
+        mut context: DriverContext,
+    ) -> ServiceResult<bool> {
+        if context.connection_id != connection.id
+            || context.session_handle.is_some()
+            || context.transient_auth.is_none()
+        {
+            return Err(failure(ErrorCode::InvalidArgument));
+        }
+        let deadline = context_deadline(&context)?;
+        let driver = self.driver(connection).await?;
+        let capabilities = tokio::select! {
+            result = driver.service_capabilities() => result?,
+            _ = context.signal.cancelled() => return Err(failure(ErrorCode::Cancelled)),
+            _ = tokio::time::sleep_until(deadline) => return Err(failure(ErrorCode::DeadlineExceeded)),
+        };
+        if !capabilities.supports(ServiceRpcMethod::RefreshAuth) {
+            return Ok(false);
+        }
+        let params = tokio::select! {
+            result = self.resolved(connection, &context, None) => result?,
+            _ = context.signal.cancelled() => return Err(failure(ErrorCode::Cancelled)),
+            _ = tokio::time::sleep_until(deadline) => return Err(failure(ErrorCode::DeadlineExceeded)),
+        };
+        context.deadline_ms = remaining_ms(deadline)?;
+        let value = driver
+            .service_call(ServiceRpcMethod::RefreshAuth, &params, &context, json!({}))
+            .await?;
+        value["data"]["refreshed"]
+            .as_bool()
+            .or_else(|| value["refreshed"].as_bool())
+            .ok_or_else(|| failure(ErrorCode::InvalidArgument))
+    }
     async fn invalidate_auth(&self, connection_id: &str, _previous_principal: Option<&str>) {
         if let Ok(mut epochs) = self.auth_epochs.lock() {
             let epoch = epochs.entry(connection_id.into()).or_default();

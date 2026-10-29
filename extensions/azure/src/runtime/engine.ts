@@ -1,6 +1,6 @@
 import type { Readable, Writable } from "node:stream";
 import type { JsonValue, ServiceResponse } from "@tabularis/service-contracts/types";
-import { createClientProvider, type ClientProvider } from "../connection/index.js";
+import { connectionContext, createClientProvider, type ClientProvider } from "../connection/index.js";
 import { createConnectionHandlers } from "../connection/handlers.js";
 import { createDocumentHandlers } from "../documents/index.js";
 import { rpcMethods, type ResolvedContext, type RpcFailure, type RpcHandler, type RpcRequest, type RpcRequestContext, type RpcResponse, type RpcResult } from "./contracts.js";
@@ -16,6 +16,7 @@ export interface RuntimeOptions {
   resolveContext?: (request: RpcRequest) => ResolvedContext;
   onShutdown?: () => Promise<void>;
   onInvalidate?: (connection_id: string) => Promise<void>;
+  onRefresh?: (context: RpcRequestContext) => Promise<boolean>;
   now?: () => number;
   globalConcurrency?: number;
   connectionConcurrency?: number;
@@ -29,6 +30,7 @@ interface Pending { request: RpcRequest; context: RpcRequestContext; controller:
 export const MAX_NATIVE_CONNECTIONS = 4096;
 export const NATIVE_CONNECTION_RETENTION_MS = 20 * 60_000;
 export const MAX_INVALIDATION_CONTROLS = 8;
+export const MAX_REFRESH_CONTROLS = 8;
 const writes = new Set(["create_document", "replace_document", "delete_document"]);
 function knownMethod(value: string): boolean { return (rpcMethods as readonly string[]).includes(value); }
 function rpcError(request: RpcRequest, error: DriverError, code = -32000): RpcFailure {
@@ -55,6 +57,7 @@ export function createRpcRuntime(options: RuntimeOptions = {}): RpcRuntime {
   const idleWaiters: (() => void)[] = [];
   let active = 0;
   let activeControls = 0;
+  let activeRefreshes = 0;
   let pendingBytes = 0;
   let closing = false;
   let shutdown: Promise<void> | undefined;
@@ -152,7 +155,8 @@ export function createRpcRuntime(options: RuntimeOptions = {}): RpcRuntime {
       }
       if (!knownMethod(request.method)) return Object.hasOwn(request, "id") ? dispatchRpc(request) : undefined;
       if (request.method === "service_invalidate_auth" && !options.onInvalidate) return Object.hasOwn(request, "id") ? dispatchRpc(request) : undefined;
-      if (!handlers[request.method as keyof typeof handlers] && request.method !== "cancel_request" && !(request.method === "service_invalidate_auth" && options.onInvalidate)) return Object.hasOwn(request, "id") ? dispatchRpc(request) : undefined;
+      if (request.method === "service_refresh_auth" && !options.onRefresh) return Object.hasOwn(request, "id") ? dispatchRpc(request) : undefined;
+      if (!handlers[request.method as keyof typeof handlers] && request.method !== "cancel_request" && !(request.method === "service_invalidate_auth" && options.onInvalidate) && !(request.method === "service_refresh_auth" && options.onRefresh)) return Object.hasOwn(request, "id") ? dispatchRpc(request) : undefined;
       try {
         if (request.method === "cancel_request") {
           const value = request.params ?? {};
@@ -177,6 +181,16 @@ export function createRpcRuntime(options: RuntimeOptions = {}): RpcRuntime {
         if (request.method === "initialize") {
           try { return response(request, context, await handlers.initialize!(handlerInput(request), context)); }
           catch (error) { return failure(request, context, error); }
+        }
+        if (request.method === "service_refresh_auth") {
+          if (activeRefreshes >= MAX_REFRESH_CONTROLS) return failure(request, context, new DriverError("RESOURCE_LIMIT", "The driver token refresh control limit was exceeded."));
+          activeRefreshes++;
+          try {
+            const refreshed = await options.onRefresh!(context);
+            assertRequestActive(context);
+            return response(request, context, { refreshed });
+          } catch (error) { return failure(request, context, error); }
+          finally { activeRefreshes--; }
         }
         if (request.method === "service_invalidate_auth") {
           if (activeControls >= MAX_INVALIDATION_CONTROLS) return failure(request, context, new DriverError("RESOURCE_LIMIT", "The driver invalidation control limit was exceeded."));
@@ -234,11 +248,11 @@ export function createRpcRuntime(options: RuntimeOptions = {}): RpcRuntime {
   };
   return runtime;
 }
-export function createCosmosRuntime(options: Omit<RuntimeOptions, "handlers" | "onShutdown" | "onInvalidate"> & { clients?: ClientProvider; handlers?: RuntimeOptions["handlers"] } = {}): RpcRuntime {
+export function createCosmosRuntime(options: Omit<RuntimeOptions, "handlers" | "onShutdown" | "onInvalidate" | "onRefresh"> & { clients?: ClientProvider; handlers?: RuntimeOptions["handlers"] } = {}): RpcRuntime {
   const clients = options.clients ?? createClientProvider();
   const queryReady = options.handlers?.query_page !== undefined && options.handlers.execute_query !== undefined;
   const handlers = { ...createConnectionHandlers(clients, { query_page_v1: queryReady }), ...createDocumentHandlers(clients), ...options.handlers };
-  return createRpcRuntime({ ...options, handlers, onInvalidate: (connection_id) => clients.invalidate(connection_id), onShutdown: async () => { await clients.dispose?.(); } });
+  return createRpcRuntime({ ...options, handlers, onInvalidate: (connection_id) => clients.invalidate(connection_id), onRefresh: (context) => clients.refresh(connectionContext(context)), onShutdown: async () => { await clients.dispose?.(); } });
 }
 function parseRequest(value: unknown): RpcRequest | undefined {
   if (!jsonObject(value) || value.jsonrpc !== "2.0" || typeof value.method !== "string" || Object.keys(value).some((key) => !["jsonrpc", "id", "method", "params"].includes(key)) || (value.params !== undefined && !jsonObject(value.params))) return undefined;

@@ -302,6 +302,7 @@ fn parse_service_capabilities(value: &Value) -> ServiceResult<DriverServiceCapab
         documents,
         query_page: boolean(&["query_page_v1"])?,
         cancel: boolean(&["cancel_v1", "cancel"])?,
+        auth_refresh: boolean(&["auth_refresh_v1"])?,
         sessions: boolean(&["sessions", "sessions_v1"])?,
         catalog: boolean(&["catalog"])? || documents,
         rows: boolean(&["rows"])?,
@@ -387,7 +388,11 @@ impl PluginProcess {
         }
         let semaphore = if matches!(
             method,
-            "initialize" | "cancel_request" | "service_invalidate_auth" | "service_session_discard"
+            "initialize"
+                | "cancel_request"
+                | "service_invalidate_auth"
+                | "service_refresh_auth"
+                | "service_session_discard"
         ) {
             &self.control_slots
         } else {

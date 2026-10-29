@@ -827,3 +827,118 @@ async fn 모순된_세션_open_응답은_예약하지_않고_알려진_handle을
     assert_eq!(stats["sessions"], 0);
     assert!(backend.sessions.lock().unwrap().is_empty());
 }
+
+fn entra_context(request: &str, token: &str, expires_at_ms: u64) -> DriverContext {
+    let mut refresh = context("conn", request);
+    refresh.transient_auth = Some(TransientAuth::EntraToken {
+        access_token: crate::services::credentials::Secret::new(token.as_bytes().to_vec()).unwrap(),
+        expires_at_ms,
+        tenant_id: "tenant".into(),
+        client_id: "client".into(),
+        principal_id: "principal".into(),
+        scope: "scope".into(),
+    });
+    refresh
+}
+async fn driver_stats(connection: &SavedConnection) -> Value {
+    registry::get_driver(&connection.driver)
+        .await
+        .unwrap()
+        .service_call(
+            ServiceRpcMethod::Test,
+            &params(&connection.driver),
+            &context("conn", "stats"),
+            json!({}),
+        )
+        .await
+        .unwrap()
+}
+#[tokio::test]
+async fn 토큰_갱신은_드라이버에_새_토큰을_전달하고_드라이버의_채택_여부를_반환한다() {
+    // given
+    let (backend, connection) = registered("native", json!({"auth_refresh":true})).await;
+    // when
+    let actual = backend
+        .refresh_auth(&connection, entra_context("refresh", "new-token", 4242))
+        .await;
+    // then
+    let stats = driver_stats(&connection).await;
+    assert!(actual.unwrap());
+    assert_eq!(stats["refreshes"].as_array().unwrap().len(), 1);
+    assert_eq!(stats["refreshes"][0]["expires_at_ms"], 4242);
+    assert_eq!(stats["refreshes"][0]["input"], json!({}));
+    assert!(backend.active.lock().unwrap().is_empty());
+}
+#[tokio::test]
+async fn 드라이버가_토큰을_채택하지_않으면_false를_반환한다() {
+    // given
+    let (backend, connection) =
+        registered("native", json!({"auth_refresh":true,"refreshed":false})).await;
+    // when
+    let actual = backend
+        .refresh_auth(&connection, entra_context("refresh", "new-token", 4242))
+        .await;
+    // then
+    assert!(!actual.unwrap());
+}
+#[tokio::test]
+async fn 토큰_갱신을_지원하지_않는_드라이버에는_호출을_보내지_않고_false를_반환한다() {
+    // given
+    let (backend, connection) = registered("native", json!({})).await;
+    // when
+    let actual = backend
+        .refresh_auth(&connection, entra_context("refresh", "new-token", 4242))
+        .await;
+    // then
+    let stats = driver_stats(&connection).await;
+    assert!(!actual.unwrap());
+    assert_eq!(stats["refreshes"], json!([]));
+}
+#[tokio::test]
+async fn 토큰이_없거나_다른_연결의_갱신_컨텍스트는_거부한다() {
+    // given
+    let (backend, connection) = registered("native", json!({"auth_refresh":true})).await;
+    let missing = context("conn", "refresh");
+    let mut mismatched = entra_context("refresh", "new-token", 4242);
+    mismatched.connection_id = "other".into();
+    // when
+    let actual = [
+        backend.refresh_auth(&connection, missing).await,
+        backend.refresh_auth(&connection, mismatched).await,
+    ];
+    // then
+    let stats = driver_stats(&connection).await;
+    assert!(actual
+        .iter()
+        .all(|result| result.as_ref().err().unwrap().code == ErrorCode::InvalidArgument));
+    assert_eq!(stats["refreshes"], json!([]));
+}
+#[tokio::test]
+async fn 진행중인_쿼리가_있어도_토큰_갱신은_취소_없이_완료된다() {
+    // given
+    let (backend, connection) = registered("native", json!({"auth_refresh":true})).await;
+    let backend = Arc::new(backend);
+    let running = tokio::spawn({
+        let backend = backend.clone();
+        let connection = connection.clone();
+        async move {
+            backend
+                .execute(
+                    &connection,
+                    &request(json!({"language":"sql","text":"wait_pair","parameters":[]})),
+                    context("conn", "running"),
+                )
+                .await
+        }
+    });
+    wait_native_active(&connection, 1).await;
+    // when
+    let refreshed = backend
+        .refresh_auth(&connection, entra_context("refresh", "new-token", 4242))
+        .await;
+    backend.cancel("conn", "running").await.unwrap();
+    let query = running.await.unwrap();
+    // then
+    assert!(refreshed.unwrap());
+    assert_eq!(query.err().unwrap().code, ErrorCode::Cancelled);
+}

@@ -251,7 +251,7 @@ impl OperationExtension for SpatialExportDomain {
             driver_id: execution.connection.driver.clone(),
             filename: filename.clone(),
             max_bytes: limits.bytes,
-            deadline_at_ms: lease.deadline_at_ms,
+            deadline_at_ms: lease.deadline_at_ms(),
         })?;
         let mut stream = FeatureStream::new(sink, limits)?;
         match &source {

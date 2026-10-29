@@ -100,7 +100,7 @@ test("deadline과 갱신 여유를 충족하지 못하는 Entra 토큰은 SDK �
   const f = providerFixture(t);
 
   // when
-  const actual = await f.clients.get({ connection_id: "a", settings: entraSettings, auth: { ...entra, expires_at_ms: 331000 }, deadline_ms: 30000 }).catch((error) => error);
+  const actual = await f.clients.get({ connection_id: "a", settings: entraSettings, auth: { ...entra, expires_at_ms: 330999 }, deadline_ms: 30000 }).catch((error) => error);
 
   // then
   assert.equal(actual.code, "AUTH_EXPIRED");
@@ -141,7 +141,7 @@ test("초기화는 구현된 서비스 기능만 협상한다", async (t) => {
   const actual = await f.runtime.dispatch({ jsonrpc: "2.0", id: "init", method: "initialize", params: { settings: {} } });
 
   // then
-  assert.deepEqual(actual.result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: false, cancel_v1: true, sessions_v1: false });
+  assert.deepEqual(actual.result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: false, cancel_v1: true, auth_refresh_v1: true, sessions_v1: false });
 });
 
 test("공개 operation input의 권한 주장은 엄격한 스키마로 거부한다", async (t) => {

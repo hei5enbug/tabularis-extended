@@ -1,5 +1,8 @@
 use super::super::{
-    contracts::{ErrorCode, SchemaValidator, ServiceError, ServiceRequest, ServiceResponse},
+    contracts::{
+        ErrorCode, SchemaValidator, ServiceError, ServiceRequest, ServiceResponse,
+        MAX_JOB_DEADLINE_MS,
+    },
     dispatch::{CallerContext, CallerTransport},
     error::{failure, ServiceResult},
     runtime::ServiceRuntime,
@@ -26,6 +29,16 @@ use tokio::{
     sync::{Notify, Semaphore},
     task::JoinHandle,
 };
+
+/// The longest an owner call may take: a job's deadline and the grace after it.
+const MAX_OWNER_CALL_MS: u64 = MAX_JOB_DEADLINE_MS + 2_000;
+
+pub(super) fn owner_call_timeout(deadline_ms: u64) -> Duration {
+    Duration::from_millis(deadline_ms.saturating_add(2_000).min(MAX_OWNER_CALL_MS))
+}
+pub(super) fn served_deadline(deadline_ms: u64) -> Duration {
+    Duration::from_millis(deadline_ms.min(MAX_JOB_DEADLINE_MS))
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -272,7 +285,7 @@ impl LocalIpc {
         request: ServiceRequest,
     ) -> ServiceResult<ServiceResponse> {
         let record = self.record_for(owner_id)?;
-        let timeout = Duration::from_millis(request.deadline_ms.saturating_add(2_000).min(122_000));
+        let timeout = owner_call_timeout(request.deadline_ms);
         let request_id = request.request_id.clone();
         let connection_id = request.connection_id.clone();
         match self
@@ -489,7 +502,7 @@ async fn serve(
     let reply = match call {
         Call::Probe => Reply::Probe,
         Call::Service(request) => {
-            let deadline = Duration::from_millis(request.deadline_ms.min(120_000));
+            let deadline = served_deadline(request.deadline_ms);
             let response = tokio::time::timeout(deadline, router.call(request.clone(), caller))
                 .await
                 .unwrap_or_else(|_| {

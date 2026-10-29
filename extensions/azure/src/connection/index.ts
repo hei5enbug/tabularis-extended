@@ -12,6 +12,9 @@ export type { ConnectionSettings } from "./settings.js";
 
 export const COSMOS_SCOPE = "https://cosmos.azure.com/.default";
 export const MAX_CACHED_CLIENTS = 4096;
+// The host asks for a token valid for min(deadline, HOST_AUTH_WINDOW_CAP_MS) plus AUTH_REFRESH_MARGIN_MS.
+export const HOST_AUTH_WINDOW_CAP_MS = 120_000;
+export const AUTH_REFRESH_MARGIN_MS = 300_000;
 type SdkLogger = { AzureLogger: { log: (...args: unknown[]) => void }; setLogLevel: (level?: string) => void };
 const sdkRequire = createRequire(import.meta.resolve("@azure/cosmos"));
 const loggerPackage = sdkRequire.resolve("@azure/logger/package.json");
@@ -22,7 +25,7 @@ export type TransientAuthContext =
   | { kind: "account_key"; account_key: string; identity: string }
   | { kind: "entra_token"; access_token: string; expires_at_ms: number; tenant_id: string; client_id: string; principal_id: string; scope: string; identity: string };
 export interface ConnectionContext { connection_id: string; settings: ConnectionSettings; auth: TransientAuthContext; deadline_ms?: number }
-export interface ClientProvider { get(context: ConnectionContext): Promise<CosmosClient>; invalidate(connection_id: string): Promise<void>; dispose?(): Promise<void> }
+export interface ClientProvider { get(context: ConnectionContext): Promise<CosmosClient>; refresh(context: ConnectionContext): Promise<boolean>; invalidate(connection_id: string): Promise<void>; dispose?(): Promise<void> }
 export type DriverClientOptions = CosmosClientOptions & { aadScope?: string };
 export interface ClientProviderOptions { createClient?: (options: DriverClientOptions) => CosmosClient; httpClient?: CosmosClientOptions["httpClient"]; now?: () => number }
 export class CapabilityUnavailableError extends DriverError {
@@ -43,8 +46,20 @@ export function validateAuth(context: ConnectionContext, now: number): void {
     if (auth.kind !== "entra_token" || !auth.access_token || !auth.principal_id || !auth.tenant_id || !auth.client_id || auth.tenant_id !== context.settings.tenant_id || auth.client_id !== context.settings.client_id || auth.scope !== COSMOS_SCOPE) {
       throw new DriverError("AUTH_REQUIRED", "The transient Entra context does not match this connection.");
     }
-    if (!Number.isSafeInteger(auth.expires_at_ms) || auth.expires_at_ms <= now + (context.deadline_ms ?? 30_000) + 300_000) throw new DriverError("AUTH_EXPIRED", "The host must refresh the Entra token before this request.");
+    if (!Number.isSafeInteger(auth.expires_at_ms) || auth.expires_at_ms < now + Math.min(context.deadline_ms ?? 30_000, HOST_AUTH_WINDOW_CAP_MS) + AUTH_REFRESH_MARGIN_MS) throw new DriverError("AUTH_EXPIRED", "The host must refresh the Entra token before this request.");
   }
+}
+function clientFingerprint(settings: ConnectionSettings, auth: TransientAuthContext): string {
+  const authIdentity = auth.kind === "account_key" ? createHash("sha256").update(auth.account_key).digest("hex") : [auth.tenant_id, auth.client_id, auth.principal_id, auth.scope];
+  return JSON.stringify([settings, auth.kind, auth.identity, authIdentity]);
+}
+// Database and container only select resources, so a token refresh still reaches the client a job on another database uses.
+function clientIdentity(settings: ConnectionSettings, auth: TransientAuthContext): string {
+  const { database: _database, container: _container, ...client } = settings;
+  return clientFingerprint(client, auth);
+}
+function adoptsAuth(current: TransientAuthContext, candidate: TransientAuthContext): boolean {
+  return candidate.kind !== "entra_token" || current.kind !== "entra_token" || candidate.expires_at_ms >= current.expires_at_ms;
 }
 export function createClientProvider(options: ClientProviderOptions = {}): ClientProvider {
   const now = options.now ?? Date.now;
@@ -63,13 +78,12 @@ export function createClientProvider(options: ClientProviderOptions = {}): Clien
       validateEndpoint(context.settings.endpoint);
       validateAuth(context, now());
       const auth = { ...context.auth };
-      const authIdentity = auth.kind === "account_key" ? createHash("sha256").update(auth.account_key).digest("hex") : [auth.tenant_id, auth.client_id, auth.principal_id, auth.scope];
-      const fingerprint = JSON.stringify([context.settings, auth.kind, auth.identity, authIdentity]);
+      const fingerprint = clientFingerprint(context.settings, auth);
       let entry = entries.get(context.connection_id);
       if (!entry && entries.size >= MAX_CACHED_CLIENTS) throw new DriverError("RESOURCE_LIMIT", "The driver client cache is full.");
       if (entry && entry.fingerprint !== fingerprint) { entry.state.active = false; entry.client.dispose(); entries.delete(context.connection_id); entry = undefined; }
       if (entry) {
-        if (auth.kind !== "entra_token" || entry.state.auth.kind !== "entra_token" || auth.expires_at_ms >= entry.state.auth.expires_at_ms) entry.state.auth = auth;
+        if (adoptsAuth(entry.state.auth, auth)) entry.state.auth = auth;
         return entry.client;
       }
       const state = { auth, active: true, settings: { ...context.settings } };
@@ -93,6 +107,15 @@ export function createClientProvider(options: ClientProviderOptions = {}): Clien
       const client = factory(clientOptions);
       entries.set(context.connection_id, { fingerprint, client, state });
       return client;
+    },
+    async refresh(context) {
+      validateEndpoint(context.settings.endpoint);
+      validateAuth(context, now());
+      const auth = { ...context.auth };
+      const entry = entries.get(context.connection_id);
+      if (!entry || clientIdentity(entry.state.settings, entry.state.auth) !== clientIdentity(context.settings, auth) || auth.kind !== "entra_token" || !adoptsAuth(entry.state.auth, auth)) return false;
+      entry.state.auth = auth;
+      return true;
     },
     async invalidate(connection_id) { const entry = entries.get(connection_id); entries.delete(connection_id); if (entry) { entry.state.active = false; entry.client.dispose(); } },
     async dispose() { const cached = [...entries.values()]; entries.clear(); for (const entry of cached) { entry.state.active = false; entry.client.dispose(); } },

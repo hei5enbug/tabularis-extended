@@ -35,6 +35,7 @@ pub enum ServiceRpcMethod {
     Catalog,
     Row,
     InvalidateAuth,
+    RefreshAuth,
     Explain,
     CosmosTest,
     CosmosDatabases,
@@ -63,6 +64,7 @@ impl ServiceRpcMethod {
             Self::Catalog => "service_catalog",
             Self::Row => "service_row",
             Self::InvalidateAuth => "service_invalidate_auth",
+            Self::RefreshAuth => "service_refresh_auth",
             Self::Explain => "service_explain",
             Self::CosmosTest => "test_connection",
             Self::CosmosDatabases => "get_databases",
@@ -95,6 +97,7 @@ pub struct DriverServiceCapabilities {
     pub documents: bool,
     pub query_page: bool,
     pub cancel: bool,
+    pub auth_refresh: bool,
     pub sessions: bool,
     pub catalog: bool,
     pub rows: bool,
@@ -133,6 +136,7 @@ impl DriverServiceCapabilities {
                 self.documents && self.query_page
             }
             ServiceRpcMethod::InvalidateAuth => self.exact_query || self.documents,
+            ServiceRpcMethod::RefreshAuth => self.auth_refresh,
         }
     }
 }

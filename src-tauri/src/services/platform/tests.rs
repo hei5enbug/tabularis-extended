@@ -151,6 +151,7 @@ struct CountDriver {
     calls: AtomicUsize,
     invalidations: AtomicUsize,
     fail_with_secret: std::sync::atomic::AtomicBool,
+    last_deadline_ms: std::sync::atomic::AtomicU64,
 }
 #[async_trait]
 impl DriverBackend for CountDriver {
@@ -164,9 +165,11 @@ impl DriverBackend for CountDriver {
         &self,
         _: &SavedConnection,
         _: &ServiceRequest,
-        _: DriverContext,
+        context: DriverContext,
     ) -> ServiceResult<DriverOutput> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        self.last_deadline_ms
+            .store(context.deadline_ms, Ordering::SeqCst);
         if self.fail_with_secret.load(Ordering::SeqCst) {
             let mut error = failure(ErrorCode::DriverExited);
             error.message = "canary-password-token-593".into();

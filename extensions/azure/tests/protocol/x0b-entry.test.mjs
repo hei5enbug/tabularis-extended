@@ -33,8 +33,8 @@ test("production child는 SDK 네트워크 없이 실제 capability를 협상하
   assert.equal(actual.code, 0);
   assert.equal(actual.stderr, "");
   assert.equal(actual.responses.length, 4);
-  assert.deepEqual(actual.responses.find((response) => response.id === "legacy").result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, sessions_v1: false });
-  assert.deepEqual(actual.responses.find((response) => response.id === "native").result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, sessions_v1: false, service_protocol: 1 });
+  assert.deepEqual(actual.responses.find((response) => response.id === "legacy").result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, auth_refresh_v1: true, sessions_v1: false });
+  assert.deepEqual(actual.responses.find((response) => response.id === "native").result.service_capabilities, { protocol_version: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, auth_refresh_v1: true, sessions_v1: false, service_protocol: 1 });
   assert.equal(actual.responses.find((response) => response.id === "wrong").error.data.code, "PROTOCOL_MISMATCH");
   assert.equal(actual.responses.find((response) => response.id === "shutdown").result, null);
   assert.deepEqual(actual.messages, [{ type: "network_attempts", count: 0 }]);
@@ -56,5 +56,23 @@ test("production child는 손상된 입력과 삭제 연결 logout 뒤 EOF에서
   assert.equal(actual.responses.find((response) => response.id === "logout").result.status, "succeeded");
   assert.deepEqual(actual.responses.find((response) => response.id === "logout").result.data, { invalidated: true });
   assert.equal(actual.stdout.includes("canary"), false);
+  assert.deepEqual(actual.messages, [{ type: "network_attempts", count: 0 }]);
+});
+
+test("production child는 service_refresh_auth를 제어 호출로 받아 연결이 없으면 refreshed false를 반환한다", async () => {
+  // given
+  const auth = { kind: "entra_token", access_token: "synthetic-token", expires_at_ms: Date.now() + 3_600_000, tenant_id: "tenant", client_id: "client", principal_id: "oid", scope: "https://cosmos.azure.com/.default", identity: "principal" };
+  const params = { driver: "cosmos-nosql", extra: { endpoint: "https://fixture-account.documents.azure.com", auth_mode: "entra_user", tenant_id: "tenant", client_id: "client" } };
+  const refresh = { jsonrpc: "2.0", id: "refresh", method: "service_refresh_auth", params: { params, driver_context: { protocol_version: 1, connection_id: "never-opened", request_id: "refresh", deadline_ms: 2000, read_only: true, auth }, input: {} } };
+  const input = frame("init", { service_protocol: 1 }) + JSON.stringify(refresh) + "\n" + frame("shutdown", {}, "shutdown");
+
+  // when
+  const actual = await runEntry(input);
+
+  // then
+  assert.equal(actual.code, 0);
+  assert.equal(actual.responses.find((response) => response.id === "refresh").result.status, "succeeded");
+  assert.deepEqual(actual.responses.find((response) => response.id === "refresh").result.data, { refreshed: false });
+  assert.equal(actual.stdout.includes("synthetic-token"), false);
   assert.deepEqual(actual.messages, [{ type: "network_attempts", count: 0 }]);
 });

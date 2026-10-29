@@ -492,3 +492,40 @@ async fn handshake를보내지않는클라이언트는제한시간후연결이�
     // Then
     assert!(matches!(closed, Ok(Err(_))));
 }
+
+#[test]
+fn 소유자_호출과_서빙_기한은_한_시간짜리_작업을_자르지_않는다() {
+    // Given
+    let hour = 3_600_000;
+
+    // When
+    let actual = [
+        endpoint::owner_call_timeout(hour),
+        endpoint::owner_call_timeout(hour + 1),
+        endpoint::served_deadline(hour),
+        endpoint::served_deadline(hour + 1),
+    ];
+
+    // Then
+    assert_eq!(
+        actual,
+        [
+            Duration::from_millis(hour + 2_000),
+            Duration::from_millis(hour + 2_000),
+            Duration::from_millis(hour),
+            Duration::from_millis(hour),
+        ]
+    );
+}
+
+#[test]
+fn 짧은_기한의_소유자_호출은_기존_유예를_유지한다() {
+    // Given
+    let short = 30_000;
+
+    // When
+    let actual = endpoint::owner_call_timeout(short);
+
+    // Then
+    assert_eq!(actual, Duration::from_millis(short + 2_000));
+}

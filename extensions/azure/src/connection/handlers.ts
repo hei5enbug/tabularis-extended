@@ -77,7 +77,7 @@ export function createConnectionHandlers(clients: ClientProvider, options: { que
           if (key === "auth_mode" && !["account_key", "entra_user", "entra_service_principal"].includes(field)) throw new DriverError("INVALID_ARGUMENT", "The authentication mode is unsupported.");
         }
       }
-      return { service_capabilities: { protocol_version: 1, documents_v1: true, query_page_v1: options.query_page_v1 === true, cancel_v1: true, sessions_v1: false, ...(Object.hasOwn(value, "service_protocol") ? { service_protocol: 1 } : {}) } };
+      return { service_capabilities: { protocol_version: 1, documents_v1: true, query_page_v1: options.query_page_v1 === true, cancel_v1: true, auth_refresh_v1: true, sessions_v1: false, ...(Object.hasOwn(value, "service_protocol") ? { service_protocol: 1 } : {}) } };
     },
     ping: testConnection,
     shutdown: async (value) => { onlyKeys(value, []); return null; },

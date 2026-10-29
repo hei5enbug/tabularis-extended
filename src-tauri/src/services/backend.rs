@@ -284,4 +284,13 @@ pub trait DriverBackend: Send + Sync {
     ) -> ServiceResult<()>;
     async fn discard_session(&self, connection_id: &str, handle: &str);
     async fn invalidate_auth(&self, connection_id: &str, previous_principal: Option<&str>);
+    /// Hands a fresher transient token to a driver that is still running a
+    /// request for this connection. Returns whether the driver adopted it.
+    async fn refresh_auth(
+        &self,
+        _connection: &SavedConnection,
+        _context: DriverContext,
+    ) -> ServiceResult<bool> {
+        Ok(false)
+    }
 }

@@ -49,7 +49,7 @@ for (const { platform, arch } of selectTargets(process.platform, process.arch)) 
     assert.equal(actual.smoke.eof.responses.length, 3);
     assert.ok(actual.smoke.eof.responses.every(response => response.jsonrpc === '2.0'));
     assert.deepEqual(Object.keys(actual.smoke.eof.byId).sort(), ['native', 'unknown', 'wrong']);
-    assert.deepEqual(actual.smoke.eof.byId.native.result.service_capabilities, { protocol_version: 1, service_protocol: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, sessions_v1: false });
+    assert.deepEqual(actual.smoke.eof.byId.native.result.service_capabilities, { protocol_version: 1, service_protocol: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, auth_refresh_v1: true, sessions_v1: false });
     assert.equal(actual.smoke.eof.byId.wrong.error.data.code, 'PROTOCOL_MISMATCH');
     assert.equal(actual.smoke.eof.byId.unknown.error.code, -32601);
     assert.equal(actual.smoke.eof.byId.unknown.error.data.code, 'UNSUPPORTED_OPERATION');
@@ -60,7 +60,7 @@ for (const { platform, arch } of selectTargets(process.platform, process.arch)) 
     assert.equal(actual.smoke.shutdown.responses.length, 4);
     assert.ok(actual.smoke.shutdown.responses.every(response => response.jsonrpc === '2.0'));
     assert.deepEqual(Object.keys(actual.smoke.shutdown.byId).sort(), ['native', 'shutdown', 'unknown', 'wrong']);
-    assert.deepEqual(actual.smoke.shutdown.byId.native.result.service_capabilities, { protocol_version: 1, service_protocol: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, sessions_v1: false });
+    assert.deepEqual(actual.smoke.shutdown.byId.native.result.service_capabilities, { protocol_version: 1, service_protocol: 1, documents_v1: true, query_page_v1: true, cancel_v1: true, auth_refresh_v1: true, sessions_v1: false });
     assert.equal(actual.smoke.shutdown.byId.wrong.error.data.code, 'PROTOCOL_MISMATCH');
     assert.equal(actual.smoke.shutdown.byId.unknown.error.data.code, 'UNSUPPORTED_OPERATION');
     assert.equal(actual.smoke.shutdown.byId.shutdown.result, null);

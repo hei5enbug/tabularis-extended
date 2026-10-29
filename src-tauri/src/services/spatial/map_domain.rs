@@ -121,7 +121,7 @@ impl MapDomain {
         let context = DriverContext {
             connection_id: id.into(),
             request_id: request.request_id.clone(),
-            deadline_ms: lease.deadline_at_ms.saturating_sub(now_ms()),
+            deadline_ms: lease.deadline_at_ms().saturating_sub(now_ms()),
             signal: lease.signal(),
             transient_auth: None,
             read_only: true,
@@ -226,7 +226,7 @@ impl MapDomain {
             state: json!({"action":action,"map":map.map}),
         };
         let remaining = lease
-            .deadline_at_ms
+            .deadline_at_ms()
             .saturating_sub(now_ms())
             .saturating_sub(1);
         let signal = lease.signal();
@@ -246,7 +246,7 @@ impl MapDomain {
                     let instances = tokio::time::timeout(
                         Duration::from_millis(
                             lease
-                                .deadline_at_ms
+                                .deadline_at_ms()
                                 .saturating_sub(now_ms())
                                 .saturating_sub(1)
                                 .min(2000),
