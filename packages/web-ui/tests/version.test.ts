@@ -1,5 +1,6 @@
 import {describe, it, expect} from 'vitest';
 import {APP_VERSION} from '@/version';
+import packageJson from '../../../package.json';
 
 describe('version', () => {
     it('should export a version string', () => {
@@ -23,8 +24,9 @@ describe('version', () => {
         });
     });
 
-    it('should carry the fork build metadata', () => {
-        expect(APP_VERSION).toBe('0.27.0+extended.1');
+    it('should carry the fork build metadata of the package version', () => {
+        expect(APP_VERSION).toMatch(/^\d+\.\d+\.\d+\+extended\.\d+$/);
+        expect(APP_VERSION).toBe(packageJson.version);
     });
 
     it('should not contain whitespace', () => {

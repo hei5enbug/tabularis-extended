@@ -2,7 +2,10 @@ import {spawnSync} from 'node:child_process';
 import {mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {dirname, join, resolve} from 'node:path';
-import {afterEach, describe, expect, it} from 'vitest';
+import {afterEach, describe, expect, it, vi} from 'vitest';
+
+// Each test builds real repositories and runs the sync script several times.
+vi.setConfig({testTimeout: 60_000});
 
 const syncScript = resolve('scripts/upstream-sync.mjs');
 const identityScript = resolve('scripts/check-fork-identity.mjs');
