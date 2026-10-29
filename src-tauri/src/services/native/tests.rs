@@ -946,6 +946,25 @@ async fn 입력이_끝나지_않아도_제한시간이_지나면_반환한다() 
     // then
     assert_eq!(actual, ErrorCode::DeadlineExceeded);
 }
+/// The contract carries a descriptor as one byte, while parallel tests can hold more than 255
+/// descriptors at once; move the pipe's read end to a free number the contract accepts.
+#[cfg(unix)]
+fn descriptor_below_256(file: std::fs::File) -> std::fs::File {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    if file.as_raw_fd() <= 255 {
+        return file;
+    }
+    for _ in 0..400 {
+        let duplicate = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_DUPFD, 3) };
+        assert!(duplicate >= 0);
+        if duplicate <= 255 {
+            return unsafe { std::fs::File::from_raw_fd(duplicate) };
+        }
+        unsafe { libc::close(duplicate) };
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    panic!("no file descriptor at or below 255 became free");
+}
 #[cfg(unix)]
 async fn protected_descriptor(h: &Harness) -> (String, ErrorCode, bool) {
     use std::{
@@ -954,7 +973,7 @@ async fn protected_descriptor(h: &Harness) -> (String, ErrorCode, bool) {
     };
     let mut fds = [0; 2];
     assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
-    let reader = unsafe { std::fs::File::from_raw_fd(fds[0]) };
+    let reader = descriptor_below_256(unsafe { std::fs::File::from_raw_fd(fds[0]) });
     let mut writer = unsafe { std::fs::File::from_raw_fd(fds[1]) };
     writer.write_all(b" SECRET_CANARY \n").unwrap();
     drop(writer);

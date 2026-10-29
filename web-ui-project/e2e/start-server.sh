@@ -11,8 +11,8 @@ fi
 PORT="${TABULARIS_E2E_PORT:-18080}"
 CONFIG_HOME="$RUNTIME_DIR/config"
 DATA_HOME="$RUNTIME_DIR/data"
-APP_CONFIG_DIR="$CONFIG_HOME/tabularis"
-APP_DATA_DIR="$DATA_HOME/tabularis"
+APP_CONFIG_DIR="$CONFIG_HOME/tabularis-extended"
+APP_DATA_DIR="$DATA_HOME/tabularis-extended"
 LAUNCH_URL_FILE="${TABULARIS_E2E_LAUNCH_URL_FILE:-$RUNTIME_DIR/launch-url}"
 SQLITE_PATH="${TABULARIS_E2E_SQLITE_PATH:-$RUNTIME_DIR/tabularis-e2e.sqlite}"
 FIXTURE_PLUGINS="$ROOT_DIR/web-ui-project/e2e/fixtures/plugins"
@@ -59,7 +59,7 @@ export TABULARIS_E2E_LAUNCH_URL_FILE="$LAUNCH_URL_FILE"
 export BROWSER="$RUNTIME_DIR/bin/xdg-open"
 export PATH="$RUNTIME_DIR/bin:$PATH"
 
-exec "$ROOT_DIR/src-tauri/target/debug/tabularis" \
+exec "$ROOT_DIR/src-tauri/target/debug/tabularis-extended" \
   web \
   --host 127.0.0.1 \
   --port "$PORT" \

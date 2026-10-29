@@ -10,7 +10,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 use super::{extensions, install_cancellation, installer, runtime_version};
 
-const HOST_VERSION: &str = "0.27.0+extended.1";
+const HOST_VERSION: &str = env!("CARGO_PKG_VERSION");
 const OUTPUT_LIMIT: u64 = 8 * 1024 * 1024;
 const POISONING_KEYS: [&str; 8] = [
     "NODE_OPTIONS",
