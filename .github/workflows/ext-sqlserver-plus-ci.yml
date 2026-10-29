@@ -191,6 +191,16 @@ jobs:
           SQLSERVER_TEST_DATABASE: tabularis_test
         run: cargo test --test live_db -- --test-threads=1
 
+      # Runs after live_db, which creates tabularis_test.
+      - name: Run live catalog describe test
+        env:
+          SQLSERVER_TEST_HOST: 127.0.0.1
+          SQLSERVER_TEST_PORT: 1433
+          SQLSERVER_TEST_USER: sa
+          SQLSERVER_TEST_PASSWORD: "Str0ng!Passw0rd"
+          SQLSERVER_TEST_DATABASE: tabularis_test
+        run: cargo test --test service_catalog_sqlserver -- --test-threads=1
+
   pr-title:
     name: sqlserver-plus / PR title (Conventional Commits)
     if: github.event_name == 'pull_request'

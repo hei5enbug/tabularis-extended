@@ -85,7 +85,7 @@ STUFF((SELECT ','+te.type_desc FROM sys.trigger_events te WHERE te.object_id=tr.
 CAST(1-tr.is_disabled AS bit) AS p_enabled \
 FROM sys.triggers tr JOIN sys.objects o ON o.object_id=tr.object_id JOIN sys.schemas s ON s.schema_id=o.schema_id \
 JOIN sys.objects p ON p.object_id=tr.parent_id LEFT JOIN sys.sql_modules m ON m.object_id=tr.object_id \
-WHERE s.name=@schema AND o.name=@name AND tr.parent_class=1;";
+WHERE s.name=@schema AND o.name=@name AND tr.parent_class=1 AND (@owner_table IS NULL OR p.name=@owner_table);";
 
 fn sequence_sql() -> String {
     format!(
@@ -148,7 +148,7 @@ pub fn sql(kind: Kind) -> String {
     }
 }
 
-pub fn parameters(table: &TableRef, kind: Kind) -> Vec<Parameter> {
+pub fn parameters(table: &TableRef, kind: Kind, owner_table: Option<&str>) -> Vec<Parameter> {
     let parameter = |name: &str, value: String| Parameter {
         name: name.into(),
         value: json!(value),
@@ -161,10 +161,17 @@ pub fn parameters(table: &TableRef, kind: Kind) -> Vec<Parameter> {
                 .as_deref()
                 .filter(|schema| !schema.trim().is_empty())
                 .unwrap_or("dbo");
-            vec![
+            let mut parameters = vec![
                 parameter("@schema", schema.to_owned()),
                 parameter("@name", table.table.clone()),
-            ]
+            ];
+            if kind == Kind::Trigger {
+                parameters.push(Parameter {
+                    name: "@owner_table".into(),
+                    value: json!(owner_table),
+                });
+            }
+            parameters
         }
     }
 }

@@ -115,6 +115,7 @@ fn describe_query(kind: Option<Kind>) -> Query {
             table: "orders".into(),
         },
         kind,
+        owner_table: None,
     };
     query(&input, &connection()).unwrap()
 }
@@ -213,11 +214,37 @@ fn 객체_종류별_질의는_schema와_이름을_각각_매개변수로만_받�
     // then
     for query in &actual {
         let names: Vec<_> = query.parameters.iter().map(|p| p.name.as_str()).collect();
-        assert_eq!(names, ["@schema", "@name"]);
+        assert_eq!(&names[..2], ["@schema", "@name"]);
         assert_eq!(query.parameters[0].value, json!("sales"));
         assert_eq!(query.parameters[1].value, json!("orders"));
         assert!(!query.text.contains("orders") && !query.text.contains("sales"));
     }
+}
+
+#[test]
+fn trigger_질의는_소유_테이블을_선택_매개변수로_받고_다른_종류에는_거부한다() {
+    // given
+    let input = |kind, owner_table: Option<&str>| Input::Describe {
+        table: TableRef {
+            database: None,
+            schema: Some("sales".into()),
+            table: "audit".into(),
+        },
+        kind: Some(kind),
+        owner_table: owner_table.map(str::to_owned),
+    };
+
+    // when
+    let without = query(&input(Kind::Trigger, None), &connection()).unwrap();
+    let with = query(&input(Kind::Trigger, Some("orders")), &connection()).unwrap();
+    let other = query(&input(Kind::Sequence, Some("orders")), &connection());
+
+    // then
+    assert_eq!(without.parameters[2].name, "@owner_table");
+    assert_eq!(without.parameters[2].value, Value::Null);
+    assert_eq!(with.parameters[2].value, json!("orders"));
+    assert!(with.text.contains("p.name=@owner_table"));
+    assert_eq!(other.err().unwrap().code, "INVALID_ARGUMENT");
 }
 
 #[test]
@@ -230,6 +257,7 @@ fn 질의는_schema를_생략하면_dbo로_묶는다() {
             table: "seq".into(),
         },
         kind: Some(Kind::Sequence),
+        owner_table: None,
     };
 
     // when

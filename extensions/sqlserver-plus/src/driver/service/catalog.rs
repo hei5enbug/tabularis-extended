@@ -64,7 +64,12 @@ pub enum Input {
         schema: Option<String>,
     },
     #[serde(rename = "catalog.describe")]
-    Describe { table: TableRef, kind: Option<Kind> },
+    Describe {
+        table: TableRef,
+        kind: Option<Kind>,
+        #[serde(default)]
+        owner_table: Option<String>,
+    },
 }
 /// Object types the legacy `get_routines` lists: T-SQL and CLR procedures and functions.
 const ROUTINE_TYPES: [&str; 7] = ["P", "PC", "FN", "FS", "FT", "IF", "TF"];
@@ -126,11 +131,14 @@ pub fn query(input: &Input, params: &ConnectionParams) -> Result<Query, ServiceE
         Input::Databases => ("SELECT name FROM sys.databases WHERE database_id>4 AND HAS_DBACCESS(name)=1 ORDER BY name".to_owned(), vec![], "databases"),
         Input::Schemas { database } => { db(database)?; ("SELECT name FROM sys.schemas WHERE schema_id<16384 AND name NOT IN ('sys','INFORMATION_SCHEMA','guest') ORDER BY name".to_owned(), vec![], "schemas") }
         Input::Objects { database, schema } => { db(database)?; (objects_sql(), vec![Parameter { name: "@schema".into(), value: json!(schema) }], "objects") }
-        Input::Describe { table, kind } => {
+        Input::Describe { table, kind, owner_table } => {
             table.validate(params)?;
             let kind = kind.unwrap_or(Kind::Table);
+            if owner_table.is_some() && kind != Kind::Trigger {
+                return Err(ServiceError::argument("owner_table applies only to kind trigger"));
+            }
             describe_kind = Some(kind);
-            (describe::sql(kind), describe::parameters(table, kind), "describe")
+            (describe::sql(kind), describe::parameters(table, kind, owner_table.as_deref()), "describe")
         }
     };
     Ok(Query {

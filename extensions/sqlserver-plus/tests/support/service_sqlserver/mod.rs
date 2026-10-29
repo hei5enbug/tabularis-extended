@@ -6,22 +6,45 @@ use std::{
     sync::mpsc,
     time::Duration,
 };
-pub const CONTAINER: &str = "tabularis-plan-sqlserver2022-02-01a1000d";
 pub const PASSWORD: &str = "SyntheticService!42";
+/// The principal tests name "sa" maps to the administrator that `SQLSERVER_TEST_USER`
+/// and `SQLSERVER_TEST_PASSWORD` configure, like the other live test targets.
+pub const ADMIN: &str = "sa";
+fn env_or(key: &str, default: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| default.to_string())
+}
+/// Docker container that runs the server, for fixture SQL through `sqlcmd`.
+pub fn container() -> String {
+    env_or(
+        "SQLSERVER_TEST_CONTAINER",
+        "tabularis-plan-sqlserver2022-02-01a1000d",
+    )
+}
+pub fn admin_user() -> String {
+    env_or("SQLSERVER_TEST_USER", ADMIN)
+}
+pub fn admin_password() -> String {
+    env_or("SQLSERVER_TEST_PASSWORD", "Str0ng!Passw0rd")
+}
+fn port() -> u16 {
+    env_or("SQLSERVER_TEST_PORT", "63304")
+        .parse()
+        .expect("SQLSERVER_TEST_PORT must be a valid port")
+}
 pub fn sql(database: &str, text: &str) {
     let output = Command::new("docker")
         .args([
             "--config",
             "/tmp/tabularis-docker-public",
             "exec",
-            CONTAINER,
+            &container(),
             "/opt/mssql-tools18/bin/sqlcmd",
             "-S",
             "localhost",
             "-U",
-            "sa",
+            &admin_user(),
             "-P",
-            "Str0ng!Passw0rd",
+            &admin_password(),
             "-C",
             "-b",
             "-d",
@@ -43,14 +66,14 @@ pub fn sql_scalar(database: &str, text: &str) -> i64 {
             "--config",
             "/tmp/tabularis-docker-public",
             "exec",
-            CONTAINER,
+            &container(),
             "/opt/mssql-tools18/bin/sqlcmd",
             "-S",
             "localhost",
             "-U",
-            "sa",
+            &admin_user(),
             "-P",
-            "Str0ng!Passw0rd",
+            &admin_password(),
             "-C",
             "-b",
             "-h",
@@ -94,7 +117,12 @@ impl Fixture {
         }
     }
     pub fn params(&self, principal: &str) -> Value {
-        json!({"driver":"sqlserver","host":"127.0.0.1","port":63304,"database":self.database,"username":principal,"ssl_mode":"require"})
+        let username = if principal == ADMIN {
+            admin_user()
+        } else {
+            principal.to_owned()
+        };
+        json!({"driver":"sqlserver","host":env_or("SQLSERVER_TEST_HOST","127.0.0.1"),"port":port(),"database":self.database,"username":username,"ssl_mode":"require"})
     }
     pub fn request(
         &self,
@@ -104,12 +132,13 @@ impl Fixture {
         read_only: bool,
         request: &str,
     ) -> Value {
-        let password = if principal == "sa" {
-            "Str0ng!Passw0rd"
+        let params = self.params(principal);
+        let password = if principal == ADMIN {
+            admin_password()
         } else {
-            PASSWORD
+            PASSWORD.to_owned()
         };
-        json!({"jsonrpc":"2.0","id":request,"method":method,"params":{"params":self.params(principal),"driver_context":{"protocol_version":1,"connection_id":"service-fixture","request_id":request,"deadline_ms":10_000,"read_only":read_only,"auth":{"kind":"db_password","password":password,"identity":principal}},"input":input}})
+        json!({"jsonrpc":"2.0","id":request,"method":method,"params":{"params":params,"driver_context":{"protocol_version":1,"connection_id":"service-fixture","request_id":request,"deadline_ms":10_000,"read_only":read_only,"auth":{"kind":"db_password","password":password,"identity":params["username"]}},"input":input}})
     }
     pub fn exact(&self, text: &str, principal: &str, read_only: bool, request: &str) -> Value {
         self.request(

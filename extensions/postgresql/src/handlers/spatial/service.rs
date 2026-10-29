@@ -32,6 +32,8 @@ pub enum CatalogInput {
         table: TableRef,
         #[serde(default)]
         kind: Option<ObjectKind>,
+        #[serde(default)]
+        owner_table: Option<String>,
     },
 }
 #[derive(Deserialize)]
@@ -187,9 +189,21 @@ pub async fn catalog(
         CatalogInput::Databases => ("databases", "SELECT datname::text AS name FROM pg_catalog.pg_database WHERE datallowconn AND pg_catalog.has_database_privilege(oid,'CONNECT') ORDER BY datname".to_string(), vec![], true),
         CatalogInput::Schemas { .. } => ("schemas", "SELECT nspname::text AS name FROM pg_catalog.pg_namespace WHERE pg_catalog.has_schema_privilege(oid,'USAGE') ORDER BY nspname".to_string(), vec![], true),
         CatalogInput::Objects { schema, .. } => ("objects", super::catalog_objects::objects_sql(), vec![schema.map(Value::String).unwrap_or(Value::Null)], false),
-        CatalogInput::Describe { table, kind } => {
-            return super::catalog_describe::describe(client, catalog, &table, kind, scope, reserved)
-                .await
+        CatalogInput::Describe {
+            table,
+            kind,
+            owner_table,
+        } => {
+            return super::catalog_describe::describe(
+                client,
+                catalog,
+                &table,
+                kind,
+                owner_table.as_deref(),
+                scope,
+                reserved,
+            )
+            .await
         }
     };
     let result = exact::execute(

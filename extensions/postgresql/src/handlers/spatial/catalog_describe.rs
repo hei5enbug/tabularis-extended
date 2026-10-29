@@ -165,7 +165,7 @@ ELSE json_build_object(\
 'overloads',f.overloads) END AS properties \
 FROM f WHERE f.position=1";
 
-const TRIGGER_SQL: &str = "SELECT pg_catalog.pg_get_triggerdef(t.oid,true) AS definition,json_build_object(\
+const TRIGGER_SQL: &str = "SELECT pg_catalog.pg_get_triggerdef(t.oid,true) AS definition,count(*) OVER () AS candidates,json_build_object(\
 'table',c.relname::text,\
 'timing',CASE WHEN t.tgtype::integer & 2 <> 0 THEN 'BEFORE' WHEN t.tgtype::integer & 64 <> 0 THEN 'INSTEAD OF' ELSE 'AFTER' END,\
 'events',(SELECT COALESCE(json_agg(e.name ORDER BY e.bit),'[]'::json) \
@@ -173,7 +173,7 @@ FROM (VALUES ('INSERT',4),('DELETE',8),('UPDATE',16),('TRUNCATE',32)) e(name,bit
 'enabled',t.tgenabled<>'D') AS properties \
 FROM pg_catalog.pg_trigger t JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid \
 JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace \
-WHERE NOT t.tgisinternal AND n.nspname=$1::text AND t.tgname=$2::text \
+WHERE NOT t.tgisinternal AND n.nspname=$1::text AND t.tgname=$2::text AND ($3::text IS NULL OR c.relname=$3::text) \
 AND pg_catalog.has_schema_privilege(n.oid,'USAGE') AND pg_catalog.has_table_privilege(c.oid,'SELECT') \
 ORDER BY c.relname LIMIT 1";
 
@@ -267,7 +267,7 @@ fn details_only(text: &'static str, schema: Value, name: Value) -> Plan {
     }
 }
 
-pub fn plan(table: &TableRef, kind: Option<ObjectKind>) -> Plan {
+pub fn plan(table: &TableRef, kind: Option<ObjectKind>, owner_table: Option<&str>) -> Plan {
     let schema = json!(table.schema());
     let name = json!(table.table);
     match kind {
@@ -285,7 +285,10 @@ pub fn plan(table: &TableRef, kind: Option<ObjectKind>) -> Plan {
                 details: statement(TYPE_SQL, vec![schema, name]),
             }
         }
-        Some(ObjectKind::Trigger) => details_only(TRIGGER_SQL, schema, name),
+        Some(ObjectKind::Trigger) => Plan {
+            columns: None,
+            details: statement(TRIGGER_SQL, vec![schema, name, json!(owner_table)]),
+        },
         Some(ObjectKind::Sequence) => details_only(SEQUENCE_SQL, schema, name),
         Some(ObjectKind::Collation) => details_only(COLLATION_SQL, schema, name),
         Some(ObjectKind::Operator) => details_only(OPERATOR_SQL, schema, name),
@@ -373,10 +376,16 @@ pub async fn describe(
     catalog: Option<&Catalog>,
     table: &TableRef,
     kind: Option<ObjectKind>,
+    owner_table: Option<&str>,
     scope: &ScopedGuard,
     reserved: bool,
 ) -> Result<Value, SpatialError> {
-    let plan = plan(table, kind);
+    if owner_table.is_some() && kind != Some(ObjectKind::Trigger) {
+        return Err(SpatialError::argument(
+            "owner_table applies only to kind trigger",
+        ));
+    }
+    let plan = plan(table, kind, owner_table);
     let mut columns = Vec::new();
     let mut limits = None;
     let mut page = None;
@@ -390,6 +399,16 @@ pub async fn describe(
     if !limits.as_ref().is_some_and(is_truncated) {
         let result = run(client, catalog, &plan.details, scope, reserved).await?;
         detail = row_objects(&result)?.into_iter().next();
+        if owner_table.is_none()
+            && detail
+                .as_ref()
+                .and_then(|detail| detail["candidates"].as_i64())
+                .is_some_and(|candidates| candidates > 1)
+        {
+            return Err(SpatialError::argument(
+                "Several tables have a trigger with this name; set owner_table to choose one",
+            ));
+        }
         limits = Some(merge_limits(limits, &result["limits"]));
         page = page.or_else(|| Some(result["page"].clone()));
     }

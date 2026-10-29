@@ -303,6 +303,12 @@ impl Fixture {
         assert!(response.get("error").is_none(), "{name}: {response:?}");
         response["result"].clone()
     }
+    async fn describe_trigger(&self, name: &str, owner_table: &str) -> Value {
+        let input = json!({"operation":"catalog.describe","table":self.table(name),"kind":"trigger","owner_table":owner_table});
+        let response = self.call("service_catalog", input, true).await;
+        assert!(response.get("error").is_none(), "{name}: {response:?}");
+        response["result"].clone()
+    }
     async fn catalog_objects(&self) -> Vec<(String, String)> {
         let input =
             json!({"operation":"catalog.objects","database":self.database,"schema":self.schema});
@@ -641,6 +647,7 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
          CREATE FUNCTION {schema}.rows() RETURNS TABLE(x integer, y text) LANGUAGE sql AS $$ SELECT 1,'a' $$;
          CREATE FUNCTION {schema}.audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
          CREATE TRIGGER child_audit BEFORE INSERT OR UPDATE ON {schema}.child FOR EACH ROW EXECUTE FUNCTION {schema}.audit();
+         CREATE TRIGGER child_audit BEFORE DELETE ON {schema}.parent FOR EACH ROW EXECUTE FUNCTION {schema}.audit();
          CREATE AGGREGATE {schema}.my_sum(integer) (SFUNC = int4pl, STYPE = integer, INITCOND = '0');
          CREATE SEQUENCE {schema}.seq_big AS bigint START 5 INCREMENT 2 MINVALUE 1 MAXVALUE 9223372036854775807 CYCLE CACHE 3;
          CREATE SEQUENCE {schema}.seq_min AS bigint MINVALUE -9223372036854775808 MAXVALUE -1 START -1 INCREMENT -1;
@@ -667,7 +674,15 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
     let procedure = fixture.describe("act", Some("routine")).await;
     let table_function = fixture.describe("rows", Some("routine")).await;
     let aggregate = fixture.describe("my_sum", Some("aggregate")).await;
-    let trigger = fixture.describe("child_audit", Some("trigger")).await;
+    let ambiguous = fixture
+        .call(
+            "service_catalog",
+            json!({"operation":"catalog.describe","table":fixture.table("child_audit"),"kind":"trigger"}),
+            true,
+        )
+        .await;
+    let trigger = fixture.describe_trigger("child_audit", "child").await;
+    let parent_trigger = fixture.describe_trigger("child_audit", "parent").await;
     let sequence = fixture.describe("seq_big", Some("sequence")).await;
     let lowest = fixture.describe("seq_min", Some("sequence")).await;
     let domain = fixture.describe("posint", Some("type")).await;
@@ -798,6 +813,10 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
         .as_str()
         .unwrap()
         .starts_with("CREATE TRIGGER child_audit"));
+    assert_eq!(ambiguous["error"]["data"]["code"], "INVALID_ARGUMENT");
+    assert_eq!(trigger["properties"]["table"], "child");
+    assert_eq!(parent_trigger["properties"]["table"], "parent");
+    assert_eq!(parent_trigger["properties"]["events"], json!(["DELETE"]));
     assert_eq!(
         sequence["properties"],
         json!({"data_type":"bigint","start_value":5,"increment":2,"minimum_value":1,"maximum_value":"9223372036854775807","cycle":true,"cache_size":3,"last_value":null})

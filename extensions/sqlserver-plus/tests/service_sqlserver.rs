@@ -535,7 +535,7 @@ fn stdin_eof는_pending_쓰기를_취소하고_stdout과_stderr에_비밀을_노
     assert_eq!(actual.0["error"]["data"]["code"], "OUTCOME_UNKNOWN");
     assert_eq!(actual.0["error"]["data"]["outcome"], "unknown");
     assert!(!actual.0.to_string().contains("SQL_SECRET_CANARY"));
-    assert!(!actual.0.to_string().contains("Str0ng!Passw0rd"));
+    assert!(!actual.0.to_string().contains(&support::admin_password()));
     assert!(actual.1.is_empty());
     assert_eq!(actual.2, 1);
     assert!(actual.3);
@@ -562,7 +562,7 @@ fn sdk_오류는_sql과_비밀번호를_stdout과_stderr에_포함하지_않는�
     // then
     assert_eq!(actual.0["error"]["data"]["code"], "OUTCOME_UNKNOWN");
     assert!(!actual.0.to_string().contains("RAISERROR"));
-    assert!(!actual.0.to_string().contains("Str0ng!Passw0rd"));
+    assert!(!actual.0.to_string().contains(&support::admin_password()));
     assert!(actual.1.is_empty());
 }
 

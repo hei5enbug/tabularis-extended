@@ -339,6 +339,11 @@ fn service_schema(source: &Value, operation: Operation) -> ServiceResult<Value> 
                 "kind",
                 json!({"enum":OBJECT_KINDS,"default":"table","description":"Kind of the object to describe. Kinds other than table and view need postgresql-plus or sqlserver-plus (see catalog_object_kinds)."}),
             );
+            add(
+                &mut properties,
+                "owner_table",
+                json!({"type":"string","minLength":1,"description":"Table the trigger belongs to (optional, kind trigger only). Required when several tables in the schema have a trigger with this name."}),
+            );
         }
         Operation::QueryExplain => {
             properties["sql"] = json!({"type":"string","minLength":1,"description":"The one statement to plan, without EXPLAIN. It is never run."});

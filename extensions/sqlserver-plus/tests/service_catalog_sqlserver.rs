@@ -312,8 +312,15 @@ fn trigger를_설명하면_정의와_시점_이벤트_활성_여부가_온다() 
     let mut catalog = Catalog::new();
     catalog.seed();
 
+    let owned = |catalog: &mut Catalog, owner: &str| {
+        let input = json!({"operation":"catalog.describe","table":{"database":catalog.database,"schema":catalog.schema,"table":"trg_child"},"kind":"trigger","owner_table":owner});
+        catalog.request("service_catalog", input, true)["result"].clone()
+    };
+
     // when
     let actual = catalog.describe("trg_child", Some("trigger"));
+    let matching = owned(&mut catalog, "child");
+    let other = owned(&mut catalog, "parent");
 
     // then
     assert!(actual["definition"]
@@ -325,6 +332,8 @@ fn trigger를_설명하면_정의와_시점_이벤트_활성_여부가_온다() 
         json!({"table":"child","timing":"AFTER","events":["INSERT","UPDATE"],"enabled":true})
     );
     assert_eq!(actual["columns"], json!([]));
+    assert_eq!(matching["properties"]["table"], "child");
+    assert_eq!(other["definition"], Value::Null);
 }
 
 #[test]

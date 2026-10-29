@@ -89,7 +89,7 @@ fn 종류를_주지_않으면_관계_종류를_제한하지_않고_열과_세부
     let input = table("orders");
 
     // when
-    let Plan { columns, details } = plan(&input, None);
+    let Plan { columns, details } = plan(&input, None, None);
 
     // then
     let columns = columns.unwrap();
@@ -115,7 +115,7 @@ fn 관계_종류는_pg_class_relkind로_좁혀_조회한다() {
     // when
     let actual: Vec<Value> = kinds
         .iter()
-        .map(|(kind, _)| plan(&input, Some(*kind)).details.values[2].clone())
+        .map(|(kind, _)| plan(&input, Some(*kind), None).details.values[2].clone())
         .collect();
 
     // then
@@ -129,8 +129,8 @@ fn 루틴과_집계는_같은_조회를_서로_다른_prokind로_나눈다() {
     let input = table("total");
 
     // when
-    let routine = plan(&input, Some(ObjectKind::Routine));
-    let aggregate = plan(&input, Some(ObjectKind::Aggregate));
+    let routine = plan(&input, Some(ObjectKind::Routine), None);
+    let aggregate = plan(&input, Some(ObjectKind::Aggregate), None);
 
     // then
     assert_eq!(routine.details.text, aggregate.details.text);
@@ -155,11 +155,28 @@ fn 열이_없는_종류는_세부_조회_하나만_실행한다() {
     // when
     let actual: Vec<bool> = kinds
         .iter()
-        .map(|kind| plan(&input, Some(*kind)).columns.is_none())
+        .map(|kind| plan(&input, Some(*kind), None).columns.is_none())
         .collect();
 
     // then
     assert!(actual.iter().all(|only_details| *only_details));
+}
+
+#[test]
+fn trigger는_소유_테이블을_세_번째_인자로_넘겨_후보를_좁힌다() {
+    // given
+    let input = table("audit");
+
+    // when
+    let actual = [None, Some("orders")].map(|owner| {
+        plan(&input, Some(ObjectKind::Trigger), owner)
+            .details
+            .values[2]
+            .clone()
+    });
+
+    // then
+    assert_eq!(actual, [Value::Null, json!("orders")]);
 }
 
 #[test]
@@ -168,7 +185,7 @@ fn 복합_타입은_composite_relkind의_열을_조회한다() {
     let input = table("pair");
 
     // when
-    let actual = plan(&input, Some(ObjectKind::Type));
+    let actual = plan(&input, Some(ObjectKind::Type), None);
 
     // then
     assert_eq!(actual.columns.unwrap().values[2], json!("c"));
@@ -184,7 +201,7 @@ fn 모든_조회는_자리표시자_수와_값_수가_같고_값을_문자열에
     let statements: Vec<(usize, usize, bool)> = all_kinds()
         .into_iter()
         .flat_map(|kind| {
-            let Plan { columns, details } = plan(&input, kind);
+            let Plan { columns, details } = plan(&input, kind, Some("owner"));
             columns.into_iter().chain([details])
         })
         .map(|statement| {

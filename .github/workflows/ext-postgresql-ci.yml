@@ -121,6 +121,8 @@ jobs:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: password
           POSTGRES_DB: testdb
+          # The spatial_live service tests connect as postgres without a password.
+          POSTGRES_HOST_AUTH_METHOD: trust
         options: >-
           --health-cmd pg_isready
           --health-interval 10s
@@ -145,3 +147,10 @@ jobs:
           PGDATABASE: testdb
         run: cargo test --test live_db -- --test-threads=1
 
+      # The PostGIS-free service tests of the spatial_live target, including the
+      # catalog_describe test of every object kind. The rest of the target needs
+      # PostGIS and runs outside CI.
+      - name: Run PostGIS-free service live tests
+        env:
+          TABULARIS_P1B_POSTGIS_PORT: 54320
+        run: cargo test --test spatial_live postgis없는_db -- --test-threads=1

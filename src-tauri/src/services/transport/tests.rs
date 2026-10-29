@@ -410,6 +410,36 @@ async fn 다른_작업은_120001_이상의_기한을_거부한다() {
     assert_eq!(h.driver.calls.load(Ordering::SeqCst), 0);
 }
 #[tokio::test]
+async fn catalog_describe는_trigger의_소유_테이블을_받아_드라이버로_넘긴다() {
+    // given
+    let h = Harness::new();
+    let schema = catalog(&h)
+        .into_iter()
+        .find(|tool| tool["name"] == "catalog_describe")
+        .unwrap()["inputSchema"]["properties"]["owner_table"]
+        .clone();
+    let call = |owner_table: &str| {
+        h.transport.call_tool(
+            "catalog_describe",
+            json!({"connection_id":"conn-a","table":"audit","kind":"trigger","owner_table":owner_table}),
+            mcp_caller(),
+            None,
+        )
+    };
+    // when
+    let accepted = call("orders").await;
+    let empty = call("").await;
+    // then
+    assert_eq!(schema["type"], "string");
+    assert_eq!(schema["minLength"], 1);
+    // The fixture driver cannot describe triggers; the argument itself was accepted.
+    assert!(accepted
+        .unwrap()
+        .to_string()
+        .contains("CAPABILITY_UNAVAILABLE"));
+    assert_eq!(empty.unwrap_err().code, ErrorCode::InvalidArgument);
+}
+#[tokio::test]
 async fn 알수없는_인자가_있으면_실행하지_않는다() {
     // given
     let h = Harness::new();

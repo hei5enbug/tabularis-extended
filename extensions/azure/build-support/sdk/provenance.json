@@ -101,9 +101,9 @@
     },
     {
       "path": "packages/service-contracts/fixtures/v1/validation.json",
-      "sha256": "14f73651c31cc25c8309250b68a2b73d1a6f7c56f491129a6bc3c36b459cd601",
-      "size": 304155,
-      "origin_sha256": "14f73651c31cc25c8309250b68a2b73d1a6f7c56f491129a6bc3c36b459cd601"
+      "sha256": "f6a62f436ff363e0e4f42bffdb9ded0b6428446d08f4503298c3bae290895e97",
+      "size": 305393,
+      "origin_sha256": "f6a62f436ff363e0e4f42bffdb9ded0b6428446d08f4503298c3bae290895e97"
     },
     {
       "path": "packages/service-contracts/package.json",
@@ -113,9 +113,9 @@
     },
     {
       "path": "packages/service-contracts/schema/v1/request.json",
-      "sha256": "5ae60139bdacb73478db31bf8118cfd4c9555976e82e9b790167b7c0b38f3136",
-      "size": 57515,
-      "origin_sha256": "5ae60139bdacb73478db31bf8118cfd4c9555976e82e9b790167b7c0b38f3136"
+      "sha256": "c7ab3a27200bd61c76e7c3266fc27e97a67fd020feb7ec9875d01c74a7410afa",
+      "size": 57604,
+      "origin_sha256": "c7ab3a27200bd61c76e7c3266fc27e97a67fd020feb7ec9875d01c74a7410afa"
     },
     {
       "path": "packages/service-contracts/schema/v1/response.json",
@@ -131,9 +131,9 @@
     },
     {
       "path": "packages/service-contracts/src/types.ts",
-      "sha256": "30d121f8df7f225364331c6614f4aec3d611a585a0529340da88ab41cc15eed6",
-      "size": 10044,
-      "origin_sha256": "30d121f8df7f225364331c6614f4aec3d611a585a0529340da88ab41cc15eed6"
+      "sha256": "b660f0420005ae54ebd84063aa72e1d7faa1cee255c1fa837edfad56eb0adbe9",
+      "size": 10068,
+      "origin_sha256": "b660f0420005ae54ebd84063aa72e1d7faa1cee255c1fa837edfad56eb0adbe9"
     },
     {
       "path": "packages/service-contracts/tsconfig.json",
