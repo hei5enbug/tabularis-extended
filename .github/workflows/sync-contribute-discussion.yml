@@ -18,6 +18,7 @@ concurrency:
 
 jobs:
   sync:
+    if: github.repository == 'TabularisDB/tabularis'
     runs-on: ubuntu-latest
     permissions:
       contents: read

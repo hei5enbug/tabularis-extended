@@ -175,7 +175,7 @@ jobs:
     name: Tag released versions
     needs: [detect, publish]
     # Also after a partial failure: tag whatever did reach npm.
-    if: ${{ !cancelled() && needs.detect.outputs.packages != '[]' && !inputs.dry_run }}
+    if: ${{ github.repository == 'TabularisDB/tabularis' && !cancelled() && needs.detect.outputs.packages != '[]' && !inputs.dry_run }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write # push tags
@@ -233,7 +233,8 @@ jobs:
     needs: [detect, publish, tag]
     # Runs after publish/tag so a just-merged release PR is already marked
     # tagged; otherwise release-please would refuse to open new release PRs.
-    if: ${{ !cancelled() && !inputs.dry_run }}
+    # Releases belong to upstream; the fork never opens release PRs or pushes release tags.
+    if: ${{ github.repository == 'TabularisDB/tabularis' && !cancelled() && !inputs.dry_run }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write # release branches
