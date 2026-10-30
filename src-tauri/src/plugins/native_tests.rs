@@ -317,6 +317,30 @@ fn database_error가_없는_플러그인_오류는_고정_문구로_가린다() 
     assert_eq!(actual.details, Value::Null);
 }
 
+#[test]
+fn 플러그인이_지원하지_않는_작업으로_거부한_이유는_mcp까지_전달한다() {
+    // given
+    let failure = remote_failure(json!({
+        "code": "UNSUPPORTED_OPERATION",
+        "message": "Transaction and session control requires service session RPCs",
+        "retryable": false,
+        "outcome": "not_applied",
+        "details": null
+    }));
+
+    // when
+    let actual = native_failure(failure);
+
+    // then
+    assert_eq!(actual.code, ErrorCode::UnsupportedOperation);
+    assert_eq!(actual.outcome, Outcome::NotApplied);
+    assert_eq!(
+        actual.message,
+        "Transaction and session control requires service session RPCs"
+    );
+    assert_eq!(actual.details, Value::Null);
+}
+
 async fn transport_failures() -> Vec<ServiceError> {
     let mut failures = vec![];
     for kind in ["eof", "utf8", "malformed", "oversized"] {
