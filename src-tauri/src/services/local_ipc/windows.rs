@@ -18,7 +18,7 @@ use tokio::{
     net::windows::named_pipe::{ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions},
 };
 use windows_sys::Win32::{
-    Foundation::{CloseHandle, LocalFree},
+    Foundation::{CloseHandle, GetLastError, LocalFree, ERROR_INVALID_PARAMETER, STILL_ACTIVE},
     Security::{
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -28,7 +28,9 @@ use windows_sys::Win32::{
     },
     System::{
         Pipes::{GetNamedPipeClientProcessId, GetNamedPipeServerProcessId},
-        Threading::{OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION},
+        Threading::{
+            GetExitCodeProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
     },
 };
 
@@ -161,6 +163,21 @@ pub(crate) async fn connect(path: &Path, expected_pid: u32) -> ServiceResult<Str
         verify_pid(pid)?;
     }
     Ok(Stream::Client(client))
+}
+/// False when the process has exited. A named pipe goes away with its
+/// process, so the process is the whole check here; a process that cannot be
+/// opened for another reason counts as alive.
+pub(crate) fn instance_alive(process_id: u32, _endpoint: &Path) -> bool {
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id);
+        if process.is_null() {
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let mut code = 0u32;
+        let read = GetExitCodeProcess(process, &mut code);
+        CloseHandle(process);
+        read == 0 || code == STILL_ACTIVE as u32
+    }
 }
 unsafe fn verify_pid(pid: u32) -> ServiceResult<VerifiedPeer> {
     if pid == 0 {

@@ -331,7 +331,10 @@ pub async fn run_mcp() -> i32 {
     match result {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("Service MCP failed");
+            eprintln!(
+                "Service MCP failed: {}",
+                json!({"error":redact_error(error.clone())})
+            );
             crate::services::transport::error_exit_code(&error)
         }
     }

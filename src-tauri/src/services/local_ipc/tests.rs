@@ -529,3 +529,160 @@ fn 짧은_기한의_소유자_호출은_기존_유예를_유지한다() {
     // Then
     assert_eq!(actual, Duration::from_millis(short + 2_000));
 }
+
+/// A profile directory short enough for a Unix socket path under it.
+#[cfg(unix)]
+fn short_profile() -> super::test_support::TestDirectory {
+    super::test_support::TestDirectory(PathBuf::from(format!(
+        "/tmp/tli-{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..12]
+    )))
+}
+
+/// Writes an instance record the way `LocalIpc::start` does and leaves a
+/// socket file with no listener at its endpoint path.
+#[cfg(unix)]
+fn leave_dead_instance(profile: &std::path::Path, id: &str, process_id: u32) -> PathBuf {
+    let store =
+        super::super::storage::PrivateStore::new(profile.join("local-ipc"), 16 * 1024).unwrap();
+    let nonce = uuid::Uuid::new_v4().to_string();
+    let socket = store.root().join(format!(
+        "{}.sock",
+        &super::super::security::digest(nonce.as_bytes())[..20]
+    ));
+    drop(std::os::unix::net::UnixListener::bind(&socket).unwrap());
+    store
+        .write(
+            id,
+            &json!({"instance_id":id,"process_id":process_id,"kind":"mcp","start_nonce":nonce}),
+        )
+        .unwrap();
+    socket
+}
+
+#[cfg(unix)]
+fn exited_process_id() -> u32 {
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    child.wait().unwrap();
+    child.id()
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn 끝난_프로세스나_리스너없는_소켓의_기록은_새_인스턴스가_시작할때_정리되어_한도에_세지_않는다(
+) {
+    // Given
+    let root = short_profile();
+    let dead = exited_process_id();
+    let mut sockets: Vec<PathBuf> = (0..63)
+        .map(|index| leave_dead_instance(&root.0, &format!("dead-{index}"), dead))
+        .collect();
+    sockets.push(leave_dead_instance(
+        &root.0,
+        "reused-pid",
+        std::process::id(),
+    ));
+    // When
+    let endpoint =
+        LocalIpc::start(&root.0, "fresh".into(), EndpointKind::Mcp, Arc::new(Echo)).await;
+    // Then
+    assert!(endpoint.is_ok());
+    let left: Vec<String> = std::fs::read_dir(root.0.join("local-ipc"))
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            name.strip_suffix(".json").map(str::to_owned)
+        })
+        .collect();
+    assert_eq!(left, vec!["fresh".to_owned()]);
+    assert!(sockets.iter().all(|socket| !socket.exists()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn 살아있는_인스턴스의_기록은_정리하지_않는다() {
+    // Given
+    let root = short_profile();
+    let live = LocalIpc::start(&root.0, "live".into(), EndpointKind::Mcp, Arc::new(Echo))
+        .await
+        .unwrap();
+    // When
+    let second = LocalIpc::start(&root.0, "second".into(), EndpointKind::Cli, Arc::new(Echo)).await;
+    // Then
+    assert!(second.is_ok());
+    assert!(root.0.join("local-ipc/live.json").exists());
+    assert_eq!(live.discover(EndpointKind::Mcp).await.unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn 살아있는_인스턴스로_한도가_차면_무엇이_찼는지와_복구방법을_알려준다() {
+    // Given
+    let root = short_profile();
+    let mut running = Vec::new();
+    for index in 0..64 {
+        running.push(
+            LocalIpc::start(
+                &root.0,
+                format!("live-{index}"),
+                EndpointKind::Mcp,
+                Arc::new(Echo),
+            )
+            .await
+            .unwrap(),
+        );
+    }
+    // When
+    let refused = LocalIpc::start(
+        &root.0,
+        "one-more".into(),
+        EndpointKind::Mcp,
+        Arc::new(Echo),
+    )
+    .await
+    .err()
+    .map(super::super::error::redact_error)
+    .unwrap();
+    // Then
+    assert_eq!(refused.code, ErrorCode::ResourceLimit);
+    assert_eq!(refused.details, json!({"reason":"local_ipc_instances"}));
+    assert!(refused.message.contains("64"), "{}", refused.message);
+    assert!(refused.message.contains("local-ipc"), "{}", refused.message);
+    assert!(refused.message.contains("Close"), "{}", refused.message);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn 종료_신호로_끝나기_전에_이_프로세스가_연_인스턴스의_기록과_소켓을_지운다() {
+    // Given
+    let root = short_profile();
+    let endpoint = LocalIpc::start(
+        &root.0,
+        "signalled".into(),
+        EndpointKind::Mcp,
+        Arc::new(Echo),
+    )
+    .await
+    .unwrap();
+    let sockets = || {
+        std::fs::read_dir(root.0.join("local-ipc"))
+            .unwrap()
+            .filter(|entry| {
+                entry
+                    .as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    == Some("sock")
+            })
+            .count()
+    };
+    assert_eq!(sockets(), 1);
+    // When
+    endpoint::remove_own_instances_in(&root.0.join("local-ipc"));
+    // Then
+    assert!(!root.0.join("local-ipc/signalled.json").exists());
+    assert_eq!(sockets(), 0);
+    drop(endpoint);
+}

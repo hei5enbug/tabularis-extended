@@ -4,7 +4,7 @@ use super::super::{
         MAX_JOB_DEADLINE_MS,
     },
     dispatch::{CallerContext, CallerTransport},
-    error::{failure, ServiceResult},
+    error::{failure, refusal, ServiceResult, LOCAL_IPC_INSTANCES},
     runtime::ServiceRuntime,
     security::opaque_id,
     storage::PrivateStore,
@@ -193,8 +193,9 @@ impl LocalIpc {
             if store.read::<Record>(&record.instance_id)?.is_some() {
                 return Err(failure(ErrorCode::InvalidArgument));
             }
-            if store.ids()?.len() >= 64 {
-                return Err(failure(ErrorCode::ResourceLimit));
+            reap_exited_instances(&store)?;
+            if store.ids()?.len() >= MAX_INSTANCES {
+                return Err(refusal(ErrorCode::ResourceLimit, LOCAL_IPC_INSTANCES));
             }
             listener = platform::bind(&endpoint)?;
             if let Err(error) = store.write(&record.instance_id, &record) {
@@ -202,6 +203,11 @@ impl LocalIpc {
                 return Err(error);
             }
         }
+        own_instances().push(OwnInstance {
+            store: store.clone(),
+            record: record.clone(),
+            endpoint: endpoint.clone(),
+        });
         let stopped = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(Notify::new());
         let task_store = store.clone();
@@ -386,17 +392,83 @@ impl LocalIpc {
         Ok(())
     }
     fn cleanup(&self) -> ServiceResult<()> {
-        let _lock = self.store.lock()?;
-        if self
-            .store
-            .read::<Record>(&self.record.instance_id)?
-            .is_some_and(|record| record.start_nonce == self.record.start_nonce)
-        {
-            self.store.remove(&self.record.instance_id)?;
-            remove_endpoint(&self.endpoint);
-        }
-        Ok(())
+        own_instances().retain(|own| own.record.start_nonce != self.record.start_nonce);
+        remove_own_record(&self.store, &self.record, &self.endpoint)
     }
+}
+
+/// The most instance records one profile's `local-ipc` directory holds.
+const MAX_INSTANCES: usize = 64;
+
+/// An instance this process started. A signal handler that exits without
+/// unwinding uses it to remove the record and endpoint `Drop` would have.
+struct OwnInstance {
+    store: Arc<PrivateStore>,
+    record: Record,
+    endpoint: PathBuf,
+}
+
+fn own_instances() -> std::sync::MutexGuard<'static, Vec<OwnInstance>> {
+    static OWN: std::sync::Mutex<Vec<OwnInstance>> = std::sync::Mutex::new(Vec::new());
+    OWN.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Removes the records and endpoints of every instance this process started.
+/// For a process about to call `exit`, which skips `Drop`.
+pub fn remove_own_instances() {
+    remove_own_instances_where(|_| true);
+}
+
+/// [`remove_own_instances`] for the instances whose store is `root` only.
+#[cfg(test)]
+pub(super) fn remove_own_instances_in(root: &Path) {
+    remove_own_instances_where(|own| own.store.root() == root);
+}
+
+fn remove_own_instances_where(selected: impl Fn(&OwnInstance) -> bool) {
+    let removed: Vec<OwnInstance> = {
+        let mut own = own_instances();
+        let (removed, kept) = std::mem::take(&mut *own).into_iter().partition(&selected);
+        *own = kept;
+        removed
+    };
+    for own in removed {
+        let _ = remove_own_record(&own.store, &own.record, &own.endpoint);
+    }
+}
+
+/// Removes `record` and its endpoint, unless another start replaced it.
+fn remove_own_record(store: &PrivateStore, record: &Record, endpoint: &Path) -> ServiceResult<()> {
+    let _lock = store.lock()?;
+    if store
+        .read::<Record>(&record.instance_id)?
+        .is_some_and(|stored| stored.start_nonce == record.start_nonce)
+    {
+        store.remove(&record.instance_id)?;
+        remove_endpoint(endpoint);
+    }
+    Ok(())
+}
+
+/// Removes the records, and their endpoints, of instances whose process has
+/// exited or whose endpoint no longer accepts connections: a process killed
+/// by a signal or a crash never removes its own. Runs under the store lock.
+fn reap_exited_instances(store: &PrivateStore) -> ServiceResult<()> {
+    for id in store.ids()? {
+        let Ok(Some(record)) = store.read::<Record>(&id) else {
+            continue;
+        };
+        if record.instance_id != id || record.validate().is_err() {
+            continue;
+        }
+        let endpoint = endpoint_path(store.root(), &record);
+        if !platform::instance_alive(record.process_id, &endpoint) {
+            store.remove(&id)?;
+            remove_endpoint(&endpoint);
+        }
+    }
+    Ok(())
 }
 impl Drop for LocalIpc {
     fn drop(&mut self) {

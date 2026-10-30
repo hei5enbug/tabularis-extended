@@ -2,7 +2,9 @@ mod endpoint;
 mod gui;
 mod platform;
 mod wire;
-pub use endpoint::{EndpointKind, InstanceMetadata, LocalIpc, LocalIpcRouter, RuntimeRouter};
+pub use endpoint::{
+    remove_own_instances, EndpointKind, InstanceMetadata, LocalIpc, LocalIpcRouter, RuntimeRouter,
+};
 pub use gui::{GuiApplyAck, GuiApplyRequest, PendingGuiAcks};
 pub use platform::{current_local_caller, VerifiedPeer};
 

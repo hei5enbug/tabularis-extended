@@ -65,6 +65,27 @@ fn verify(stream: &Stream) -> ServiceResult<VerifiedPeer> {
         user_identity: peer.uid().to_string(),
     })
 }
+/// False when the process has exited or nothing listens at `endpoint`. Any
+/// other answer, such as a process owned by another user, counts as alive.
+#[cfg(unix)]
+pub(crate) fn instance_alive(process_id: u32, endpoint: &Path) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(process_id) else {
+        return false;
+    };
+    if pid <= 0
+        || (unsafe { libc::kill(pid, 0) } != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH))
+    {
+        return false;
+    }
+    match std::os::unix::net::UnixStream::connect(endpoint) {
+        Ok(_) => true,
+        Err(error) => !matches!(
+            error.kind(),
+            std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+        ),
+    }
+}
 #[cfg(unix)]
 pub(crate) async fn connect(path: &Path, expected_pid: u32) -> ServiceResult<Stream> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -89,4 +110,4 @@ pub(crate) async fn connect(path: &Path, expected_pid: u32) -> ServiceResult<Str
 #[path = "windows.rs"]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{accept, bind, connect, Listener, Stream};
+pub(crate) use windows::{accept, bind, connect, instance_alive, Listener, Stream};

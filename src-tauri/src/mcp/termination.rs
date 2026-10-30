@@ -34,6 +34,9 @@ pub(crate) fn stop_plugins_on_termination_signal() {
                     kind.as_raw_value()
                 );
                 crate::drivers::registry::terminate_external_drivers().await;
+                // `exit` skips `Drop`, which would remove this process's
+                // local-ipc record and socket.
+                crate::services::local_ipc::remove_own_instances();
                 std::process::exit(128 + kind.as_raw_value());
             }
         });

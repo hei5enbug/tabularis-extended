@@ -56,6 +56,7 @@ pub const READ_ONLY_SETTING_HINT: &str = "To allow writes, open MCP Server in th
 pub const CONNECTION_READ_ONLY: &str = "connection_read_only";
 pub const APPROVAL_DENIED: &str = "approval_denied";
 pub const ALLOW_WRITES_GUI_ONLY: &str = "allow_writes_gui_only";
+pub const LOCAL_IPC_INSTANCES: &str = "local_ipc_instances";
 const MAX_DRIVER_MESSAGE_BYTES: usize = 512;
 
 /// The host's own text for a refusal whose cause it names in
@@ -68,6 +69,9 @@ fn refusal_message(code: ErrorCode, reason: &str) -> Option<String> {
         (ErrorCode::WriteNotAllowed, APPROVAL_DENIED) => {
             Some("The write was denied in the Tabularis approval window.".into())
         }
+        (ErrorCode::ResourceLimit, LOCAL_IPC_INSTANCES) => Some(
+            "64 Tabularis instances (windows, MCP servers and CLI calls) are running for this profile, the most its local-ipc folder holds. Close MCP clients or Tabularis windows you no longer use, then retry.".into(),
+        ),
         (ErrorCode::InvalidArgument, ALLOW_WRITES_GUI_ONLY) => Some(
             "allow_writes cannot be changed through MCP; change it in the Tabularis window: open MCP Server in the sidebar and use Read-only mode.".into(),
         ),
