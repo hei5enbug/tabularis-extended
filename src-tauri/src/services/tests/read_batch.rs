@@ -600,3 +600,58 @@ async fn 다른_드라이버나_맞지_않는_방언이면_배치를_쓰기_의�
     // then
     assert_eq!(actual, [(ErrorCode::WriteIntentRequired, 0); 6]);
 }
+
+#[test]
+fn as_바로_뒤의_별칭은_문장_키워드여도_읽기로_증명된다() {
+    // given
+    let queries = [
+        "SELECT COUNT(*) AS CNT, STRING_AGG(CAST(t.name AS varchar(max)), ';') AS BACKUP FROM dbo.some_table t",
+        "SELECT 1 AS LOAD, 2 AS lock, 3 AS Save, 4 AS copy FROM t",
+        "SELECT 1 AS\n  IMPORT FROM t",
+    ];
+
+    // when
+    let actual: Vec<_> = queries
+        .iter()
+        .flat_map(|sql| {
+            [None, Some(ReadDialect::SqlServer)]
+                .map(|dialect| (sql, dialect, prove_read(sql, dialect)))
+        })
+        .collect();
+
+    // then
+    for (sql, dialect, result) in actual {
+        assert_eq!(result, Some(proven(sql, &[])), "{dialect:?}: {sql}");
+    }
+}
+
+#[test]
+fn 따옴표로_감싼_as나_별칭_다음의_문장_키워드는_읽기로_증명하지_않는다() {
+    // given
+    let queries = [
+        "SELECT 1 [AS] DELETE FROM t",
+        "SELECT 1 \"AS\" DELETE FROM t",
+        "SELECT 1 `AS` DELETE FROM t",
+        "SELECT 1 AS x DELETE FROM t",
+        "SELECT 1 AS BACKUP DELETE FROM t",
+        "SELECT 1 AS INSERT INTO t2",
+    ];
+
+    // when
+    let actual: Vec<_> = queries
+        .iter()
+        .flat_map(|sql| {
+            [
+                None,
+                Some(ReadDialect::Postgres),
+                Some(ReadDialect::SqlServer),
+            ]
+            .map(|dialect| (sql, dialect, prove_read(sql, dialect)))
+        })
+        .collect();
+
+    // then
+    for (sql, dialect, result) in actual {
+        assert_eq!(result, None, "{dialect:?}: {sql}");
+    }
+}

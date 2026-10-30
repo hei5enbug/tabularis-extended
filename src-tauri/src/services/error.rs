@@ -15,7 +15,7 @@ pub fn failure(code: ErrorCode) -> ServiceError {
             "This write requires connection permission and request approval."
         }
         ErrorCode::WriteIntentRequired => {
-            "This statement is not a proven read; resend it with write set to true."
+            "This statement is not a proven read. If it only reads, quote any identifier that is a SQL keyword, for example [BACKUP] or \"BACKUP\"; if it changes data, resend it with write set to true."
         }
         ErrorCode::SecretNotAccepted => {
             "Secrets are not accepted here; enter them in the Tabularis window."

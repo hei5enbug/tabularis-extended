@@ -1247,6 +1247,18 @@ fn run_query_gate(kind: &str, readonly: bool, approval_mode: &str) -> RunQueryGa
     }
 }
 
+/// The read-only refusal for `subject` ("Query" or "Edited query"). A query
+/// that only failed to prove itself a read is told how to make it provable,
+/// not to enable writes.
+fn readonly_refusal(subject: &str, kind: &str) -> String {
+    if kind == "unknown" {
+        return format!(
+            "{subject} blocked by Tabularis read-only mode: it could not be proven a read. If it only reads, quote any identifier that is a SQL keyword, for example [BACKUP] or \"BACKUP\"."
+        );
+    }
+    format!("{subject} blocked by Tabularis read-only mode. Enable writes for this connection in Settings → MCP → Read-only mode.")
+}
+
 async fn tool_run_query(
     args: &serde_json::Map<String, Value>,
     config: &AppConfig,
@@ -1327,7 +1339,7 @@ async fn tool_run_query(
     let readonly = config::is_connection_readonly(config, &conn.id);
     if run_query_gate(kind, readonly, &approval_mode_of(config)) == RunQueryGate::BlockedReadonly {
         audit.status = "blocked_readonly".to_string();
-        let msg = "Query blocked by Tabularis read-only mode. Enable writes for this connection in Settings → MCP → Read-only mode.".to_string();
+        let msg = readonly_refusal("Query", kind);
         audit.error = Some(msg.clone());
         return Err(JsonRpcError {
             code: -32000,
@@ -1432,11 +1444,10 @@ async fn tool_run_query(
                         audit.query = Some(effective_query.clone());
                         audit.query_kind = Some(new_kind.to_string());
 
-                        if config::is_connection_readonly(config, &conn.id)
-                            && new_kind != "select"
+                        if config::is_connection_readonly(config, &conn.id) && new_kind != "select"
                         {
                             audit.status = "blocked_readonly".to_string();
-                            let msg = "Edited query blocked by Tabularis read-only mode. Enable writes for this connection in Settings → MCP → Read-only mode.".to_string();
+                            let msg = readonly_refusal("Edited query", new_kind);
                             audit.error = Some(msg.clone());
                             return Err(JsonRpcError {
                                 code: -32000,

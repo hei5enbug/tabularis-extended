@@ -614,7 +614,12 @@ fn tsql_batch_reads(upper: &str) -> bool {
         // `OFFSET n ROWS FETCH NEXT m ROWS ONLY` pages a read.
         let paging = token == "FETCH" && matches!(previous, "ROW" | "ROWS");
         let function_call = FUNCTION_LIKE_STARTERS.contains(&token) && rest.starts_with('(');
-        if !bracketed && !function_call && !paging && !tsql_allowed_use(token, rest) {
+        if !bracketed
+            && !function_call
+            && !paging
+            && !follows_bare_as(upper, start)
+            && !tsql_allowed_use(token, rest)
+        {
             return false;
         }
     }
@@ -1016,12 +1021,30 @@ fn has_embedded_statement(upper: &str, first: &str) -> bool {
         let function_call = FUNCTION_LIKE_STARTERS.contains(&token) && rest.starts_with('(');
         let show_create = token == "CREATE" && skip_leading_create && was_first;
         let index_hint = token == "USE" && (rest.starts_with("INDEX") || rest.starts_with("KEY"));
-        if bracketed || function_call || show_create || index_hint {
+        if bracketed || function_call || show_create || index_hint || follows_bare_as(upper, start)
+        {
             continue;
         }
         return true;
     }
     false
+}
+
+/// True when the word starting at `start` follows a bare `AS` and whitespace.
+/// Only an alias can stand there, so the word cannot begin a statement: an
+/// engine that does not accept it as an alias rejects the whole batch. A
+/// quoted, bracketed or qualified `AS` is an identifier and does not count.
+fn follows_bare_as(upper: &str, start: usize) -> bool {
+    let before = &upper[..start];
+    let head = before.trim_end_matches(|c: char| c.is_ascii_whitespace());
+    if head.len() == before.len() {
+        return false;
+    }
+    head.strip_suffix("AS").is_some_and(|prefix| {
+        !prefix.ends_with(|c: char| {
+            c.is_ascii_alphanumeric() || matches!(c, '_' | '[' | '"' | '`' | '.' | '@' | '$' | '#')
+        })
+    })
 }
 
 fn first_keyword(upper: &str) -> String {

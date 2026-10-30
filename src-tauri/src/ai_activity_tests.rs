@@ -508,6 +508,19 @@ mod tests {
     }
 
     #[test]
+    fn as_바로_뒤의_별칭이_문장_키워드여도_mcp_분류는_읽기다() {
+        // given
+        let query = "SELECT COUNT(*) AS CNT, STRING_AGG(CAST(t.name AS varchar(max)), ';') AS BACKUP FROM dbo.some_table t";
+
+        // when
+        let plain = classify_query_kind(query);
+        let mssql = classify_query_kind_for_dialect(query, Some(SqlDialect::Mssql));
+
+        // then
+        assert_eq!((plain, mssql), ("select", "select"));
+    }
+
+    #[test]
     fn 세미콜론_없이_이어붙인_delete는_unknown이고_into는_write다() {
         // given
         let batch = "SELECT TOP (1) 1 AS n DELETE FROM dbo.audit";

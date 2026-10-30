@@ -463,3 +463,22 @@ async fn database_scope_is_enforced_before_driver_access() {
         }
     }
 }
+
+#[test]
+fn 읽기를_증명하지_못한_쿼리의_읽기_전용_거부는_쓰기를_켜라고_하지_않고_따옴표를_안내한다() {
+    // given
+    let kinds = ["unknown", "write", "ddl"];
+
+    // when
+    let actual = kinds.map(|kind| readonly_refusal("Query", kind));
+
+    // then
+    assert!(actual[0].starts_with("Query blocked by Tabularis read-only mode"));
+    assert!(actual[0].contains("could not be proven a read"));
+    assert!(actual[0].contains("[BACKUP] or \"BACKUP\""));
+    assert!(!actual[0].contains("Enable writes"));
+    for refusal in &actual[1..] {
+        assert!(refusal.starts_with("Query blocked by Tabularis read-only mode"));
+        assert!(!refusal.contains("could not be proven a read"));
+    }
+}
