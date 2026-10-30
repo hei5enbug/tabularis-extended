@@ -510,14 +510,35 @@ mod tests {
     #[test]
     fn as_바로_뒤의_별칭이_문장_키워드여도_mcp_분류는_읽기다() {
         // given
-        let query = "SELECT COUNT(*) AS CNT, STRING_AGG(CAST(t.name AS varchar(max)), ';') AS BACKUP FROM dbo.some_table t";
+        let queries = [
+            "SELECT COUNT(*) AS CNT, STRING_AGG(CAST(t.name AS varchar(max)), ';') AS BACKUP FROM dbo.some_table t",
+            "SELECT 1 AS load, 2 AS lock, 3 AS copy, 4 AS import FROM t",
+        ];
+        let dialects = [
+            None,
+            Some(SqlDialect::Postgres),
+            Some(SqlDialect::Mysql),
+            Some(SqlDialect::Mssql),
+            Some(SqlDialect::Sqlite),
+            Some(SqlDialect::Oracle),
+            Some(SqlDialect::Generic),
+        ];
 
         // when
-        let plain = classify_query_kind(query);
-        let mssql = classify_query_kind_for_dialect(query, Some(SqlDialect::Mssql));
+        let actual: Vec<(&str, Option<SqlDialect>, &str)> = queries
+            .iter()
+            .flat_map(|query| {
+                dialects.map(|dialect| {
+                    (*query, dialect, classify_query_kind_for_dialect(query, dialect))
+                })
+            })
+            .chain(queries.iter().map(|query| (*query, None, classify_query_kind(query))))
+            .collect();
 
         // then
-        assert_eq!((plain, mssql), ("select", "select"));
+        for (query, dialect, kind) in actual {
+            assert_eq!(kind, "select", "{dialect:?}: {query}");
+        }
     }
 
     #[test]
