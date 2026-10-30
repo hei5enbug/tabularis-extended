@@ -30,6 +30,7 @@ devdiary
 /docs
 coverage
 plugins/**/target
+packages/service-contracts/rust/target
 .gitnexus
 .pi/
 .atl/
