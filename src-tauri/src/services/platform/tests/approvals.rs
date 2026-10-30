@@ -82,6 +82,25 @@ async fn 거부와_잘못된_id와_기한밖_결정은_승인으로_소비하지
         .all(|error| error.code == ErrorCode::WriteNotAllowed));
     assert_eq!(queue_counts(&harness.directory.0), (0, 0, 0));
 }
+#[tokio::test]
+async fn 승인_창에서_거부한_쓰기는_거부되었다는_원인을_알려준다() {
+    // given
+    let harness = Harness::new().await;
+    let request = request(
+        Operation::QueryExecute,
+        json!({"language":"sql","text":"DELETE FROM fixture","parameters":[],"page_size":10}),
+    );
+    // when
+    let actual = consume_with_decision(&harness, request, |decision| {
+        decision.decision = "deny".into()
+    })
+    .await;
+    // then
+    let error = actual.0.err().unwrap();
+    assert_eq!(error.code, ErrorCode::WriteNotAllowed);
+    assert_eq!(error.details, json!({"reason":"approval_denied"}));
+    assert!(error.message.contains("denied"), "{}", error.message);
+}
 async fn invalid_decisions(harness: &Harness) -> Vec<ServiceError> {
     let mut errors = vec![];
     for mode in 0..3 {

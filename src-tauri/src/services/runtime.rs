@@ -10,7 +10,9 @@ use super::{
     },
     credentials::{SecretInputs, SecretSlot, SecretStore, SessionSecretStore},
     dispatch::{CallerContext, CallerTransport, ServiceDispatcher, ServiceHandler},
-    error::{failure, redact_error, ServiceResult},
+    error::{
+        failure, redact_error, refusal, ServiceResult, ALLOW_WRITES_GUI_ONLY, CONNECTION_READ_ONLY,
+    },
     history::{HistoryPage, HistoryQuery, HistoryStore},
     jobs::{JobLease, JobManager},
     oauth::OAuthProvider,
@@ -407,7 +409,7 @@ impl ServiceRuntime {
         }
         if let Ok((_, permission)) = self.connection(request, caller).await {
             if !permission.allow_writes {
-                return Err(failure(ErrorCode::WriteNotAllowed));
+                return Err(refusal(ErrorCode::WriteNotAllowed, CONNECTION_READ_ONLY));
             }
         }
         Ok(())
@@ -548,7 +550,7 @@ impl ServiceRuntime {
         }
         let (connection, permission) = self.connection(request, caller).await?;
         if is_write && !permission.allow_writes {
-            return Err(failure(ErrorCode::WriteNotAllowed));
+            return Err(refusal(ErrorCode::WriteNotAllowed, CONNECTION_READ_ONLY));
         }
         if self
             .needs_approval(request, &connection, caller, is_write)
@@ -607,10 +609,11 @@ impl ServiceRuntime {
                             "name" | "settings" | "credential_ref" | "allow_writes"
                         )
                     })
-                }) || (caller.transport == CallerTransport::Mcp
-                    && patch.get("allow_writes").is_some())
-                {
+                }) {
                     return Err(failure(ErrorCode::InvalidArgument));
+                }
+                if caller.transport == CallerTransport::Mcp && patch.get("allow_writes").is_some() {
+                    return Err(refusal(ErrorCode::InvalidArgument, ALLOW_WRITES_GUI_ONLY));
                 }
                 let expected_version = request
                     .expected_version
@@ -1687,7 +1690,7 @@ impl ServiceRuntime {
     ) -> ServiceResult<()> {
         let (current, permission) = self.connection(request, caller).await?;
         if is_write && !permission.allow_writes {
-            return Err(failure(ErrorCode::WriteNotAllowed));
+            return Err(refusal(ErrorCode::WriteNotAllowed, CONNECTION_READ_ONLY));
         }
         if current.version != connection.version {
             let mut error = failure(ErrorCode::ConnectionConflict);

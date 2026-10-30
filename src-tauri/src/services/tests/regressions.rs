@@ -1388,3 +1388,58 @@ async fn 토큰보다_오래_도는_드라이버_호출에는_거부되기_전�
     assert!(refreshed.unwrap() > started + first_ttl);
     assert_eq!(harness.driver.refreshed.lock().unwrap().len(), 1);
 }
+
+#[test]
+fn 오류_정리는_알려진_거부_원인의_안내만_남기고_모르는_원인과_다른_세부는_지운다() {
+    // given
+    let known = super::super::error::refusal(ErrorCode::WriteNotAllowed, "connection_read_only");
+    let mut forged = super::super::error::failure(ErrorCode::WriteNotAllowed);
+    forged.message = "synthetic-private-password".into();
+    forged.details = json!({"reason":"synthetic-private","access_token":"synthetic-private"});
+    let mut mismatched = super::super::error::failure(ErrorCode::DriverExited);
+    mismatched.message = "synthetic-private-password".into();
+    mismatched.details = json!({"reason":"connection_read_only"});
+
+    // when
+    let actual = [known.clone(), forged, mismatched].map(super::super::error::redact_error);
+
+    // then
+    assert_eq!(actual[0].message, known.message);
+    assert_eq!(actual[0].details, json!({"reason":"connection_read_only"}));
+    assert_eq!(
+        actual[1].message,
+        super::super::error::failure(ErrorCode::WriteNotAllowed).message
+    );
+    assert_eq!(actual[1].details, Value::Null);
+    assert_eq!(
+        actual[2].message,
+        super::super::error::failure(ErrorCode::DriverExited).message
+    );
+    assert_eq!(actual[2].details, Value::Null);
+}
+
+#[test]
+fn 지원하지_않는_작업_오류만_드라이버_문장을_정리해서_전달한다() {
+    // given
+    let mut unsupported = super::super::error::failure(ErrorCode::UnsupportedOperation);
+    unsupported.message =
+        "Transaction and session control requires service session RPCs\u{7}".into();
+    let mut long = super::super::error::failure(ErrorCode::UnsupportedOperation);
+    long.message = "x".repeat(4096);
+    let mut other = super::super::error::failure(ErrorCode::DriverExited);
+    other.message = "synthetic-private-password".into();
+
+    // when
+    let actual = [unsupported, long, other].map(super::super::error::redact_error);
+
+    // then
+    assert_eq!(
+        actual[0].message,
+        "Transaction and session control requires service session RPCs"
+    );
+    assert_eq!(actual[1].message.len(), 512);
+    assert_eq!(
+        actual[2].message,
+        super::super::error::failure(ErrorCode::DriverExited).message
+    );
+}

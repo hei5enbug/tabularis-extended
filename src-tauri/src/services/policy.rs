@@ -2,7 +2,7 @@ use super::{
     backend::{PermissionScope, PolicyBackend, SavedConnection},
     contracts::{ErrorCode, ServiceRequest},
     dispatch::CallerContext,
-    error::{failure, ServiceResult},
+    error::{failure, refusal, ServiceResult, CONNECTION_READ_ONLY},
     security::value_hash,
     storage::now_ms,
 };
@@ -237,7 +237,7 @@ impl ApprovalPolicy {
     ) -> ServiceResult<()> {
         let permission = self.access.permission(connection, caller).await?;
         if write && !permission.allow_writes {
-            return Err(failure(ErrorCode::WriteNotAllowed));
+            return Err(refusal(ErrorCode::WriteNotAllowed, CONNECTION_READ_ONLY));
         }
         let grant = self
             .approvals
@@ -271,7 +271,7 @@ impl ApprovalPolicy {
                 .await?
                 .allow_writes
         {
-            return Err(failure(ErrorCode::WriteNotAllowed));
+            return Err(refusal(ErrorCode::WriteNotAllowed, CONNECTION_READ_ONLY));
         }
         Ok(())
     }

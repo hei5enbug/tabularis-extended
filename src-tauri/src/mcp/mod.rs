@@ -1256,7 +1256,10 @@ fn readonly_refusal(subject: &str, kind: &str) -> String {
             "{subject} blocked by Tabularis read-only mode: it could not be proven a read. If it only reads, quote any identifier that is a SQL keyword, for example [BACKUP] or \"BACKUP\"."
         );
     }
-    format!("{subject} blocked by Tabularis read-only mode. Enable writes for this connection in Settings → MCP → Read-only mode.")
+    format!(
+        "{subject} blocked by Tabularis read-only mode: this connection is read-only for MCP. {}",
+        crate::services::error::READ_ONLY_SETTING_HINT
+    )
 }
 
 async fn tool_run_query(

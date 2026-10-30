@@ -207,6 +207,27 @@ async fn 도구_목록은_가져오기와_연결_삭제를_뺀_마흔여덟_작�
     );
 }
 #[tokio::test]
+async fn query_execute_설명은_트랜잭션이_필요한_쓰기에_세션_도구를_쓰라고_알려준다() {
+    // given
+    let h = Harness::new();
+    // when
+    let actual = catalog(&h);
+    // then
+    let tool = actual
+        .iter()
+        .find(|tool| tool["name"] == "query_execute")
+        .unwrap();
+    let description = tool["description"].as_str().unwrap();
+    for name in [
+        "session_open",
+        "session_commit",
+        "session_rollback",
+        "BEGIN TRAN",
+    ] {
+        assert!(description.contains(name), "{name}: {description}");
+    }
+}
+#[tokio::test]
 async fn 모든_도구는_반환값과_쓰기_여부를_밝히는_실제_설명을_가진다() {
     // given
     let h = Harness::new();

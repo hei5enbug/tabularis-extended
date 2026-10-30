@@ -51,6 +51,41 @@ pub fn failure(code: ErrorCode) -> ServiceError {
     }
 }
 
+/// Where MCP and CLI write access is set in the Tabularis window.
+pub const READ_ONLY_SETTING_HINT: &str = "To allow writes, open MCP Server in the Tabularis sidebar and, under Read-only mode, check the connection in \"Allow writes from MCP\" (shown while \"Make all MCP queries read-only\" is on) or uncheck it in \"Read-only connections\".";
+pub const CONNECTION_READ_ONLY: &str = "connection_read_only";
+pub const APPROVAL_DENIED: &str = "approval_denied";
+pub const ALLOW_WRITES_GUI_ONLY: &str = "allow_writes_gui_only";
+const MAX_DRIVER_MESSAGE_BYTES: usize = 512;
+
+/// The host's own text for a refusal whose cause it names in
+/// `details.reason`. Only these reasons survive [`redact_error`].
+fn refusal_message(code: ErrorCode, reason: &str) -> Option<String> {
+    match (code, reason) {
+        (ErrorCode::WriteNotAllowed, CONNECTION_READ_ONLY) => Some(format!(
+            "This connection is read-only for MCP and CLI callers. {READ_ONLY_SETTING_HINT}"
+        )),
+        (ErrorCode::WriteNotAllowed, APPROVAL_DENIED) => {
+            Some("The write was denied in the Tabularis approval window.".into())
+        }
+        (ErrorCode::InvalidArgument, ALLOW_WRITES_GUI_ONLY) => Some(
+            "allow_writes cannot be changed through MCP; change it in the Tabularis window: open MCP Server in the sidebar and use Read-only mode.".into(),
+        ),
+        _ => None,
+    }
+}
+
+/// A refusal that names its cause, so the caller learns which check failed
+/// and where it is set.
+pub fn refusal(code: ErrorCode, reason: &str) -> ServiceError {
+    let base = failure(code);
+    ServiceError {
+        message: refusal_message(code, reason).unwrap_or(base.message),
+        details: serde_json::json!({"reason":reason}),
+        ..base
+    }
+}
+
 const SERVER_TOOLS: [&str; 2] = ["server_activity", "server_cancel"];
 
 /// The refusal for a server tool called on a connection whose driver is not
@@ -318,6 +353,20 @@ pub fn redact_error(error: ServiceError) -> ServiceError {
                 })
                 .collect();
             details.insert("instances".into(), Value::Array(safe));
+        }
+    }
+    if let Some(reason) = error.details.get("reason").and_then(Value::as_str) {
+        if let Some(text) = refusal_message(error.code, reason) {
+            details.insert("reason".into(), Value::String(reason.into()));
+            message = Some(text);
+        }
+    }
+    // A driver's reason for not supporting an operation is fixed text, so it
+    // is passed on, cleaned and bounded, instead of the generic message.
+    if error.code == ErrorCode::UnsupportedOperation && message.is_none() {
+        let text = clean_text(error.message.trim(), MAX_DRIVER_MESSAGE_BYTES);
+        if !text.is_empty() {
+            message = Some(text);
         }
     }
     let redacted = failure(code);

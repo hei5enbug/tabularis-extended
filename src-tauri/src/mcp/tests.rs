@@ -480,5 +480,8 @@ fn 읽기를_증명하지_못한_쿼리의_읽기_전용_거부는_쓰기를_켜
     for refusal in &actual[1..] {
         assert!(refusal.starts_with("Query blocked by Tabularis read-only mode"));
         assert!(!refusal.contains("could not be proven a read"));
+        assert!(refusal.contains("MCP Server"), "{refusal}");
+        assert!(refusal.contains("Read-only mode"), "{refusal}");
+        assert!(!refusal.contains("Settings →"), "{refusal}");
     }
 }

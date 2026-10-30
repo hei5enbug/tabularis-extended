@@ -329,3 +329,50 @@ async fn 승인은_한_번만_쓰이고_같은_요청을_다시_통과시키지_
     assert_eq!(again.error.unwrap().code, ErrorCode::WriteNotAllowed);
     assert_eq!(harness.driver.calls.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn 읽기전용_연결의_쓰기_거부는_원인과_mcp_서버_페이지의_설정을_알려준다() {
+    // given
+    let harness = harness(true, ApprovalMode::WritesOnly);
+
+    // when
+    let actual = run(&harness, &sql("DELETE FROM items"), true).await;
+
+    // then
+    let error = actual.error.unwrap();
+    assert_eq!(error.code, ErrorCode::WriteNotAllowed);
+    assert_eq!(error.details, json!({"reason":"connection_read_only"}));
+    assert!(error.message.contains("read-only"), "{}", error.message);
+    assert!(error.message.contains("MCP Server"), "{}", error.message);
+    assert!(
+        error.message.contains("Read-only mode"),
+        "{}",
+        error.message
+    );
+}
+
+#[tokio::test]
+async fn mcp로_allow_writes를_바꾸려하면_tabularis_창에서만_바꿀_수_있다고_알려준다() {
+    // given
+    let harness = harness(false, ApprovalMode::Off);
+    let mut input = request(
+        Operation::ConnectionUpdate,
+        json!({"patch":{"allow_writes":true}}),
+    );
+    input.expected_version = Some(1);
+
+    // when
+    let actual = harness.runtime.call_validated(&input, &mcp()).await;
+
+    // then
+    let error = actual.error.unwrap();
+    assert_eq!(error.code, ErrorCode::InvalidArgument);
+    assert_eq!(error.details, json!({"reason":"allow_writes_gui_only"}));
+    assert!(error.message.contains("allow_writes"), "{}", error.message);
+    assert!(
+        error.message.contains("Tabularis window"),
+        "{}",
+        error.message
+    );
+    assert!(error.message.contains("MCP Server"), "{}", error.message);
+}

@@ -2,7 +2,7 @@ use crate::services::{
     backend::SavedConnection,
     contracts::{ErrorCode, Operation, ServiceRequest},
     dispatch::{CallerContext, CallerTransport},
-    error::{failure, ServiceResult},
+    error::{failure, refusal, ServiceResult, APPROVAL_DENIED},
     policy::{ApprovalBackend, ApprovalGrant, ChangeAnnotations},
     security::value_hash,
     storage::{now_ms, PrivateStore},
@@ -302,7 +302,7 @@ impl ServiceApprovals {
                     validate_decision(&id, &decision, &current)?;
                     self.cleanup_locked(&id);
                     if decision.decision != "approve" {
-                        return Err(failure(ErrorCode::WriteNotAllowed));
+                        return Err(refusal(ErrorCode::WriteNotAllowed, APPROVAL_DENIED));
                     }
                     return Ok(ApprovalGrant {
                         approval_id: id.clone(),
