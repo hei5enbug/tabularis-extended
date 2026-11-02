@@ -661,13 +661,126 @@ fn returns_result_set(query: &str) -> bool {
 /// CTE even though `WITH ... SELECT ... LIMIT n OFFSET m` is valid syntax.
 /// Copying that classification 1:1 would trade a real syntax-error bug for
 /// a real (if quieter) pagination-correctness bug — not a net parity win.
+///
+/// A `WITH` query accepts a trailing `LIMIT` only when the statement after its
+/// common table expressions is a query: `WITH s AS (…) UPDATE … RETURNING …`
+/// fails with "syntax error at or near LIMIT", so it is capped client-side.
 fn supports_trailing_limit_clause(query: &str) -> bool {
     let upper = strip_leading_sql_comments(query).to_uppercase();
+    if upper.starts_with("WITH") {
+        return !matches!(
+            with_main_keyword(query).as_deref(),
+            Some("INSERT" | "UPDATE" | "DELETE" | "MERGE")
+        );
+    }
     upper.starts_with("SELECT")
-        || upper.starts_with("WITH")
         || upper.starts_with("VALUES")
         || upper.starts_with("TABLE")
         || upper.starts_with("EXPLAIN")
+}
+
+/// The uppercased keyword of the statement a `WITH` query runs after its
+/// common table expressions, such as `SELECT` or `UPDATE`. It is the first
+/// statement keyword outside parentheses that follows a closed CTE body.
+/// Comments, quoted identifiers, string literals and dollar quotes are
+/// skipped, so text inside them is never read as a keyword. `None` when the
+/// text does not start with `WITH` or no such keyword appears before the end
+/// of the statement, as for a parenthesized main query.
+fn with_main_keyword(query: &str) -> Option<String> {
+    const MAIN: [&str; 7] = [
+        "SELECT", "INSERT", "UPDATE", "DELETE", "MERGE", "VALUES", "TABLE",
+    ];
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    let mut depth = 0usize;
+    let mut word = String::new();
+    let mut seen_with = false;
+    let mut after_body = false;
+    loop {
+        let c = chars.get(i).copied();
+        if c.is_some_and(|c| c.is_alphanumeric() || c == '_' || (c == '$' && !word.is_empty())) {
+            word.push(c.unwrap().to_ascii_uppercase());
+            i += 1;
+            continue;
+        }
+        let escape_string = word == "E";
+        if !word.is_empty() && depth == 0 {
+            if !seen_with {
+                if word != "WITH" {
+                    return None;
+                }
+                seen_with = true;
+            } else if after_body && MAIN.contains(&word.as_str()) {
+                return Some(word);
+            }
+        }
+        word.clear();
+        let c = c?;
+        let next = chars.get(i + 1).copied();
+        i += 1;
+        match c {
+            '-' if next == Some('-') => {
+                while chars.get(i).is_some_and(|&c| c != '\n') {
+                    i += 1;
+                }
+            }
+            '/' if next == Some('*') => {
+                i += 1;
+                let mut comments = 1usize;
+                while comments > 0 && i < chars.len() {
+                    match (chars[i], chars.get(i + 1).copied()) {
+                        ('*', Some('/')) => {
+                            comments -= 1;
+                            i += 2;
+                        }
+                        ('/', Some('*')) => {
+                            comments += 1;
+                            i += 2;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            '\'' | '"' => {
+                while let Some(&q) = chars.get(i) {
+                    i += 1;
+                    if c == '\'' && escape_string && q == '\\' {
+                        i += 1;
+                    } else if q == c {
+                        if chars.get(i) == Some(&c) {
+                            i += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+            '$' => {
+                let tag_end = (i..chars.len())
+                    .find(|&j| !(chars[j].is_alphanumeric() || chars[j] == '_'))
+                    .unwrap_or(chars.len());
+                let numbered = chars.get(i).is_some_and(|c| c.is_ascii_digit());
+                if !numbered && chars.get(tag_end) == Some(&'$') {
+                    let delimiter: Vec<char> = chars[i - 1..=tag_end].to_vec();
+                    i = tag_end + 1;
+                    while i < chars.len() && !chars[i..].starts_with(&delimiter) {
+                        i += 1;
+                    }
+                    i += delimiter.len();
+                }
+            }
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    after_body = true;
+                }
+            }
+            ',' if depth == 0 => after_body = false,
+            ';' if depth == 0 => return None,
+            _ => {}
+        }
+    }
 }
 
 #[cfg(test)]

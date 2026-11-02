@@ -12,8 +12,63 @@
 
 use super::{
     raw_explain_output, returns_result_set, strip_leading_sql_comments,
-    supports_trailing_limit_clause, transaction_effect, TransactionEffect,
+    supports_trailing_limit_clause, transaction_effect, with_main_keyword, TransactionEffect,
 };
+
+#[test]
+fn supports_trailing_limit_clause_rejects_a_with_query_whose_main_statement_changes_data() {
+    // given
+    let statements = [
+        "WITH s AS (SELECT 1 AS id) UPDATE t SET v = 1 FROM s WHERE t.id = s.id RETURNING t.id",
+        "with s as (select 1 as id) insert into t select id from s returning id",
+        "WITH RECURSIVE a AS (SELECT 1), b (n) AS MATERIALIZED (SELECT 2) DELETE FROM t RETURNING *",
+        "WITH s AS (SELECT 1 AS id) MERGE INTO t USING s ON t.id = s.id WHEN MATCHED THEN DELETE",
+        "-- note\nWITH s AS (SELECT 1) UPDATE t SET v = 1 RETURNING v;",
+    ];
+
+    // when
+    let accepted: Vec<bool> = statements
+        .iter()
+        .map(|stmt| supports_trailing_limit_clause(stmt))
+        .collect();
+
+    // then
+    assert_eq!(accepted, vec![false; statements.len()]);
+}
+
+#[test]
+fn supports_trailing_limit_clause_accepts_a_with_query_whose_main_statement_reads() {
+    // given
+    let statements = [
+        "WITH u AS (UPDATE t SET v = 1 RETURNING *) SELECT * FROM u",
+        "WITH \"update\" AS (SELECT 1) SELECT * FROM \"update\"",
+        "WITH a AS (SELECT 1), b AS (SELECT 2) VALUES (1)",
+        "WITH a AS (SELECT 1) (SELECT * FROM a)",
+    ];
+
+    // when
+    let accepted: Vec<bool> = statements
+        .iter()
+        .map(|stmt| supports_trailing_limit_clause(stmt))
+        .collect();
+
+    // then
+    assert_eq!(accepted, vec![true; statements.len()]);
+}
+
+#[test]
+fn with_main_keyword_skips_parentheses_and_keywords_inside_quotes_and_comments() {
+    // given
+    let query = "WITH src AS (SELECT * FROM json_to_recordset($j$[{\"p\": \"POINT(1 2)\", \"x\": \") SELECT\"}]$j$) AS r(p text)),\n\
+                 e AS (SELECT E'it\\'s ) SELECT', 'a'') SELECT', $1 /* ) SELECT /* nested */ */) -- ) SELECT\n\
+                 UPDATE t SET p = src.p FROM src RETURNING t.id";
+
+    // when
+    let keyword = with_main_keyword(query);
+
+    // then
+    assert_eq!(keyword.as_deref(), Some("UPDATE"));
+}
 
 #[test]
 fn strip_leading_sql_comments_skips_line_comments() {
