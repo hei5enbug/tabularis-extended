@@ -1,5 +1,5 @@
 use super::{Kind, TableRef};
-use crate::driver::service::exact::Parameter;
+use crate::driver::service::{exact::Parameter, ServiceError};
 use serde_json::{json, Map, Value};
 
 type Row = Map<String, Value>;
@@ -330,6 +330,32 @@ fn properties(kind: Kind, meta: Option<&Row>, predicates: &[Row]) -> Value {
         _ => {}
     }
     Value::Object(properties)
+}
+
+/// Whether the object exists. Every kind has one result set that holds a row
+/// only for an existing object: the columns of a table or view (SQL Server
+/// allows no column-less relation), the module row of a routine, the type or
+/// policy row, or the single catalog row of the other kinds.
+pub fn exists(kind: Kind, data: &Value) -> bool {
+    let index = match kind {
+        Kind::Table | Kind::View | Kind::Trigger | Kind::Sequence | Kind::Synonym | Kind::Rule => 0,
+        Kind::Routine | Kind::Type | Kind::SecurityPolicy => 1,
+    };
+    sets(data).get(index).is_some_and(|rows| !rows.is_empty())
+}
+
+pub fn not_found(kind: Kind) -> ServiceError {
+    ServiceError::argument(match kind {
+        Kind::Table => "The table to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::View => "The view to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::Routine => "The routine to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::Trigger => "The trigger to describe does not exist in this database, or is not on the given owner_table; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::Sequence => "The sequence to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::Synonym => "The synonym to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::Type => "The type to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::Rule => "The rule to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+        Kind::SecurityPolicy => "The security_policy to describe does not exist in this database; check the schema (catalog_objects lists the objects of a schema)",
+    })
 }
 
 pub fn result(kind: Kind, data: &Value) -> Value {

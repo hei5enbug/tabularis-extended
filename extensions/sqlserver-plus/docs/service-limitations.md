@@ -49,6 +49,6 @@ one, for example inside a `BEGIN … END` block or through `EXEC`. The plugin co
 - A routine parameter declared `OUTPUT` is reported with mode `INOUT`. SQL Server cannot declare an output-only
   parameter, and `INFORMATION_SCHEMA.PARAMETERS` reports the same `INOUT` value.
 - A DML trigger name is unique within its schema, so a trigger needs no `owner_table`. When `owner_table` is set,
-  the trigger is described only if it belongs to that table; otherwise every key is empty, as for a missing object.
+  the trigger is described only if it belongs to that table; otherwise the call fails with `INVALID_ARGUMENT`, as for a missing object.
 - The object kinds beyond `table` and `view` are implemented by sqlserver-plus and postgresql-plus only. Every other
   driver supports `table` and `view` only; `catalog_object_kinds` reports what a connection's driver supports.

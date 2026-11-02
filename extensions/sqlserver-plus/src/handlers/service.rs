@@ -340,7 +340,7 @@ async fn run(
         lease.completed();
     }
     Ok(if let Some(query) = prepared.5 {
-        catalog::result(&query, &data)
+        catalog::result(&query, &data)?
     } else if method == "service_test" {
         json!({"success":true})
     } else {

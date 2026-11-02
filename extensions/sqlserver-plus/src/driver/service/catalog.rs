@@ -148,14 +148,19 @@ pub fn query(input: &Input, params: &ConnectionParams) -> Result<Query, ServiceE
         kind: describe_kind,
     })
 }
-pub fn result(query: &Query, data: &Value) -> Value {
+pub fn result(query: &Query, data: &Value) -> Result<Value, ServiceError> {
     if let Some(kind) = query.kind {
-        return describe::result(kind, data);
+        if !describe::exists(kind, data) {
+            return Err(describe::not_found(kind));
+        }
+        return Ok(describe::result(kind, data));
     }
     let rows = data["rows"].as_array().unwrap();
     if matches!(query.key, "databases" | "schemas") {
-        return json!({query.key: rows.iter().map(|row| row[0].clone()).collect::<Vec<_>>()});
+        return Ok(json!({query.key: rows.iter().map(|row| row[0].clone()).collect::<Vec<_>>()}));
     }
     let columns = data["columns"].as_array().unwrap();
-    json!({query.key:rows.iter().map(|row| columns.iter().zip(row.as_array().unwrap()).map(|(name,value)| (name.as_str().unwrap().to_owned(),value.clone())).collect::<serde_json::Map<String,Value>>()).collect::<Vec<_>>()})
+    Ok(
+        json!({query.key:rows.iter().map(|row| columns.iter().zip(row.as_array().unwrap()).map(|(name,value)| (name.as_str().unwrap().to_owned(),value.clone())).collect::<serde_json::Map<String,Value>>()).collect::<Vec<_>>()}),
+    )
 }

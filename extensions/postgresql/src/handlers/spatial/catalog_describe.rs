@@ -30,6 +30,26 @@ pub enum ObjectKind {
     OperatorFamily,
 }
 
+impl ObjectKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Table => "table",
+            Self::View => "view",
+            Self::MaterializedView => "materialized_view",
+            Self::ForeignTable => "foreign_table",
+            Self::Routine => "routine",
+            Self::Aggregate => "aggregate",
+            Self::Trigger => "trigger",
+            Self::Sequence => "sequence",
+            Self::Type => "type",
+            Self::Collation => "collation",
+            Self::Operator => "operator",
+            Self::OperatorClass => "operator_class",
+            Self::OperatorFamily => "operator_family",
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Statement {
     pub text: &'static str,
@@ -353,6 +373,27 @@ pub fn assemble(columns: Vec<Value>, detail: Option<Value>, limits: Value, page:
     data
 }
 
+/// An existing object always yields a details row (or listed columns), so
+/// neither signals a name that matches nothing the caller may see.
+fn require_found(
+    table: &TableRef,
+    kind: Option<ObjectKind>,
+    owner_table: Option<&str>,
+    columns: &[Value],
+    detail: Option<&Value>,
+) -> Result<(), SpatialError> {
+    if !columns.is_empty() || detail.is_some() {
+        return Ok(());
+    }
+    let owner = owner_table.map_or_else(String::new, |owner| format!(" on table {owner}"));
+    Err(SpatialError::argument(&format!(
+        "No {} named {}.{}{owner} exists in this database; check the schema (catalog_objects lists the objects of a schema)",
+        kind.map_or("relation", ObjectKind::label),
+        table.schema(),
+        table.table,
+    )))
+}
+
 async fn run(
     client: &Client,
     catalog: Option<&Catalog>,
@@ -399,6 +440,7 @@ pub async fn describe(
     if !limits.as_ref().is_some_and(is_truncated) {
         let result = run(client, catalog, &plan.details, scope, reserved).await?;
         detail = row_objects(&result)?.into_iter().next();
+        require_found(table, kind, owner_table, &columns, detail.as_ref())?;
         if owner_table.is_none()
             && detail
                 .as_ref()

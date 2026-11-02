@@ -1,6 +1,6 @@
 use serde_json::{json, Value};
 
-use super::{assemble, merge_limits, plan, ObjectKind, Plan};
+use super::{assemble, merge_limits, plan, require_found, ObjectKind, Plan};
 use crate::handlers::spatial::types::TableRef;
 
 fn table(name: &str) -> TableRef {
@@ -321,4 +321,111 @@ fn 앞선_한도가_없으면_뒤의_한도를_그대로_쓴다() {
 
     // then
     assert_eq!(actual, second);
+}
+
+#[test]
+fn missing_object_fails_with_invalid_argument_naming_kind_and_qualified_name() {
+    // given
+    let routine = table("get_next_message");
+
+    // when
+    let error = require_found(&routine, Some(ObjectKind::Routine), None, &[], None).unwrap_err();
+
+    // then
+    assert_eq!(error.code, "INVALID_ARGUMENT");
+    assert_eq!(
+        error.message,
+        "No routine named app.get_next_message exists in this database; check the schema (catalog_objects lists the objects of a schema)"
+    );
+}
+
+#[test]
+fn missing_object_without_kind_is_named_a_relation() {
+    // given
+    let relation = table("orders");
+
+    // when
+    let error = require_found(&relation, None, None, &[], None).unwrap_err();
+
+    // then
+    assert!(error
+        .message
+        .starts_with("No relation named app.orders exists"));
+}
+
+#[test]
+fn missing_trigger_message_includes_owner_table() {
+    // given
+    let trigger = table("audit");
+
+    // when
+    let error = require_found(
+        &trigger,
+        Some(ObjectKind::Trigger),
+        Some("orders"),
+        &[],
+        None,
+    )
+    .unwrap_err();
+
+    // then
+    assert!(error
+        .message
+        .starts_with("No trigger named app.audit on table orders exists"));
+}
+
+#[test]
+fn every_kind_reports_its_contract_name_when_missing() {
+    // given
+    let object = table("x");
+    let kinds = all_kinds();
+
+    // when
+    let messages: Vec<String> = kinds
+        .iter()
+        .map(|kind| {
+            require_found(&object, *kind, None, &[], None)
+                .unwrap_err()
+                .message
+        })
+        .collect();
+
+    // then
+    assert_eq!(messages.len(), 14);
+    for (kind, message) in kinds.iter().zip(&messages) {
+        let name = kind.map_or("relation", ObjectKind::label);
+        assert!(message.starts_with(&format!("No {name} named app.x exists")));
+    }
+}
+
+#[test]
+fn object_with_details_but_no_columns_is_found() {
+    // given
+    let zero_column_table = table("empty");
+    let detail = json!({"definition":null});
+
+    // when
+    let actual = require_found(
+        &zero_column_table,
+        Some(ObjectKind::Table),
+        None,
+        &[],
+        Some(&detail),
+    );
+
+    // then
+    assert!(actual.is_ok());
+}
+
+#[test]
+fn object_with_columns_but_no_details_is_found() {
+    // given
+    let truncated = table("wide");
+    let columns = vec![json!({"name":"id"})];
+
+    // when
+    let actual = require_found(&truncated, Some(ObjectKind::View), None, &columns, None);
+
+    // then
+    assert!(actual.is_ok());
 }

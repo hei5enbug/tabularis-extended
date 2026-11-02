@@ -392,7 +392,7 @@ fn 표_설명은_외래키와_인덱스와_키를_열_단위_행에서_묶어_�
     let data = with_additional(columns, vec![foreign_keys, indexes, checks, definition]);
 
     // when
-    let actual = result(&describe_query(None), &data);
+    let actual = result(&describe_query(None), &data).unwrap();
 
     // then
     assert_eq!(actual["columns"][1]["name"], "parent_id");
@@ -420,7 +420,7 @@ fn 표_설명은_외래키와_인덱스와_키를_열_단위_행에서_묶어_�
 }
 
 #[test]
-fn 없는_객체의_설명은_오류_없이_모든_키가_빈_값으로_온다() {
+fn describing_a_missing_object_fails_with_invalid_argument_for_every_kind() {
     // given
     let data = with_additional(
         set(&["name"], json!([])),
@@ -431,24 +431,125 @@ fn 없는_객체의_설명은_오류_없이_모든_키가_빈_값으로_온다()
             set(&["definition"], json!([])),
         ],
     );
+    let kinds = [
+        Kind::Table,
+        Kind::View,
+        Kind::Routine,
+        Kind::Trigger,
+        Kind::Sequence,
+        Kind::Synonym,
+        Kind::Type,
+        Kind::Rule,
+        Kind::SecurityPolicy,
+    ];
+
+    // when
+    let actual = kinds.map(|kind| result(&describe_query(Some(kind)), &data).unwrap_err());
+
+    // then
+    for (kind, error) in kinds.iter().zip(&actual) {
+        assert_eq!(error.code, "INVALID_ARGUMENT");
+        assert!(error.message.contains("does not exist in this database"));
+        assert!(error.message.contains("check the schema"));
+        assert!(error.message.contains(match kind {
+            Kind::SecurityPolicy => "security_policy",
+            Kind::Table => "table",
+            Kind::View => "view",
+            Kind::Routine => "routine",
+            Kind::Trigger => "trigger",
+            Kind::Sequence => "sequence",
+            Kind::Synonym => "synonym",
+            Kind::Type => "type",
+            Kind::Rule => "rule",
+        }));
+    }
+}
+
+#[test]
+fn a_routine_without_parameters_is_still_described() {
+    // given
+    let data = with_additional(
+        set(
+            &["name", "data_type", "mode", "ordinal_position"],
+            json!([]),
+        ),
+        vec![set(
+            &["definition", "p_routine_type", "p_return_type"],
+            json!([["CREATE PROCEDURE p AS SELECT 1", "PROCEDURE", null]]),
+        )],
+    );
+
+    // when
+    let actual = result(&describe_query(Some(Kind::Routine)), &data).unwrap();
+
+    // then
+    assert_eq!(actual["columns"], json!([]));
+    assert_eq!(actual["definition"], "CREATE PROCEDURE p AS SELECT 1");
+    assert_eq!(actual["properties"]["routine_type"], "PROCEDURE");
+}
+
+#[test]
+fn a_table_is_described_from_its_columns_alone() {
+    // given
+    let data = with_additional(
+        set(&["name", "data_type"], json!([["id", "int"]])),
+        vec![
+            set(&["name"], json!([])),
+            set(&["name"], json!([])),
+            set(&["name"], json!([])),
+            set(&["definition"], json!([])),
+        ],
+    );
+
+    // when
+    let actual = result(&describe_query(None), &data).unwrap();
+
+    // then
+    assert_eq!(actual["columns"], json!([{"name":"id","data_type":"int"}]));
+    assert_eq!(actual["definition"], Value::Null);
+    assert_eq!(actual["properties"], json!({}));
+}
+
+#[test]
+fn a_type_and_a_security_policy_are_found_by_their_catalog_row() {
+    // given
+    let type_data = with_additional(
+        set(&["name"], json!([])),
+        vec![set(&["p_category"], json!([["alias"]]))],
+    );
+    let policy_data = with_additional(
+        set(&["type"], json!([])),
+        vec![set(&["p_is_enabled"], json!([[true]]))],
+    );
 
     // when
     let actual = [
-        None,
-        Some(Kind::Routine),
-        Some(Kind::SecurityPolicy),
-        Some(Kind::Sequence),
-        Some(Kind::Trigger),
-    ]
-    .map(|kind| result(&describe_query(kind), &data));
+        result(&describe_query(Some(Kind::Type)), &type_data).is_ok(),
+        result(&describe_query(Some(Kind::SecurityPolicy)), &policy_data).is_ok(),
+    ];
 
     // then
-    for response in actual {
-        assert_eq!(
-            response,
-            json!({"columns":[],"foreign_keys":[],"indexes":[],"keys":[],"check_constraints":[],"definition":null,"properties":{}})
-        );
-    }
+    assert_eq!(actual, [true, true]);
+}
+
+#[test]
+fn listing_objects_still_succeeds_when_no_rows_come_back() {
+    // given
+    let query = query(
+        &Input::Objects {
+            database: "app".into(),
+            schema: Some("nowhere".into()),
+        },
+        &connection(),
+    )
+    .unwrap();
+    let data = set(&["schema_name", "name", "kind", "table"], json!([]));
+
+    // when
+    let actual = result(&query, &data).unwrap();
+
+    // then
+    assert_eq!(actual, json!({"objects": []}));
 }
 
 #[test]
@@ -467,7 +568,7 @@ fn 뷰_정의는_definition으로_오고_암호화된_정의는_null이다() {
         ],
     );
     let encrypted = with_additional(
-        set(&["name"], json!([])),
+        set(&["name"], json!([["id"]])),
         vec![
             set(&["name"], json!([])),
             set(&["name"], json!([])),
@@ -477,8 +578,8 @@ fn 뷰_정의는_definition으로_오고_암호화된_정의는_null이다() {
     );
 
     // when
-    let actual =
-        [&view, &encrypted].map(|data| result(&describe_query(None), data)["definition"].clone());
+    let actual = [&view, &encrypted]
+        .map(|data| result(&describe_query(None), data).unwrap()["definition"].clone());
 
     // then
     assert_eq!(
@@ -505,7 +606,7 @@ fn routine_설명은_매개변수를_컬럼으로_두고_종류와_반환_형식
     let data = with_additional(parameters, vec![meta]);
 
     // when
-    let actual = result(&describe_query(Some(Kind::Routine)), &data);
+    let actual = result(&describe_query(Some(Kind::Routine)), &data).unwrap();
 
     // then
     assert_eq!(actual["columns"][2]["mode"], "INOUT");
@@ -526,7 +627,7 @@ fn trigger_설명은_이벤트를_배열로_나누고_활성_여부를_속성으
     );
 
     // when
-    let actual = result(&describe_query(Some(Kind::Trigger)), &data);
+    let actual = result(&describe_query(Some(Kind::Trigger)), &data).unwrap();
 
     // then
     assert_eq!(
@@ -565,7 +666,7 @@ fn sequence_설명은_정수_범위는_숫자로_넘치는_값은_문자열로_�
     );
 
     // when
-    let actual = result(&describe_query(Some(Kind::Sequence)), &data);
+    let actual = result(&describe_query(Some(Kind::Sequence)), &data).unwrap();
 
     // then
     assert_eq!(
@@ -603,7 +704,7 @@ fn sequence_설명은_javascript_안전_정수를_넘는_값도_문자열로_둔
     );
 
     // when
-    let actual = result(&describe_query(Some(Kind::Sequence)), &data);
+    let actual = result(&describe_query(Some(Kind::Sequence)), &data).unwrap();
 
     // then
     assert_eq!(
@@ -637,7 +738,7 @@ fn type_설명은_표_형식의_컬럼과_별칭_속성을_함께_돌려준다()
     let data = with_additional(columns, vec![meta]);
 
     // when
-    let actual = result(&describe_query(Some(Kind::Type)), &data);
+    let actual = result(&describe_query(Some(Kind::Type)), &data).unwrap();
 
     // then
     assert_eq!(actual["columns"][0]["name"], "id");
@@ -662,7 +763,7 @@ fn security_policy_설명은_조건자를_속성에_담는다() {
     let data = with_additional(predicates, vec![meta]);
 
     // when
-    let actual = result(&describe_query(Some(Kind::SecurityPolicy)), &data);
+    let actual = result(&describe_query(Some(Kind::SecurityPolicy)), &data).unwrap();
 
     // then
     assert_eq!(actual["properties"]["is_enabled"], false);
