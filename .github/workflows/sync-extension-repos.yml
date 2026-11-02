@@ -1,0 +1,104 @@
+name: Sync extension repositories
+
+# Replays every first-parent commit on main that changes extensions/<name> into
+# the matching standalone repository, one target commit per source commit, with
+# a Synced-From trailer that marks where the next run starts. Files that exist
+# only in a target repository are never touched, and nothing is force-pushed.
+# Run the catch-up mode once per target before the first replay.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extensions/azure/**'
+      - 'extensions/spatial/**'
+      - 'extensions/sqlserver-plus/**'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: replay new commits, or copy the whole folder over the target once (catch-up)
+        type: choice
+        options: [replay, catch-up]
+        default: replay
+      extension:
+        description: extension to sync
+        type: choice
+        options: [all, azure, spatial, sqlserver-plus]
+        default: all
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: sync / ${{ matrix.name }}
+    if: github.repository == 'hei5enbug/tabularis-extended' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # One queue per target, so a run for one extension never replaces a
+    # pending run for another. Each extension/<name> syncs to
+    # hei5enbug/tabularis-<name>.
+    concurrency:
+      group: sync-extension-repos-${{ matrix.name }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        name: ${{ fromJSON((inputs.extension && inputs.extension != 'all') && format('["{0}"]', inputs.extension) || '["azure","spatial","sqlserver-plus"]') }}
+    env:
+      MODE: ${{ inputs.mode || 'replay' }}
+      TARGET_REPOSITORY: hei5enbug/tabularis-${{ matrix.name }}
+    steps:
+      - name: Require the SYNC_TOKEN secret
+        env:
+          SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
+        run: |
+          if [ -z "$SYNC_TOKEN" ]; then
+            echo "::error::The SYNC_TOKEN repository secret is missing. Add a fine-grained token with Contents read and write on ${{ env.TARGET_REPOSITORY }}."
+            exit 1
+          fi
+
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout ${{ env.TARGET_REPOSITORY }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ env.TARGET_REPOSITORY }}
+          ref: main
+          token: ${{ secrets.SYNC_TOKEN }}
+          path: .sync-target
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+
+      - name: Sync ${{ matrix.name }} (${{ env.MODE }})
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898099+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898099+github-actions[bot]@users.noreply.github.com
+        run: >-
+          node scripts/sync-extension-repos.mjs "$MODE"
+          --folder "extensions/${{ matrix.name }}"
+          --target .sync-target
+          --source-repo "${{ github.repository }}"
+          --head "${{ github.sha }}"
+
+      - name: Push to ${{ env.TARGET_REPOSITORY }}
+        working-directory: .sync-target
+        run: |
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ]; then
+            echo "Nothing new to push."
+            exit 0
+          fi
+          git log --format='%h %s' origin/main..HEAD
+          if ! git push origin HEAD:refs/heads/main; then
+            echo "::error::${{ env.TARGET_REPOSITORY }} main moved while this run synced it, or the token cannot push. Nothing was force-pushed; rerun the workflow."
+            exit 1
+          fi
