@@ -77,6 +77,10 @@ WKWebView 성능 검사는 `extensions/spatial`에서 `node tests/integration/wk
 
 - 최소 읽기 확인과 전체 수용 검사를 구분합니다. SQL의 읽기 전용 주체 확인, MFA/앱 인증·갱신·CRUD와
   Cosmos 교차 파티션 정렬·집계·페이지 재개는 미완료입니다.
+- 기존 CLI 로그인으로 Cosmos 플러그인의 실제 탐색·최소 읽기와 Azure SQL의 ODBC `SELECT 1`을 확인했습니다.
+  SQL 플러그인의 읽기 전용 권한 확인은 결과 상한과 쓰기 가능한 주체 때문에 막혀 있습니다.
+  문서 CRUD·페이지 재개·인증 갱신과 레지스트리 수용 여부는 미확인입니다.
+- 로컬 DB, 합성 인증 서버, mock 결과를 실제 Azure 연동 완료로 표시하지 않습니다.
 - GitHub Actions는 수동 실행하는 선택 사항입니다. 실제 OS에서 직접 실행한 검증도 환경과 결과를 기록해 근거로 씁니다.
   workflow 작성이나 synthetic 검사를 native 실행으로 간주하지 않습니다.
 - 호스트 전체 strict clippy는 이전 호스트의 기존 코드 경고 때문에 실패했습니다. 전체 clippy 통과라고 주장하지 않습니다.

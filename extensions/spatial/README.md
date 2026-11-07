@@ -1,8 +1,84 @@
 # Spatial
 
 Tabularis에서 PostGIS 쿼리 결과와 테이블을 지도로 표시하는 확장입니다.
-이 디렉터리는 `tabularis-extended` 저장소의 `extensions/spatial`이며 React·MapLibre UI와 공간 데이터 모델을 제공합니다.
-새 PostgreSQL 드라이버를 만들지 않습니다. 서비스 기능은 `extensions/postgresql`의 `postgresql-plus` 드라이버를 사용합니다.
+이 디렉터리는 `tabularis-extended` 저장소의 `extensions/spatial`입니다.
+새 PostgreSQL 드라이버를 만들지 않고 기존 PostgreSQL 연결을 그대로 사용합니다.
+서비스 기능은 `extensions/postgresql`의 `postgresql-plus` 드라이버를 사용합니다.
+
+## 주요 기능
+
+- PostgreSQL 테이블 화면의 `Map` 버튼으로 PostGIS 공간 컬럼을 지도에 표시합니다.
+- 레이어 속성을 확인하고 지도에 표시한 데이터를 GeoJSON으로 내보냅니다.
+- 원본 geometry·geography, SRID, 좌표를 바꾸지 않고 표시용 데이터만 변환합니다.
+- 외부 배경지도는 기본으로 요청하지 않습니다.
+- 공통 서비스 호스트에서는 지도 상태 저장, 쿼리 결과 스냅샷, CLI·MCP 지도 제어도 사용할 수 있습니다.
+
+## 지원 환경과 사전 조건
+
+| 호스트 | 사용할 수 있는 기능 |
+|---|---|
+| 공식 Tabularis **`0.26.0` 이상** | 기본 PostGIS 테이블 지도, 속성 확인, GeoJSON 내보내기 |
+| 공통 서비스를 제공하는 **`0.27.0+extended.1`** 호스트 | 위 기능과 지도 상태 저장, 결과 스냅샷, MCP·CLI 지도 제어 |
+
+- `0.27.0+extended.1` 호스트는 저장소 루트이며 공통 Rust 서비스, GUI·MCP·CLI 어댑터와 로컬 IPC를 이미 포함합니다.
+  별도 패치는 없습니다.
+- PostGIS가 설치된 DB에 기존 `postgres` 또는 `postgresql` 연결이 있어야 합니다.
+- 서비스 경로의 `Map` 도구 모음은 `postgresql-plus` 연결에만 표시됩니다.
+  서비스 API가 있는 호스트에서도 `postgres`·`postgresql` 연결은 기본 경로의 지도를 엽니다.
+- `spatial` 패키지는 DB 실행 파일이 없는 UI 플러그인입니다.
+  0.26.0 로더가 인식하는 `kind: driver`로 설치합니다.
+- 플러그인은 실제 호스트 API를 확인해 기능을 고릅니다. 새 호스트 버전의 모든 동작을 자동으로 보장하지는 않습니다.
+- 지도 ZIP은 운영체제 공통이며 macOS, Linux, Windows의 플러그인 폴더에 설치합니다.
+- ZIP을 소스에서 빌드하려면 Node `24.21.0`과 pnpm `10.30.3`이 필요합니다.
+
+지도는 PostGIS만 지원합니다. Cosmos와 Azure SQL은 연결·탐색·쿼리·CRUD 대상이며 지도 대상이 아닙니다.
+지도 도형 편집, 자체 공간 연산, 타일 서버, 분산 큐는 포함하지 않습니다.
+
+## 설치와 첫 지도
+
+1. 저장소를 받아 `extensions/spatial`에서 의존성과 UI를 빌드합니다.
+
+   ```sh
+   git clone https://github.com/hei5enbug/tabularis-extended.git
+   cd tabularis-extended/extensions/spatial
+   pnpm bootstrap
+   ```
+
+2. 지도 ZIP을 만듭니다. `artifacts/spatial-0.1.0.zip`이 아직 없어야 합니다.
+
+   ```sh
+   node --input-type=module -e "import fs from 'node:fs'; fs.mkdirSync('artifacts', {recursive:true})"
+   node --input-type=module -e "import path from 'node:path'; import {packageBundle} from './scripts/package/index.mjs'; console.log(packageBundle({source:process.cwd(),output:path.resolve('artifacts/spatial-0.1.0.zip')}))"
+   ```
+
+3. 앱을 종료하고 ZIP을 임시 디렉터리에 압축 해제합니다.
+   `.tabularium`이 있는 ZIP 루트의 모든 파일을 운영체제의 플러그인 폴더에 복사합니다.
+   이전 설치본은 별도 폴더에 백업한 뒤 교체합니다.
+
+   | OS | 설치 폴더 |
+   |---|---|
+   | macOS | `~/Library/Application Support/tabularis/plugins/drivers/spatial/` |
+   | Linux | `~/.local/share/tabularis/plugins/drivers/spatial/` |
+   | Windows | `%APPDATA%\tabularis\plugins\drivers\spatial\` |
+
+4. 앱을 다시 열고 설정의 Plugins에서 `spatial`을 활성화합니다.
+5. PostgreSQL 연결에서 테이블을 열고 `Map` 버튼을 누릅니다.
+   공간 컬럼을 선택하고, SRID가 없는 행은 원본 좌표계의 SRID를 입력한 뒤 조회합니다.
+
+기본 지도는 테이블을 새로 제한 조회하며 SQL 편집기의 기존 실행 결과를 재조회하거나 바꾸지 않습니다.
+표시 상한과 화면 동작은 [사용 안내](docs/usage.md#공식-0260-기본-지도)에,
+공통 서비스 호스트 빌드는 [빌드와 설치](docs/building.md#공통-서비스-호스트-실행)에 있습니다.
+
+## 문서 안내
+
+| 문서 | 답하는 질문 |
+|---|---|
+| [빌드와 설치](docs/building.md) | ZIP을 어떻게 만들고 설치하며, 공통 서비스 호스트와 드라이버는 어떻게 빌드하고 되돌리나요? |
+| [GUI·CLI·MCP 사용법](docs/usage.md) | 지도·CLI·MCP를 어떻게 쓰고, 데이터와 쓰기·인증은 어떻게 다루나요? |
+| [검증 현황과 재현](docs/verification.md) | 무엇을 어떤 환경에서 확인했고, 무엇이 아직 남았나요? |
+| [PostGIS 컨테이너 검사](tests/containers/README.md) | PostGIS 컨테이너 검사는 어떻게 실행하나요? |
+
+## 개발
 
 | 구성 | 역할 |
 |---|---|
@@ -10,72 +86,28 @@ Tabularis에서 PostGIS 쿼리 결과와 테이블을 지도로 표시하는 확
 | `crates/tabularis-spatial-core/` | 공간 결과, 원본 식별자, 표시 범위와 제한 검증. 저장소 루트의 호스트가 경로로 참조 |
 | `build-support/sdk/` | 플러그인 빌드에 쓰는 고정 plugin API와 서비스 계약 |
 | `scripts/sdk-bootstrap.mjs` | 고정 SDK를 검증하고 의존성과 UI를 빌드 |
-| [`../azure`](../azure/README.md) | Azure 연동: Cosmos NoSQL 드라이버, 문서 작업 공간과 Entra·Azure CLI 인증 UI |
 
-기본 PostGIS 테이블 지도 조회는 공식 Tabularis `0.26.0` 이상에서 동작합니다.
-지도 상태 저장·결과 스냅샷·MCP 지도 제어는 공통 서비스를 제공하는 **`0.27.0+extended.1`** 호스트가 필요합니다.
-이 호스트는 저장소 루트이며 공통 Rust 서비스, GUI·MCP·CLI 어댑터와 로컬 IPC를 이미 포함합니다. 별도 패치는 없습니다.
-
-`manifest.json`의 `min_runtime_version`은 하나만 선언할 수 있고 호스트는 이 값보다 낮은 버전의 로드를 거부합니다.
-그래서 값은 기본 경로의 `0.26.0`으로 두고, 서비스 기능은 호스트가 제공하는 API로 선택합니다.
-`ui/src/index.tsx`는 `usePluginService`와 `usePluginAssets`가 모두 있을 때만 서비스 경로를 사용합니다.
-
-## 시작하기
-
-Node `24.21.0`, pnpm `10.30.3`, Rust `1.96.0`과 운영체제별 Tauri 빌드 도구가 필요합니다.
-저장소를 한 번 clone한 뒤 `extensions/spatial`에서 실행합니다.
+개발 검사에는 Node와 pnpm 외에 Rust `1.96.0`과 운영체제별 Tauri 빌드 도구가 필요합니다.
+`extensions/spatial`에서 실행합니다.
 
 ```sh
-git clone https://github.com/hei5enbug/tabularis-extended.git
-cd tabularis-extended/extensions/spatial
 pnpm bootstrap
 cargo test --locked --workspace
 ```
 
 `pnpm bootstrap`은 저장소에 포함된 SDK snapshot을 검증하고 frozen lockfile로 설치합니다.
 서비스 계약과 plugin API를 빌드한 뒤 UI도 빌드합니다. 호스트나 드라이버를 먼저 빌드할 필요는 없습니다.
-서비스 경로를 호스트와 함께 실행하려면 저장소 루트의 호스트와 두 드라이버를 빌드합니다. 절차는 [빌드·설치](docs/building.md)에 있습니다.
+서비스 경로를 호스트와 함께 실행하려면 저장소 루트의 호스트와 두 드라이버를 빌드합니다.
+절차는 [빌드와 설치](docs/building.md)에, 전체 검사 명령은 [재실행](docs/verification.md#재실행)에 있습니다.
 
-[빌드·설치](docs/building.md), [GUI·CLI·MCP 사용법](docs/usage.md),
-[검증 결과와 남은 검증](docs/verification.md)을 확인하세요.
+`manifest.json`의 `min_runtime_version`은 하나만 선언할 수 있고 호스트는 이 값보다 낮은 버전의 로드를 거부합니다.
+그래서 값은 기본 경로의 `0.26.0`으로 두고, 서비스 기능은 호스트가 제공하는 API로 선택합니다.
+`ui/src/index.tsx`는 `usePluginService`와 `usePluginAssets`가 모두 있을 때만 서비스 경로를 사용합니다.
 
-## 공식 앱의 기본 지도
+## 관련 확장
 
-PostgreSQL 연결에서 테이블을 열고 `Map` 버튼을 누르세요.
-기본 지도는 테이블을 새로 제한 조회합니다. SQL 편집기의 기존 실행 결과를 재조회하거나 바꾸지 않습니다.
-공간 컬럼을 선택하고, SRID가 없는 행은 원본 좌표계 SRID를 입력한 뒤 조회합니다.
-행 1,000개·좌표 100,000개·GeoJSON 8 MiB 상한을 적용하고 제한에 도달하면 표시합니다.
-레이어 속성 확인과 표시 GeoJSON 내보내기를 지원합니다. 외부 배경지도는 기본으로 요청하지 않습니다.
-
-`spatial` 패키지는 DB 실행 파일이 없는 UI 플러그인입니다.
-기본 경로는 기존 `postgres` 또는 `postgresql` 연결을 사용합니다.
-서비스 경로의 `Map` 도구 모음은 `postgresql-plus` 연결에만 표시됩니다.
-서비스 API가 있는 호스트에서도 `postgres`·`postgresql` 연결은 기본 경로의 지도를 엽니다.
-0.26.0 로더가 인식하는 `kind: driver`로 설치하며 실제 호스트 API에 따라 기능을 선택합니다.
-새 호스트 버전의 모든 동작을 자동으로 보장하는 것은 아닙니다.
-
-## 데이터 처리 원칙
-
-- 원본 geometry/geography, SRID, 좌표를 보존합니다. 지도 표시용 데이터만 WGS84 GeoJSON으로 변환합니다.
-- SRID가 없으면 입력을 요구합니다. 포함·교차·거리 판정은 DB 원본 공간 타입으로 수행합니다.
-- 쿼리 결과 지도는 저장된 결과를 사용합니다. 테이블 지도는 명시한 테이블과 현재 범위로 조회합니다.
-- 행·좌표·응답 크기 제한에 도달하면 `truncated`와 제한 사유를 반환합니다.
-- 쓰기는 연결의 쓰기 허용, 요청의 명시적 의도, 승인 절차를 통과해야 합니다.
-- 취소되거나 결과가 불명확한 쓰기를 자동 재실행하지 않습니다.
-
-## 현재 범위
-
-지도는 PostGIS만 지원합니다. Cosmos와 Azure SQL은 연결·탐색·쿼리·CRUD 대상입니다.
-`geography` 테이블의 제한된 viewport 조회는 명시적으로 거부합니다.
-`world: true` 전체 범위 조회와 쿼리 결과의 geography 표시는 지원합니다.
-지도 도형 편집, 자체 공간 연산, 타일 서버, 분산 큐는 포함하지 않습니다.
-
-기존 CLI 로그인으로 Cosmos 플러그인의 실제 탐색·최소 읽기와 Azure SQL의 ODBC `SELECT 1`을 확인했습니다.
-SQL 플러그인의 읽기 전용 권한 확인은 결과 상한과 쓰기 가능한 주체 때문에 막혀 있습니다.
-문서 CRUD·페이지 재개·인증 갱신과 레지스트리 수용 여부는 미확인입니다.
-로컬 DB, 합성 인증 서버, mock 결과를 실제 Azure 연동 완료로 표시하지 않습니다.
-GitHub Actions는 필요할 때 수동으로 실행하는 선택 사항이며 필수 완료 조건이 아닙니다.
-실제 OS에서 직접 수행한 검증도 실행 환경과 결과를 기록하면 근거로 사용합니다.
+- [`../azure`](../azure/README.md): Cosmos NoSQL 드라이버,
+  문서 작업 공간과 Entra·Azure CLI 인증 UI를 제공하는 Azure 연동입니다.
 
 ## 라이선스
 
