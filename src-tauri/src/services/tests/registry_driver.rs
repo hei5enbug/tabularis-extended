@@ -1003,3 +1003,122 @@ async fn 진행중인_쿼리가_있어도_토큰_갱신은_취소_없이_완료�
     assert!(refreshed.unwrap());
     assert_eq!(query.err().unwrap().code, ErrorCode::Cancelled);
 }
+
+/// Reaches a local PostgreSQL through the real postgresql-plus plugin binary.
+struct LivePostgresResolver {
+    port: u16,
+    user: String,
+    database: String,
+}
+#[async_trait]
+impl ServiceConnectionResolver for LivePostgresResolver {
+    async fn params(&self, connection: &SavedConnection) -> ServiceResult<ConnectionParams> {
+        let mut live = params(&connection.driver);
+        live.host = Some("127.0.0.1".into());
+        live.port = Some(self.port);
+        live.username = Some(self.user.clone());
+        live.database = crate::models::DatabaseSelection::Single(self.database.clone());
+        live.ssl_mode = Some("disable".into());
+        Ok(live)
+    }
+}
+fn live_postgres() -> (std::path::PathBuf, LivePostgresResolver) {
+    let plugin = std::env::var_os("TABULARIS_TEST_PG_PLUGIN")
+        .map(std::path::PathBuf::from)
+        .filter(|plugin| plugin.is_absolute() && plugin.is_file())
+        .expect("TABULARIS_TEST_PG_PLUGIN must name the postgresql-plus plugin binary");
+    let port = std::env::var("TABULARIS_TEST_PG_PORT")
+        .ok()
+        .and_then(|port| port.parse::<u16>().ok())
+        .filter(|port| *port != 0)
+        .expect("TABULARIS_TEST_PG_PORT must name a nonzero port");
+    let user = std::env::var("TABULARIS_TEST_PG_USER").unwrap_or_else(|_| "postgres".into());
+    let database =
+        std::env::var("TABULARIS_TEST_PG_DATABASE").unwrap_or_else(|_| "postgres".into());
+    (
+        plugin,
+        LivePostgresResolver {
+            port,
+            user,
+            database,
+        },
+    )
+}
+/// Registers the live plugin under a fresh id and returns that id with its resolver.
+async fn register_live_postgres(
+    start: crate::plugins::driver::ProcessStart,
+) -> (String, LivePostgresResolver) {
+    let (plugin, resolver) = live_postgres();
+    let id = format!("pg-live-{}", uuid::Uuid::new_v4());
+    let manifest: crate::drivers::driver_trait::PluginManifest = serde_json::from_value(json!({
+        "id": id, "name": "PostgreSQL Plus", "version": "0.0.0", "description": "live",
+        "default_port": resolver.port,
+        "capabilities": {"schemas": true, "views": true, "routines": true, "file_based": false}
+    }))
+    .unwrap();
+    let driver = crate::plugins::driver::RpcDriver::new_with_start(
+        manifest,
+        plugin,
+        None,
+        vec![],
+        std::collections::HashMap::new(),
+        start,
+    )
+    .await
+    .unwrap();
+    registry::register_driver(driver).await;
+    (id, resolver)
+}
+fn live_read(text: &str) -> (ServiceRequest, DriverContext) {
+    let mut query = request(json!({"language": "sql", "text": text, "parameters": []}));
+    query.deadline_ms = 30_000;
+    let mut read = context("conn", "live-read");
+    read.deadline_ms = 30_000;
+    (query, read)
+}
+// Catches #15: the plugin's row cap reached the host as INVALID_ARGUMENT.
+#[tokio::test]
+#[ignore = "needs TABULARIS_TEST_PG_PLUGIN and TABULARIS_TEST_PG_PORT"]
+async fn 실제_PostgreSQL_Plus_드라이버의_10000행_초과_읽기는_row_limit에서_잘린_결과가_된다() {
+    // given
+    let _guard = registry::REGISTRY_TEST_LOCK.lock().await;
+    let (id, resolver) = register_live_postgres(crate::plugins::driver::ProcessStart::Eager).await;
+    let backend = RegistryDriverBackend::new(Arc::new(resolver));
+    let (query, read) = live_read("select g as id from generate_series(1, 10001) g");
+    // when
+    let actual = backend.execute(&saved(&id), &query, read).await;
+    registry::unregister_driver(&id).await;
+    // then
+    let snapshot = actual
+        .expect("the read succeeds")
+        .snapshot
+        .expect("a snapshot");
+    assert_eq!(snapshot.sets[0].rows.len(), 10_000);
+    assert!(snapshot.limits.truncated);
+    assert_eq!(snapshot.limits.reasons, ["row_limit"]);
+}
+// Catches #13: a driver started on its first call must answer that call like an eager one.
+#[tokio::test]
+#[ignore = "needs TABULARIS_TEST_PG_PLUGIN and TABULARIS_TEST_PG_PORT"]
+async fn 첫_호출에_시작된_실제_PostgreSQL_Plus_드라이버도_첫_읽기에_같은_결과를_돌려준다() {
+    // given
+    let _guard = registry::REGISTRY_TEST_LOCK.lock().await;
+    let (id, resolver) =
+        register_live_postgres(crate::plugins::driver::ProcessStart::OnFirstCall).await;
+    let pid_before = registry::get_driver(&id).await.unwrap().pid();
+    let backend = RegistryDriverBackend::new(Arc::new(resolver));
+    let (query, read) = live_read("select g as id from generate_series(1, 3) g");
+    // when
+    let actual = backend.execute(&saved(&id), &query, read).await;
+    let pid_after = registry::get_driver(&id).await.unwrap().pid();
+    registry::unregister_driver(&id).await;
+    // then
+    assert_eq!(pid_before, None);
+    assert!(pid_after.is_some());
+    let snapshot = actual
+        .expect("the read succeeds")
+        .snapshot
+        .expect("a snapshot");
+    assert_eq!(snapshot.sets[0].rows, [json!([1]), json!([2]), json!([3])]);
+    assert!(!snapshot.limits.truncated);
+}
