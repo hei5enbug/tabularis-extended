@@ -6,8 +6,7 @@ use urlencoding::encode;
 
 use crate::credential_cache;
 use crate::models::{
-    BatchStatementResult, ConnectionGroup, ConnectionParams,
-    QueryResult, SavedConnection,
+    BatchStatementResult, ConnectionGroup, ConnectionParams, QueryResult, SavedConnection,
 };
 
 // Constants
@@ -1901,4 +1900,3 @@ pub(crate) fn reject_if_would_create_cycle(
             .to_string(),
     )
 }
-

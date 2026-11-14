@@ -67,14 +67,21 @@ import {DefaultDatabaseSelect} from './NewConnectionModal/DefaultDatabaseSelect'
 import {
     isMultiDatabaseCapable,
     isSchemaBasedMultiDbCapable,
+    hasDefaultDatabaseInput,
     hasOptedIntoDatabaseSelection,
 } from '@/utils/database';
-import {updateExtraField, withoutBlankSslMode} from '@/utils/connections';
+import {
+    parseConnectTimeoutSecs,
+    parseQueryTimeoutSecs,
+    updateExtraField,
+    withoutBlankSslMode,
+} from '@/utils/connections';
 import {normalizeLocalDatabasePath, sanitizeLocalFilePath} from '@/utils/fsPath';
 import {
     IN_MEMORY_DATABASE,
     isLocalDriver,
     supportsInMemoryDatabase,
+    supportsQueryTimeout,
 } from '@/utils/driverCapabilities';
 import {toErrorMessage} from '@/utils/errors';
 import {classifyConnectionError, type ClassifiedConnectionError} from '@/utils/connectionErrors';
@@ -141,6 +148,9 @@ interface ConnectionParams {
     /** True when the URI can be restored from the OS keychain. */
     connection_uri_in_keychain?: boolean;
     database: string | string[];
+    /** Database typed on the Databases tab of a flat multi-database plugin
+     * (`hasDefaultDatabaseInput`), sent while no database is selected. */
+    default_database?: string;
     ssl_mode?: string;
     ssl_ca?: string;
     ssl_cert?: string;
@@ -183,6 +193,10 @@ interface ConnectionParams {
     startup_script?: string;
     /** Connection pooler mode for PgBouncer / transaction-mode poolers. */
     pooler_mode?: string;
+    /** Seconds to wait for a new connection; unset keeps the driver default. */
+    connect_timeout_secs?: number;
+    /** Seconds a statement may run before it is cancelled on the server; unset or 0 means no limit. */
+    query_timeout_secs?: number;
     // Opaque plugin-specific connection fields, forwarded verbatim to the
     // driver/plugin and persisted as-is in connections.json.
     extra?: Record<string, string>;
@@ -298,6 +312,8 @@ export const NewConnectionModal = ({
     const {showAlert} = useAlert();
     const sslModeSelectId = useId();
     const sslModeHintId = useId();
+    const defaultDatabaseInputId = useId();
+    const defaultDatabaseHintId = useId();
     const {drivers, refresh: refreshDrivers} = useDrivers();
     const {settings, updateSetting} = useSettings();
     const {invalidate: invalidateK8sAsync, run: runK8sAsync} = useLatestAsync();
@@ -323,6 +339,8 @@ export const NewConnectionModal = ({
     // to this fix (e.g. the Oracle plugin, which sets supports_ssl but declares
     // no dialect).
     const isPostgresDialect = activeDriver?.capabilities?.sql_dialect === 'postgres';
+    const isMysqlDialect = activeDriver?.capabilities?.sql_dialect === 'mysql';
+    const showsQueryTimeout = supportsQueryTimeout(activeDriver?.capabilities);
 
     // ── driver install state ──
     const [installStatus, setInstallStatus] = useState<'idle' | 'installing' | 'error'>('idle');
@@ -721,6 +739,15 @@ export const NewConnectionModal = ({
     const usernameField = activeDriver?.connection_fields?.username;
     const passwordField = activeDriver?.connection_fields?.password;
     const databaseField = activeDriver?.connection_fields?.database;
+    // A flat multi-database plugin can ask for a database besides the selection
+    // (e.g. the `namespace/database` a SurrealDB user signs in to). Its input on
+    // the Databases tab edits `formData.database`, which is saved as
+    // `default_database` and sent while no database is selected.
+    const showsDefaultDatabaseInput = hasDefaultDatabaseInput(activeDriver);
+    const defaultDatabase =
+        showsDefaultDatabaseInput && typeof formData.database === 'string'
+            ? formData.database.trim()
+            : '';
 
     // ── plugin slot: connection-modal.connection_content ──
     const slotRegistry = usePluginSlotRegistry();
@@ -1989,21 +2016,36 @@ export const NewConnectionModal = ({
                 let loadedFormData: Partial<ConnectionParams>;
                 let loadedSelection: string[];
                 let loadedAllDatabases: boolean;
+                // The Databases-tab input of a plugin (hasDefaultDatabaseInput)
+                // edits `formData.database`, so only a saved `default_database`
+                // is loaded there, never the saved selection, which would be
+                // saved back as the default. It is kept out of the rest of the
+                // form, so Test Connection never sends a value the user has
+                // since cleared.
+                const hasDatabaseInput = hasDefaultDatabaseInput(editDriverForDb);
+                const savedDefaultDatabase = hasDatabaseInput
+                    ? (params.default_database ?? '')
+                    : undefined;
+                const formParams = {
+                    ...paramsForForm,
+                    default_database: undefined,
+                    ...(savedDefaultDatabase !== undefined ? {database: savedDefaultDatabase} : {}),
+                };
                 if (Array.isArray(db)) {
                     loadedSelection = db;
                     loadedAllDatabases = false;
-                    loadedFormData = {...paramsForForm, database: db[0] ?? ''};
+                    loadedFormData = {...formParams, database: savedDefaultDatabase ?? db[0] ?? ''};
                 } else if (editIsMultiDb && typeof db === 'string' && db.trim()) {
                     // A saved single database on a multi-db driver is an explicit
                     // one-element selection.
                     loadedSelection = [db];
                     loadedAllDatabases = false;
-                    loadedFormData = {...paramsForForm};
+                    loadedFormData = {...formParams};
                 } else {
                     loadedSelection = [];
                     // Empty database on a multi-db driver = "all databases" mode.
                     loadedAllDatabases = editIsMultiDb;
-                    loadedFormData = {...paramsForForm};
+                    loadedFormData = {...formParams};
                 }
                 setSelectedDatabasesState(loadedSelection);
                 setLoadAllDatabases(loadedAllDatabases);
@@ -2128,6 +2170,7 @@ export const NewConnectionModal = ({
     };
 
     const handleDriverChange = (newDriver: string) => {
+        const newDriverManifest = drivers.find((d) => d.id === newDriver);
         setDriver(newDriver);
         setCredentialFieldsHiddenState(false);
         setPasswordFieldHiddenState(false);
@@ -2135,8 +2178,8 @@ export const NewConnectionModal = ({
         setFormData({
             driver: newDriver,
             host: '',
-            port: drivers.find((d) => d.id === newDriver)?.default_port ?? undefined,
-            username: '',
+            port: newDriverManifest?.default_port ?? undefined,
+            username: newDriverManifest?.default_username ?? '',
             password: '',
             database: '',
             ssl_mode: '',
@@ -2273,7 +2316,7 @@ export const NewConnectionModal = ({
                     k8s_port: effectiveK8sPort,
                     database: isOptedInMultiDb
                         ? loadAllDatabases
-                            ? ''
+                            ? defaultDatabase
                             : (selectedDatabasesState[0] ??
                               (typeof formData.database === 'string' ? formData.database : ''))
                         : isLocalPathDriver
@@ -2519,10 +2562,18 @@ export const NewConnectionModal = ({
                                   : undefined,
                           ) ?? formData.database)
                         : formData.database,
+                // Saved in both modes so editing shows it again; the backend only
+                // sends it while no database is selected. Other drivers never save it.
+                default_database: defaultDatabase || undefined,
             };
             const params = withoutBlankSslMode(
                 withInlineK8sPaths(paramsBase, inlinePaths.options),
             ) as ConnectionParams;
+            // Only drivers with capabilities.query_timeout honour the field;
+            // drop a stale value so a plugin connection can't save a no-op.
+            if (!showsQueryTimeout) {
+                delete params.query_timeout_secs;
+            }
             const appearancePayload =
                 appearance.icon || appearance.accentColor ? appearance : undefined;
             const finalImagePath = appearance.icon?.type === 'image' ? appearance.icon.path : null;
@@ -3411,6 +3462,39 @@ export const NewConnectionModal = ({
                 </div>
             </div>
 
+            {(isPostgresDialect || isMysqlDialect) && (
+                <div className="flex flex-col gap-1">
+                    <FieldInput
+                        label={t('newConnection.connectTimeout')}
+                        value={formData.connect_timeout_secs}
+                        onChange={(v) =>
+                            updateField('connect_timeout_secs', parseConnectTimeoutSecs(v))
+                        }
+                        type="number"
+                        placeholder={isMysqlDialect ? '60' : undefined}
+                    />
+                    <p className="text-xs text-muted leading-snug">
+                        {t('newConnection.connectTimeoutHint')}
+                    </p>
+                </div>
+            )}
+
+            {showsQueryTimeout && (
+                <div className="flex flex-col gap-1">
+                    <FieldInput
+                        label={t('newConnection.queryTimeout')}
+                        value={formData.query_timeout_secs}
+                        onChange={(v) =>
+                            updateField('query_timeout_secs', parseQueryTimeoutSecs(v))
+                        }
+                        type="number"
+                    />
+                    <p className="text-xs text-muted leading-snug">
+                        {t('newConnection.queryTimeoutHint')}
+                    </p>
+                </div>
+            )}
+
             {/* PostgreSQL: pooler mode (PgBouncer transaction/session) */}
             {isPostgresDialect && (
                 <div className="flex flex-col gap-1">
@@ -3470,6 +3554,37 @@ export const NewConnectionModal = ({
     // ── rendered Databases tab content (multi-db selection) ──
     const databasesTabContent = (
         <div className="space-y-3">
+            {/* A plugin's own database (manifest `connection_fields.database`),
+              above the mode switch because both modes use it */}
+            {showsDefaultDatabaseInput && (
+                <div className="space-y-1.5">
+                    <label
+                        htmlFor={defaultDatabaseInputId}
+                        className="block text-xs font-medium text-secondary"
+                    >
+                        {databaseField?.label ?? t('newConnection.dbName')}
+                    </label>
+                    <input
+                        id={defaultDatabaseInputId}
+                        type="text"
+                        value={typeof formData.database === 'string' ? formData.database : ''}
+                        onChange={(e) => updateField('database', e.target.value)}
+                        aria-describedby={defaultDatabaseHintId}
+                        autoCorrect="off"
+                        autoCapitalize="off"
+                        autoComplete="off"
+                        spellCheck={false}
+                        className="w-full px-3 py-2 bg-base border border-strong rounded-md text-sm text-primary placeholder:text-muted placeholder:italic focus:border-focus focus:outline-none transition-colors"
+                        placeholder={
+                            databaseField?.placeholder ?? t('newConnection.dbNamePlaceholder')
+                        }
+                    />
+                    <p id={defaultDatabaseHintId} className="text-xs text-muted">
+                        {t('newConnection.databasesTabDatabaseHint')}
+                    </p>
+                </div>
+            )}
+
             {/* Mode switch: automatic (all databases) vs explicit selection */}
             <div className="flex rounded-md border border-strong overflow-hidden w-fit">
                 {([true, false] as const).map((allMode) => (

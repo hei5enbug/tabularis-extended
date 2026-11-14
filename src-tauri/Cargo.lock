@@ -6770,6 +6770,7 @@ dependencies = [
  "fs2",
  "futures",
  "gtk",
+ "hmac",
  "http-body-util",
  "infer 0.16.0",
  "ipnet",

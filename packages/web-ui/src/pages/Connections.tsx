@@ -56,7 +56,7 @@ import {useCreateSqliteDatabase} from '@/hooks/useCreateSqliteDatabase';
 import {useTabularisClient} from '@/hooks/useTabularisClient';
 import {usePlatformCapabilities} from '@/hooks/usePlatformCapabilities';
 import {saveGeneratedFile} from '@/utils/connectionFiles';
-import {buildEditorRoute} from '@/routing';
+import {buildEditorRoute, type ConnectionsRouteState} from '@/routing';
 import {
     useBuiltinPostgresMigration,
     type MigrationOutcome,
@@ -68,17 +68,17 @@ import {buildPluginIssueUrl, resolvePluginRepoUrl} from '@/utils/pluginIssueRepo
 import {APP_VERSION} from '@/version';
 
 const NewConnectionModal = lazy(() =>
-    import('@/components/modals/NewConnectionModal').then((m) => ({
+    import('../components/modals/NewConnectionModal').then((m) => ({
         default: m.NewConnectionModal,
     })),
 );
 const ImportFromAppModal = lazy(() =>
-    import('@/components/modals/ImportFromAppModal').then((m) => ({
+    import('../components/modals/ImportFromAppModal').then((m) => ({
         default: m.ImportFromAppModal,
     })),
 );
 const MigrationChecklistModal = lazy(() =>
-    import('@/components/modals/MigrationChecklistModal').then((m) => ({
+    import('../components/modals/MigrationChecklistModal').then((m) => ({
         default: m.MigrationChecklistModal,
     })),
 );
@@ -140,7 +140,12 @@ export const Connections = () => {
     };
     const [editingConnection, setEditingConnection] = useState<SavedConnection | null>(null);
     const connections = contextConnections as SavedConnection[];
-    const [error, setError] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(() => {
+        const linkError = (location.state as ConnectionsRouteState | null)?.connectionLinkError;
+        return linkError === undefined
+            ? null
+            : `${t('connections.linkUnavailable')}\n\nError: ${linkError}`;
+    });
     // Localized text for a stale change or a failed secret rollback, naming
     // the affected connections; `null` for any other error.
     const describeSaveIssue = useCallback(
@@ -538,6 +543,7 @@ export const Connections = () => {
             });
             await saveGeneratedFile(client, platform, generated);
         } catch (e) {
+            if (String(e).includes('SECRET_EXPORT_CANCELLED')) return;
             console.error('Export failed:', e);
             setError(toErrorMessage(e));
         }
@@ -690,7 +696,7 @@ export const Connections = () => {
     };
 
     useEffect(() => {
-        if ((location.state as {openNew?: boolean} | null)?.openNew) {
+        if ((location.state as ConnectionsRouteState | null)?.openNew) {
             setEditingConnection(null);
             setIsModalOpen(true);
         }

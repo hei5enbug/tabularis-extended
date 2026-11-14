@@ -1549,4 +1549,3 @@ async fn tool_run_query(
 
     tool_result_reporting(&result, "result", args, audit, format)
 }
-

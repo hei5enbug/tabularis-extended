@@ -194,16 +194,23 @@ export function usePendingApprovals(): UsePendingApprovalsResult {
 
     const decide = useCallback(
         async ({approvalId, decision, reason, editedQuery}: ApprovalDecisionPayload) => {
-            const approval = pending.find((item) => item.id === approvalId);
-            if (approval?.queryKind.startsWith('service:')) {
-                await invoke('service_approve', {approvalId, decision, reason});
-            } else {
-                await client.call('decide_pending_approval', {
-                    approvalId,
-                    decision,
-                    reason,
-                    editedQuery,
-                });
+            try {
+                const approval = pending.find((item) => item.id === approvalId);
+                if (approval?.queryKind.startsWith('service:')) {
+                    await invoke('service_approve', {approvalId, decision, reason});
+                } else {
+                    await client.call('decide_pending_approval', {
+                        approvalId,
+                        decision,
+                        reason,
+                        editedQuery,
+                    });
+                }
+            } catch (err) {
+                // The list can hold a request that no longer exists. Reloading
+                // drops it, so the modal does not keep buttons that always fail.
+                await refetchRef.current();
+                throw err;
             }
             // Optimistically drop the approval from the list — the file watcher
             // will reconcile if anything else changes.

@@ -3,9 +3,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 #[cfg(feature = "desktop")]
-use tauri::Emitter;
-#[cfg(feature = "desktop")]
 use tauri::AppHandle;
+#[cfg(feature = "desktop")]
+use tauri::Emitter;
 
 mod installation_source;
 mod proxy;
@@ -164,7 +164,10 @@ fn nightly_latest_json_url(release: &GitHubRelease) -> Option<String> {
 /// Fetch the repository releases and return the newest nightly prerelease.
 async fn newest_nightly_release() -> Result<GitHubRelease, String> {
     let client = crate::proxy::app_http_client()?;
-    let url = format!("https://api.github.com/repos/{}/releases?per_page=30", GITHUB_REPO);
+    let url = format!(
+        "https://api.github.com/repos/{}/releases?per_page=30",
+        GITHUB_REPO
+    );
     let res = client
         .get(&url)
         .header("User-Agent", "Tabularis")
@@ -235,7 +238,9 @@ pub async fn check_for_updates(app: AppHandle, force: bool) -> Result<UpdateChec
         // Ask the updater plugin (prerelease-aware semver) whether this nightly
         // is newer than the running build.
         let updater = proxy::app_updater_builder(&app)?
-            .endpoints(vec![url.parse().map_err(|e| format!("Bad nightly url: {e}"))?])
+            .endpoints(vec![url
+                .parse()
+                .map_err(|e| format!("Bad nightly url: {e}"))?])
             .map_err(|e| e.to_string())?
             .build()
             .map_err(|e| e.to_string())?;
@@ -370,7 +375,9 @@ pub async fn download_and_install_update(app: AppHandle) -> Result<(), String> {
         let url = nightly_latest_json_url(&release)
             .ok_or_else(|| "Nightly release is missing its updater manifest".to_string())?;
         builder = builder
-            .endpoints(vec![url.parse().map_err(|e| format!("Bad nightly url: {e}"))?])
+            .endpoints(vec![url
+                .parse()
+                .map_err(|e| format!("Bad nightly url: {e}"))?])
             .map_err(|e| e.to_string())?;
     }
     let updater = builder.build().map_err(|e| e.to_string())?;
@@ -570,7 +577,12 @@ mod tests {
         assert_eq!(CACHE_DURATION_SECS / 3600, 12); // Verify it's 12 hours
     }
 
-    fn mk_release(tag: &str, prerelease: bool, published_at: &str, assets: &[&str]) -> GitHubRelease {
+    fn mk_release(
+        tag: &str,
+        prerelease: bool,
+        published_at: &str,
+        assets: &[&str],
+    ) -> GitHubRelease {
         GitHubRelease {
             tag_name: tag.to_string(),
             body: String::new(),
@@ -592,9 +604,24 @@ mod tests {
     fn test_select_newest_nightly_picks_latest_prerelease() {
         let releases = vec![
             mk_release("v0.15.0", false, "2026-07-18T00:00:00Z", &["latest.json"]),
-            mk_release("nightly-20260716-aaaaaaa", true, "2026-07-16T03:00:00Z", &["latest.json"]),
-            mk_release("nightly-20260718-ccccccc", true, "2026-07-18T03:00:00Z", &["latest.json"]),
-            mk_release("nightly-20260717-bbbbbbb", true, "2026-07-17T03:00:00Z", &["latest.json"]),
+            mk_release(
+                "nightly-20260716-aaaaaaa",
+                true,
+                "2026-07-16T03:00:00Z",
+                &["latest.json"],
+            ),
+            mk_release(
+                "nightly-20260718-ccccccc",
+                true,
+                "2026-07-18T03:00:00Z",
+                &["latest.json"],
+            ),
+            mk_release(
+                "nightly-20260717-bbbbbbb",
+                true,
+                "2026-07-17T03:00:00Z",
+                &["latest.json"],
+            ),
         ];
         let got = select_newest_nightly(releases).expect("a nightly");
         assert_eq!(got.tag_name, "nightly-20260718-ccccccc");
@@ -626,7 +653,12 @@ mod tests {
 
     #[test]
     fn test_nightly_latest_json_url_missing() {
-        let rel = mk_release("nightly-20260718-ccccccc", true, "2026-07-18T03:00:00Z", &["only.deb"]);
+        let rel = mk_release(
+            "nightly-20260718-ccccccc",
+            true,
+            "2026-07-18T03:00:00Z",
+            &["only.deb"],
+        );
         assert!(nightly_latest_json_url(&rel).is_none());
     }
 }

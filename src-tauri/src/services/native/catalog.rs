@@ -187,6 +187,8 @@ pub fn columns(data: &Value) -> ServiceResult<Vec<ServiceTableColumn>> {
                     numeric_scale: None,
                     comment: value["comment"].as_str().map(str::to_owned),
                     full_type: None,
+                    default_sql: value["default_sql"].as_str().map(str::to_owned),
+                    on_update: value["on_update"].as_str().map(str::to_owned),
                 },
                 primary_key_position,
             })

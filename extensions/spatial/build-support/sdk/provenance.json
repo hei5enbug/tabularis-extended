@@ -35,21 +35,21 @@
     },
     {
       "path": "packages/plugin-api/README.md",
-      "sha256": "cb5c6e1d81e10a8a697f21425192dcaf72cb49323266a8a526a4ed04d84b6ac1",
-      "size": 3042,
-      "origin_sha256": "cb5c6e1d81e10a8a697f21425192dcaf72cb49323266a8a526a4ed04d84b6ac1"
+      "sha256": "3357636f94067723b2908e06c72d4e7822ebe0650e7afb20eee6ad13330eda28",
+      "size": 4982,
+      "origin_sha256": "3357636f94067723b2908e06c72d4e7822ebe0650e7afb20eee6ad13330eda28"
     },
     {
       "path": "packages/plugin-api/package.json",
-      "sha256": "e799367c475c8b4e8dd94f75b025b3b7a2092f4521f258b3c09293ad61863339",
+      "sha256": "43160e100d22be8f3c35ce5f7b84144dbc804e4a64ea9e5f4fc53a5d62d57adb",
       "size": 1241,
-      "origin_sha256": "00fd9fcd048f29f22cea11873a36493410588f01f7a2ab98bffa17707db78f9a"
+      "origin_sha256": "6916165c26eb3a1ec9d91c6e54fae6835d28d22092bde92ac2c459ea95a03037"
     },
     {
       "path": "packages/plugin-api/src/hooks.ts",
-      "sha256": "bdc901325835ad2953048861e91f0064c617b0d3b55182df595642e80dc2037c",
-      "size": 2342,
-      "origin_sha256": "bdc901325835ad2953048861e91f0064c617b0d3b55182df595642e80dc2037c"
+      "sha256": "8d47b928f9a62e11df3c02ae8ae6cb35925b3d0e802d3a7a655c510819d10722",
+      "size": 2772,
+      "origin_sha256": "8d47b928f9a62e11df3c02ae8ae6cb35925b3d0e802d3a7a655c510819d10722"
     },
     {
       "path": "packages/plugin-api/src/host.ts",
@@ -59,27 +59,27 @@
     },
     {
       "path": "packages/plugin-api/src/index.ts",
-      "sha256": "4c2931784aa190b282894cd39880f11cc14cb2268cee1b9a14970e9d6e84ff53",
-      "size": 1329,
-      "origin_sha256": "4c2931784aa190b282894cd39880f11cc14cb2268cee1b9a14970e9d6e84ff53"
+      "sha256": "f67f7ff893a9fbc9edc327eec1d1c35a764e47c99f187578f4e71a6d69464a1a",
+      "size": 1418,
+      "origin_sha256": "f67f7ff893a9fbc9edc327eec1d1c35a764e47c99f187578f4e71a6d69464a1a"
     },
     {
       "path": "packages/plugin-api/src/slots.ts",
-      "sha256": "4dc365f0afb9a6be190b7bfd142510b89ed919f88de22194004984184194c4d4",
-      "size": 7481,
-      "origin_sha256": "4dc365f0afb9a6be190b7bfd142510b89ed919f88de22194004984184194c4d4"
+      "sha256": "c7a541d839854dd0ee10a2251267ffdd66bc089e0715d63af48686178f3ff0f1",
+      "size": 7590,
+      "origin_sha256": "c7a541d839854dd0ee10a2251267ffdd66bc089e0715d63af48686178f3ff0f1"
     },
     {
       "path": "packages/plugin-api/src/types.ts",
-      "sha256": "29895e1492f2cdd889c424baa071e8746a6fc9cb24fb7297c15e97ec5c7bc54e",
-      "size": 5155,
-      "origin_sha256": "29895e1492f2cdd889c424baa071e8746a6fc9cb24fb7297c15e97ec5c7bc54e"
+      "sha256": "278414b56464da83606b691d720ea695bc64e1e601382f9f16b05d052439c95c",
+      "size": 5716,
+      "origin_sha256": "278414b56464da83606b691d720ea695bc64e1e601382f9f16b05d052439c95c"
     },
     {
       "path": "packages/plugin-api/src/version.ts",
-      "sha256": "a00dc3905a61419fb6cb603af78bf83faa5a6c62752fd8d388aa36ccea0b01ff",
+      "sha256": "e8936ba65b886dcc08d03873825ca0b0aa217167277466240933525e8840f344",
       "size": 483,
-      "origin_sha256": "a00dc3905a61419fb6cb603af78bf83faa5a6c62752fd8d388aa36ccea0b01ff"
+      "origin_sha256": "e8936ba65b886dcc08d03873825ca0b0aa217167277466240933525e8840f344"
     },
     {
       "path": "packages/plugin-api/tsconfig.json",

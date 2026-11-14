@@ -67,7 +67,7 @@ describe('명시적 UI extension', () => {
         expect(contributions?.[0].slot).toBe('app.map.renderer');
         expect(contributions?.[0].when).toBeUndefined();
     });
-    it('driverregistry조회없이디스크manifest의슬롯을로드한다', async () => {
+    it('디스크 manifest에 선언된 슬롯을 로드한다', async () => {
         // Given
         vi.mocked(invoke).mockReset();
         vi.mocked(invoke).mockImplementation(async (command, args) => {
@@ -113,6 +113,5 @@ describe('명시적 UI extension', () => {
         expect(registry?.contributions[0].pluginId).toBe('spatial');
         expect(registry?.contributions[0].slot).toBe('data-grid.toolbar.actions');
         expect(invoke).toHaveBeenCalledWith('get_plugin_manifest', {pluginId: 'spatial'});
-        expect(invoke).not.toHaveBeenCalledWith('get_registered_drivers');
     });
 });

@@ -33,23 +33,22 @@ pub fn preview(
         .map(|(index, conn)| {
             let driver_installed = registered_ids.iter().any(|r| r == &conn.params.driver);
             let key = dup_key_existing(conn);
-            let status = if let Some((_, id, name)) =
-                existing_keys.iter().find(|(k, _, _)| k == &key)
-            {
-                ImportItemStatus::Duplicate {
-                    existing_id: id.clone(),
-                    existing_name: name.clone(),
-                }
-            } else if !driver_installed {
-                ImportItemStatus::Warnings {
-                    warnings: vec![format!(
-                        "Database driver \"{}\" is not installed",
-                        conn.params.driver
-                    )],
-                }
-            } else {
-                ImportItemStatus::Ready
-            };
+            let status =
+                if let Some((_, id, name)) = existing_keys.iter().find(|(k, _, _)| k == &key) {
+                    ImportItemStatus::Duplicate {
+                        existing_id: id.clone(),
+                        existing_name: name.clone(),
+                    }
+                } else if !driver_installed {
+                    ImportItemStatus::Warnings {
+                        warnings: vec![format!(
+                            "Database driver \"{}\" is not installed",
+                            conn.params.driver
+                        )],
+                    }
+                } else {
+                    ImportItemStatus::Ready
+                };
 
             let group_name = conn
                 .group_id

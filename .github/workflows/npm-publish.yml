@@ -63,7 +63,7 @@ jobs:
   detect:
     name: Detect unpublished versions
     if: github.repository == 'TabularisDB/tabularis'
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     outputs:
       packages: ${{ steps.detect.outputs.packages }}
     steps:
@@ -126,6 +126,7 @@ jobs:
     name: Publish ${{ matrix.package.name }}@${{ matrix.package.version }}
     needs: detect
     if: github.repository == 'TabularisDB/tabularis' && needs.detect.outputs.packages != '[]'
+    # npm provenance only supports GitHub-hosted runners.
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -176,7 +177,7 @@ jobs:
     needs: [detect, publish]
     # Also after a partial failure: tag whatever did reach npm.
     if: ${{ github.repository == 'TabularisDB/tabularis' && !cancelled() && needs.detect.outputs.packages != '[]' && !inputs.dry_run }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write # push tags
       issues: write # relabel the release PR
@@ -235,7 +236,7 @@ jobs:
     # tagged; otherwise release-please would refuse to open new release PRs.
     # Releases belong to upstream; the fork never opens release PRs or pushes release tags.
     if: ${{ github.repository == 'TabularisDB/tabularis' && !cancelled() && !inputs.dry_run }}
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     permissions:
       contents: write # release branches
       pull-requests: write
