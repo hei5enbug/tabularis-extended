@@ -1,6 +1,6 @@
 use super::{
     contracts::{ErrorCode, Limits, Metrics, Page, ResumeMode, MAX_JOB_DEADLINE_MS},
-    error::{failure, ServiceResult},
+    error::{failure, refusal, ServiceResult, RESULT_BYTE_LIMIT, RESULT_ROW_LIMIT},
     security::{digest, opaque_id},
     storage::{now_ms, PrivateStore},
 };
@@ -1159,18 +1159,16 @@ fn bound_snapshot(mut snapshot: ResultSnapshot) -> ServiceResult<ResultSnapshot>
         set.rows = retained;
     }
     if truncated {
+        let (reason, refusal_reason) = if count >= MAX_RESULT_ROWS {
+            ("row_limit", RESULT_ROW_LIMIT)
+        } else {
+            ("byte_limit", RESULT_BYTE_LIMIT)
+        };
         if !snapshot.allow_truncation {
-            return Err(failure(ErrorCode::ResourceLimit));
+            return Err(refusal(ErrorCode::ResourceLimit, refusal_reason));
         }
         snapshot.limits.truncated = true;
-        snapshot.limits.reasons.push(
-            if count >= MAX_RESULT_ROWS {
-                "row_limit"
-            } else {
-                "byte_limit"
-            }
-            .into(),
-        );
+        snapshot.limits.reasons.push(reason.into());
     }
     Ok(snapshot)
 }

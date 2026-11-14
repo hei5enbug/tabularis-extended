@@ -3334,7 +3334,11 @@
     "pending": "Waiting for the request or approval…",
     "saveBeforeAuth": "Save the connection before signing in.",
     "cosmosWorkspace": "Open the Cosmos workspace to query and edit documents.",
-    "copyLimited": "Copied {{count}} snapshot rows; the copy limit was reached."
+    "copyLimited": "Copied {{count}} snapshot rows; the copy limit was reached.",
+    "rowLimitBadge": "First {{limit, number}} rows",
+    "rowLimitHint": "The query returned more rows than one result keeps. Add a LIMIT or a narrower WHERE to see other rows.",
+    "sizeLimitBadge": "Cut at size limit",
+    "sizeLimitHint": "The result was cut at its size limit. Add a LIMIT or a narrower WHERE to see other rows."
   },
   "objectDetails": {
     "viewDetails": "View Details",

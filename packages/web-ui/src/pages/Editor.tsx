@@ -1,6 +1,7 @@
 import {useServiceQuery} from '@/hooks/useServiceQuery';
 import {ServiceQueryControls} from '@/components/service/ServiceQueryControls';
 import {SlotAnchor} from '@/components/ui/SlotAnchor';
+import {ServiceResultLimitBadge} from '@/components/ui/ServiceResultLimitBadge';
 import {
     supportsServiceQuery,
     snapshotSlotContext,
@@ -6541,6 +6542,7 @@ export const Editor = ({commandScopeId}: EditorProps) => {
                                                     {t('editor.autoPaginated')}
                                                 </span>
                                             )}
+                                            <ServiceResultLimitBadge result={activeTab.result} />
                                         </div>
 
                                         {/* Shown for every grid result, not only table results, so

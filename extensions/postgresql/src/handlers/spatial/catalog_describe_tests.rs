@@ -298,8 +298,8 @@ fn 형식이_다른_세부_값은_버리고_기본값을_유지한다() {
 #[test]
 fn 한도_병합은_잘림과_이유를_합치고_중복_이유를_한_번만_둔다() {
     // given
-    let first = json!({"truncated":false,"reasons":["ROW_LIMIT"]});
-    let second = json!({"truncated":true,"reasons":["ROW_LIMIT","BYTE_LIMIT"]});
+    let first = json!({"truncated":false,"reasons":["row_limit"]});
+    let second = json!({"truncated":true,"reasons":["row_limit","byte_limit"]});
 
     // when
     let actual = merge_limits(Some(first), &second);
@@ -307,7 +307,7 @@ fn 한도_병합은_잘림과_이유를_합치고_중복_이유를_한_번만_�
     // then
     assert_eq!(
         actual,
-        json!({"truncated":true,"reasons":["ROW_LIMIT","BYTE_LIMIT"]})
+        json!({"truncated":true,"reasons":["row_limit","byte_limit"]})
     );
 }
 

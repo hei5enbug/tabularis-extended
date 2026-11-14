@@ -1419,6 +1419,38 @@ fn 오류_정리는_알려진_거부_원인의_안내만_남기고_모르는_원
 }
 
 #[test]
+fn 드라이버의_결과_한도_오류는_정리_뒤에도_행과_바이트_한도_안내를_담는다() {
+    // given
+    let driver_error = |reason: &str| {
+        let mut error = super::super::error::failure(ErrorCode::ResourceLimit);
+        error.message = "synthetic-private-password".into();
+        error.details =
+            json!({"reason":reason,"session_closed":true,"access_token":"synthetic-private"});
+        error
+    };
+
+    // when
+    let row = super::super::error::redact_error(driver_error("result_row_limit"));
+    let byte = super::super::error::redact_error(driver_error("result_byte_limit"));
+
+    // then
+    assert!(row.message.contains("10,000 rows"), "{}", row.message);
+    assert!(row.message.contains("LIMIT"));
+    assert_eq!(
+        row.details,
+        json!({"reason":"result_row_limit","session_closed":true})
+    );
+    assert!(byte
+        .message
+        .contains("larger than one query result can hold"));
+    assert!(byte.message.contains("fewer rows or columns"));
+    assert_eq!(
+        byte.details,
+        json!({"reason":"result_byte_limit","session_closed":true})
+    );
+}
+
+#[test]
 fn 지원하지_않는_작업_오류만_드라이버_문장을_정리해서_전달한다() {
     // given
     let mut unsupported = super::super::error::failure(ErrorCode::UnsupportedOperation);

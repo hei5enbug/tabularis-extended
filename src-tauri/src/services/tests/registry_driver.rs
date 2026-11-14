@@ -544,6 +544,67 @@ fn 추가_결과집합의_절단과_경고도_모든_결과에_보존한다() {
     assert_eq!(actual.snapshot.unwrap().sets.len(), 2);
 }
 
+fn rows_source(count: usize, limits: Value) -> Value {
+    let rows: Vec<Value> = (0..count).map(|index| json!([index])).collect();
+    json!({"columns":["g"],"rows":rows,"affected_rows":null,"limits":limits})
+}
+#[test]
+fn 드라이버가_대문자_한도_사유를_보내도_소문자로_바꿔_절단_결과로_받는다() {
+    // given
+    let source = rows_source(
+        MAX_RESULT_ROWS,
+        json!({"truncated":true,"reasons":["ROW_LIMIT","BYTE_LIMIT","row_limit"]}),
+    );
+    // when
+    let actual = sql_output(source).unwrap();
+    // then
+    let snapshot = actual.snapshot.unwrap();
+    assert_eq!(snapshot.sets[0].rows.len(), MAX_RESULT_ROWS);
+    assert!(snapshot.limits.truncated);
+    assert_eq!(snapshot.limits.reasons, ["row_limit", "byte_limit"]);
+    assert_eq!(actual.limits.reasons, ["row_limit", "byte_limit"]);
+}
+#[test]
+fn 소문자로_바꿔도_형식이_틀린_한도_사유는_계속_거부한다() {
+    // given
+    let source = rows_source(1, json!({"truncated":true,"reasons":["ROW LIMIT"]}));
+    // when
+    let actual = sql_output(source);
+    // then
+    assert_eq!(actual.err().unwrap().code, ErrorCode::InvalidArgument);
+}
+#[test]
+fn 사유_없이_절단됐고_행이_최대에_이르면_row_limit_사유를_기록한다() {
+    // given
+    let source = json!({"columns":["g"],"rows":rows_source(MAX_RESULT_ROWS, json!(null))["rows"],"truncated":true});
+    // when
+    let actual = sql_output(source).unwrap();
+    // then
+    assert!(actual.limits.truncated);
+    assert_eq!(actual.limits.reasons, ["row_limit"]);
+    assert_eq!(actual.snapshot.unwrap().limits.reasons, ["row_limit"]);
+}
+#[test]
+fn 사유_없이_절단됐어도_행이_최대보다_적으면_사유를_만들지_않는다() {
+    // given
+    let source = json!({"columns":["g"],"rows":[[1]],"truncated":true});
+    // when
+    let actual = sql_output(source).unwrap();
+    // then
+    assert!(actual.limits.truncated);
+    assert!(actual.limits.reasons.is_empty());
+}
+#[test]
+fn 행이_최대를_넘으면_행_한도_안내와_원인을_담아_거부한다() {
+    // given
+    let source = rows_source(MAX_RESULT_ROWS + 1, json!({"truncated":false,"reasons":[]}));
+    // when
+    let actual = sql_output(source).err().unwrap();
+    // then
+    assert_eq!(actual.code, ErrorCode::ResourceLimit);
+    assert_eq!(actual.details, json!({"reason":"result_row_limit"}));
+}
+
 struct DeletedResolver {
     deleted: std::sync::atomic::AtomicBool,
     calls: std::sync::atomic::AtomicUsize,

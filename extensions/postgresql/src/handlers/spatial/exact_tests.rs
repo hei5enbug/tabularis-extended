@@ -1,4 +1,4 @@
-use super::{search_path_statement, validate_settings, ExactInput, Setting};
+use super::{over_limit_error, search_path_statement, validate_settings, ExactInput, Setting};
 use serde_json::json;
 
 #[test]
@@ -244,4 +244,34 @@ fn 널_문자를_포함한_setting_값은_거부한다() {
 
     // then
     assert_eq!(actual.code, "INVALID_ARGUMENT");
+}
+
+#[test]
+fn 행_한도_초과_오류는_소문자_사유를_담고_예약_세션이면_세션_종료도_표시한다() {
+    // given
+    let reasons = ["row_limit"];
+
+    // when
+    let write = over_limit_error(&reasons, false);
+    let reserved = over_limit_error(&reasons, true);
+
+    // then
+    assert_eq!(write.code, "RESOURCE_LIMIT");
+    assert_eq!(write.details, json!({"reason":"result_row_limit"}));
+    assert_eq!(
+        reserved.details,
+        json!({"reason":"result_row_limit","session_closed":true})
+    );
+}
+
+#[test]
+fn 바이트_한도_초과_오류는_바이트_사유를_담는다() {
+    // given
+    let reasons = ["byte_limit"];
+
+    // when
+    let actual = over_limit_error(&reasons, false);
+
+    // then
+    assert_eq!(actual.details, json!({"reason":"result_byte_limit"}));
 }

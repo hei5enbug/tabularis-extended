@@ -93,7 +93,9 @@ fn 완성되지_않은_집계는_행_상한을_넘겨_부분_성공을_반환하
     let actual = store.insert(binding(), source);
 
     // then
-    assert_eq!(actual.unwrap_err().code, ErrorCode::ResourceLimit);
+    let error = actual.unwrap_err();
+    assert_eq!(error.code, ErrorCode::ResourceLimit);
+    assert_eq!(error.details, json!({"reason":"result_row_limit"}));
 }
 
 #[test]

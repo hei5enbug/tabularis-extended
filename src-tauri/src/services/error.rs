@@ -1,5 +1,6 @@
 use super::{
     contracts::{ErrorCode, Outcome, ServiceError},
+    results::MAX_RESULT_ROWS,
     transport::tool_catalog::OBJECT_KINDS,
 };
 use serde_json::Value;
@@ -57,7 +58,21 @@ pub const CONNECTION_READ_ONLY: &str = "connection_read_only";
 pub const APPROVAL_DENIED: &str = "approval_denied";
 pub const ALLOW_WRITES_GUI_ONLY: &str = "allow_writes_gui_only";
 pub const LOCAL_IPC_INSTANCES: &str = "local_ipc_instances";
+pub const RESULT_ROW_LIMIT: &str = "result_row_limit";
+pub const RESULT_BYTE_LIMIT: &str = "result_byte_limit";
 const MAX_DRIVER_MESSAGE_BYTES: usize = 512;
+
+fn grouped_thousands(value: usize) -> String {
+    let digits = value.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    grouped
+}
 
 /// The host's own text for a refusal whose cause it names in
 /// `details.reason`. Only these reasons survive [`redact_error`].
@@ -71,6 +86,13 @@ fn refusal_message(code: ErrorCode, reason: &str) -> Option<String> {
         }
         (ErrorCode::ResourceLimit, LOCAL_IPC_INSTANCES) => Some(
             "64 Tabularis instances (windows, MCP servers and CLI calls) are running for this profile, the most its local-ipc folder holds. Close MCP clients or Tabularis windows you no longer use, then retry.".into(),
+        ),
+        (ErrorCode::ResourceLimit, RESULT_ROW_LIMIT) => Some(format!(
+            "The result has more than {} rows, the most one query result can hold. Add a LIMIT or a narrower WHERE to the query and run it again.",
+            grouped_thousands(MAX_RESULT_ROWS)
+        )),
+        (ErrorCode::ResourceLimit, RESULT_BYTE_LIMIT) => Some(
+            "The result is larger than one query result can hold. Select fewer rows or columns, for example with a LIMIT.".into(),
         ),
         (ErrorCode::InvalidArgument, ALLOW_WRITES_GUI_ONLY) => Some(
             "allow_writes cannot be changed through MCP; change it in the Tabularis window: open MCP Server in the sidebar and use Read-only mode.".into(),

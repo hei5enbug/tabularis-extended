@@ -369,7 +369,7 @@ pub async fn execute(
         }
     }
     let envelope = json!({"columns":columns,"column_metadata":column_metadata,"rows":[],"affected_rows":u64::MAX,
-        "truncated":true,"pagination":null,"limits":{"truncated":true,"reasons":["ROW_LIMIT","BYTE_LIMIT"]},
+        "truncated":true,"pagination":null,"limits":{"truncated":true,"reasons":["row_limit","byte_limit"]},
         "page":{"next_token":null,"has_more":false,"resume_mode":"none"}});
     let mut rows = Vec::new();
     let mut bytes = serde_json::to_vec(&envelope)
@@ -395,7 +395,7 @@ pub async fn execute(
         pin_mut!(stream);
         while let Some(row) = stream.try_next().await.map_err(SpatialError::database)? {
             if rows.len() >= input.max_rows {
-                reasons.push("ROW_LIMIT");
+                reasons.push(ROW_LIMIT);
                 break;
             }
             let row = row
@@ -409,7 +409,7 @@ pub async fn execute(
                 .len();
             let size = size + usize::from(!rows.is_empty());
             if bytes + size > input.max_bytes {
-                reasons.push("BYTE_LIMIT");
+                reasons.push(BYTE_LIMIT);
                 break;
             }
             bytes += size;
@@ -420,14 +420,7 @@ pub async fn execute(
     if !reasons.is_empty() {
         scope.stop_backend().await;
         if !read_only || reserved {
-            let mut error = SpatialError::new(
-                "RESOURCE_LIMIT",
-                "Query result exceeded its limit; the full transaction was rolled back",
-            );
-            if reserved {
-                error.close_session();
-            }
-            return Err(error);
+            return Err(over_limit_error(&reasons, reserved));
         }
     } else {
         client
@@ -449,6 +442,26 @@ pub async fn execute(
         "truncated":!reasons.is_empty(),"pagination":null,"limits":{"truncated":!reasons.is_empty(),"reasons":reasons},
         "page":{"next_token":null,"has_more":false,"resume_mode":"none"}}),
     )
+}
+
+const ROW_LIMIT: &str = "row_limit";
+const BYTE_LIMIT: &str = "byte_limit";
+
+fn over_limit_error(reasons: &[&str], reserved: bool) -> SpatialError {
+    let mut error = SpatialError::new(
+        "RESOURCE_LIMIT",
+        "Query result exceeded its limit; the full transaction was rolled back",
+    );
+    let reason = if reasons.contains(&ROW_LIMIT) {
+        "result_row_limit"
+    } else {
+        "result_byte_limit"
+    };
+    error.details = json!({ "reason": reason });
+    if reserved {
+        error.close_session();
+    }
+    error
 }
 
 #[cfg(test)]

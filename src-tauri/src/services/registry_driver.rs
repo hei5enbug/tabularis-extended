@@ -6,7 +6,7 @@ use crate::services::{
     contracts::{
         ErrorCode, Limits, Metrics, Operation, Outcome, ServiceRequest, MAX_JOB_DEADLINE_MS,
     },
-    error::{failure, ServiceResult},
+    error::{failure, refusal, ServiceResult, RESULT_ROW_LIMIT},
     results::{
         CursorBinding, CursorState, ResultKind, ResultSet, ResultSnapshot, MAX_RESULT_BYTES,
         MAX_RESULT_ROWS,
@@ -401,7 +401,7 @@ impl DriverBackend for RegistryDriverBackend {
                 .warnings
                 .push("cosmos_read_only_database_permissions_unverified".into());
         }
-        validate_output_metadata(&output).map_err(|mut error| {
+        validate_output_metadata(&mut output).map_err(|mut error| {
             if !context.read_only {
                 error.outcome = Outcome::Applied;
             }
@@ -443,7 +443,7 @@ impl DriverBackend for RegistryDriverBackend {
         output
             .warnings
             .push("cosmos_read_only_database_permissions_unverified".into());
-        validate_output_metadata(&output)?;
+        validate_output_metadata(&mut output)?;
         Ok(output)
     }
     async fn cancel(&self, connection_id: &str, request_id: &str) -> ServiceResult<()> {
@@ -834,7 +834,27 @@ fn warnings(value: &Value) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-fn validate_output_metadata(output: &DriverOutput) -> ServiceResult<()> {
+fn lowercased_limits(limits: &Limits) -> Limits {
+    let mut reasons: Vec<String> = Vec::with_capacity(limits.reasons.len());
+    for reason in &limits.reasons {
+        let reason = reason.to_ascii_lowercase();
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
+    Limits {
+        truncated: limits.truncated,
+        reasons,
+    }
+}
+fn lowercase_limit_reasons(output: &mut DriverOutput) {
+    output.limits = lowercased_limits(&output.limits);
+    if let Some(snapshot) = output.snapshot.as_mut() {
+        snapshot.limits = lowercased_limits(&snapshot.limits);
+    }
+}
+fn validate_output_metadata(output: &mut DriverOutput) -> ServiceResult<()> {
+    lowercase_limit_reasons(output);
     let safe_integer = |value: u64| value <= 9_007_199_254_740_991;
     if !safe_integer(output.metrics.elapsed_ms)
         || !safe_integer(output.metrics.retry_count)
@@ -890,6 +910,7 @@ fn sql_output(value: Value) -> ServiceResult<DriverOutput> {
             },
         };
         limits.truncated |= source_limits.truncated;
+        let unexplained = source_limits.truncated && source_limits.reasons.is_empty();
         for reason in source_limits.reasons {
             if !limits.reasons.contains(&reason) {
                 limits.reasons.push(reason);
@@ -912,7 +933,13 @@ fn sql_output(value: Value) -> ServiceResult<DriverOutput> {
         }
         rows_total = rows_total.saturating_add(rows.len());
         if rows_total > MAX_RESULT_ROWS {
-            return Err(failure(ErrorCode::ResourceLimit));
+            return Err(refusal(ErrorCode::ResourceLimit, RESULT_ROW_LIMIT));
+        }
+        if unexplained && rows_total >= MAX_RESULT_ROWS {
+            let reason = "row_limit".to_string();
+            if !limits.reasons.contains(&reason) {
+                limits.reasons.push(reason);
+            }
         }
         let columns = names
             .iter()
@@ -978,7 +1005,7 @@ fn sql_output(value: Value) -> ServiceResult<DriverOutput> {
     }) {
         output.data = json!({"affected_rows":affected});
     }
-    validate_output_metadata(&output)?;
+    validate_output_metadata(&mut output)?;
     Ok(output)
 }
 fn explain_output(value: Value) -> ServiceResult<DriverOutput> {
@@ -1121,7 +1148,7 @@ fn native_output(
     } else {
         output.data = value.get("data").cloned().unwrap_or(value);
     }
-    validate_output_metadata(&output)?;
+    validate_output_metadata(&mut output)?;
     Ok(output)
 }
 

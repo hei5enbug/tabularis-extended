@@ -3179,6 +3179,10 @@
     "pending": "요청 또는 승인을 기다리는 중…",
     "saveBeforeAuth": "연결을 저장한 후 로그인하세요.",
     "cosmosWorkspace": "Cosmos 작업 공간에서 문서를 조회하고 편집하세요.",
-    "copyLimited": "스냅샷 {{count}}행을 복사했습니다. 복사 상한에 도달했습니다."
+    "copyLimited": "스냅샷 {{count}}행을 복사했습니다. 복사 상한에 도달했습니다.",
+    "rowLimitBadge": "처음 {{limit, number}}행만 표시",
+    "rowLimitHint": "쿼리가 결과 하나에 담을 수 있는 행보다 많은 행을 반환했습니다. 다른 행을 보려면 LIMIT을 추가하거나 WHERE 조건을 좁히세요.",
+    "sizeLimitBadge": "크기 상한에서 잘림",
+    "sizeLimitHint": "결과가 크기 상한에 도달해 잘렸습니다. 다른 행을 보려면 LIMIT을 추가하거나 WHERE 조건을 좁히세요."
   }
 }
