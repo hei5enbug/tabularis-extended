@@ -39,7 +39,7 @@ permissions:
 jobs:
   changes:
     name: Detect changed packages
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
       pull-requests: read
@@ -103,7 +103,7 @@ jobs:
     name: ${{ matrix.package.name }}
     needs: changes
     if: needs.changes.outputs.any == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

@@ -70,6 +70,11 @@ based on how many lines changed, not on a tested merge.
 Rule: keep fork logic in new files and keep edits to upstream files as small hooks. A one-line call into a new
 fork file is easy to merge. A rewritten function in an upstream file conflicts on every release.
 
+Upstream runs its workflows on Blacksmith runners, which this fork does not have. A job that asks for one waits
+in the queue forever. Keep these fork-run workflows on GitHub-hosted runners (`ubuntu-24.04`, and `macos-latest`
+for `e2e-macos.yml`): `ci`, `format`, `packages`, `quality`, `mysql-integration`, `pg-integration`, `pr-title`,
+`docker` and `e2e-macos`. The release workflows keep the upstream runners because the fork publishes no releases.
+
 ## After the merge
 
 Run the checks that `finish` prints, then push the branch yourself and open a pull request:
