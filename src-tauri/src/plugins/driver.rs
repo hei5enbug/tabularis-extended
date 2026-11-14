@@ -412,6 +412,105 @@ fn driver_wire(
     json!({"params":params,"driver_context":driver_context,"input":input})
 }
 
+/// When a plugin's child process is started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessStart {
+    /// While the driver is constructed; a spawn failure fails construction.
+    Eager,
+    /// When the first call reaches the plugin; a spawn failure fails that call.
+    OnFirstCall,
+}
+
+fn spawn_plugin_child(
+    executable_path: &std::path::Path,
+    interpreter: Option<&str>,
+) -> Result<tokio::process::Child, String> {
+    let mut cmd = if let Some(interp) = interpreter {
+        let mut c = Command::new(interp);
+        c.arg(executable_path);
+        c
+    } else {
+        Command::new(executable_path)
+    };
+
+    #[cfg(windows)]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+
+    let child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        // Kill the child if its owning task is dropped without a clean
+        // shutdown — e.g. when the `--mcp` subprocess exits on stdin EOF
+        // and the Tokio runtime is torn down. Without this, the management
+        // task is cancelled before its `select!` can call `child.kill()`,
+        // leaving orphaned plugin processes running.
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Failed to start plugin process {:?}: {}",
+                executable_path, e
+            )
+        })?;
+
+    // `kill_on_drop` and the shutdown path only run while this process is
+    // alive. Also stop the plugin when it is killed outright (#1280).
+    crate::plugins::process_lifetime::bind_to_host(&child);
+    Ok(child)
+}
+
+/// Waits for the first call that needs the plugin and starts the child for it,
+/// returning the child with that call. A failed start answers the triggering
+/// call with the error and waits for the next one. `None` when the plugin is
+/// shut down (or dropped) before any call started it.
+async fn start_on_first_call(
+    rx: &mut mpsc::Receiver<PluginCommand>,
+    shutdown_rx: &mut oneshot::Receiver<Option<Duration>>,
+    executable_path: &std::path::Path,
+    interpreter: Option<&str>,
+) -> Option<(tokio::process::Child, PluginCommand)> {
+    loop {
+        let command = tokio::select! {
+            _ = &mut *shutdown_rx => return None,
+            command = rx.recv() => command?,
+        };
+        let response = match &command {
+            PluginCommand::Call(_, response) | PluginCommand::NativeCall(_, response, _) => {
+                response
+            }
+            PluginCommand::Cancel(_) | PluginCommand::DropNative(_) => continue,
+        };
+        if response.is_closed() {
+            continue;
+        }
+        match spawn_plugin_child(executable_path, interpreter) {
+            Ok(child) => return Some((child, command)),
+            Err(message) => {
+                log::error!("{message}");
+                if let PluginCommand::Call(_, response)
+                | PluginCommand::NativeCall(_, response, _) = command
+                {
+                    let _ = response.send(Err(PluginCallError::Transport(message)));
+                }
+            }
+        }
+    }
+}
+
+/// The next command for the manager loop: the one that started the process
+/// first, then whatever arrives on the channel. Cancel-safe: the held command
+/// is taken only when this future is polled, and it is ready on that poll.
+async fn next_command(
+    first: &mut Option<PluginCommand>,
+    rx: &mut mpsc::Receiver<PluginCommand>,
+) -> Option<PluginCommand> {
+    match first.take() {
+        Some(command) => Some(command),
+        None => rx.recv().await,
+    }
+}
+
 pub struct PluginProcess {
     /// Plugin id used to resolve the configured call timeout.
     plugin_id: String,
@@ -422,7 +521,9 @@ pub struct PluginProcess {
     accepting_calls: std::sync::atomic::AtomicBool,
     shutdown_tx: tokio::sync::Mutex<Option<oneshot::Sender<Option<Duration>>>>,
     manager_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    pub pid: Option<u32>,
+    /// Set once the child is running: right away for an eager process, by
+    /// the manager task on the first call for a lazy one.
+    pid: Arc<std::sync::OnceLock<u32>>,
     initialization_settings: Option<HashMap<String, Value>>,
     initialized: OnceCell<Value>,
     service_capabilities: OnceCell<DriverServiceCapabilities>,
@@ -431,6 +532,11 @@ pub struct PluginProcess {
 }
 
 impl PluginProcess {
+    /// `None` while a lazily started process has not been started yet.
+    pub fn pid(&self) -> Option<u32> {
+        self.pid.get().copied()
+    }
+
     async fn send_native(
         &self,
         method: &str,
@@ -593,57 +699,64 @@ impl PluginProcess {
             .await;
         result.cloned()
     }
+    #[cfg(test)]
     async fn new(
         plugin_id: String,
         executable_path: PathBuf,
         interpreter: Option<String>,
     ) -> Result<Self, String> {
+        Self::new_with_start(plugin_id, executable_path, interpreter, ProcessStart::Eager).await
+    }
+
+    async fn new_with_start(
+        plugin_id: String,
+        executable_path: PathBuf,
+        interpreter: Option<String>,
+        start: ProcessStart,
+    ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel::<PluginCommand>(100);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<Option<Duration>>();
+        let pid = Arc::new(std::sync::OnceLock::new());
 
-        // Spawn the child process directly in the async context so that any
-        // spawn failure is immediately propagated as an error (no silent panic).
-        let mut cmd = if let Some(ref interp) = interpreter {
-            let mut c = Command::new(interp);
-            c.arg(&executable_path);
-            c
-        } else {
-            Command::new(&executable_path)
+        // An eager process spawns in the async context so that a spawn failure
+        // is immediately propagated as an error (no silent panic). A lazy one
+        // leaves the spawn to the manager task's first call.
+        let running_child = match start {
+            ProcessStart::Eager => {
+                let child = spawn_plugin_child(&executable_path, interpreter.as_deref())?;
+                let _ = pid.set(child.id().unwrap_or_default());
+                Some(child)
+            }
+            ProcessStart::OnFirstCall => None,
         };
-
-        #[cfg(windows)]
-        cmd.creation_flags(CREATE_NO_WINDOW);
-
-        let child = cmd
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::inherit())
-            // Kill the child if its owning task is dropped without a clean
-            // shutdown — e.g. when the `--mcp` subprocess exits on stdin EOF
-            // and the Tokio runtime is torn down. Without this, the management
-            // task is cancelled before its `select!` can call `child.kill()`,
-            // leaving orphaned plugin processes running.
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| {
-                format!(
-                    "Failed to start plugin process {:?}: {}",
-                    executable_path, e
-                )
-            })?;
-
-        // `kill_on_drop` and the shutdown path only run while this process is
-        // alive. Also stop the plugin when it is killed outright (#1280).
-        crate::plugins::process_lifetime::bind_to_host(&child);
-
-        let pid = child.id();
+        let task_pid = pid.clone();
         let shutdown_plugin_id = plugin_id.clone();
 
-        // Hand the running child off to the management task.
+        // Hand the child (or the means to start it) to the management task.
         let manager_task = tokio::spawn(async move {
-            let mut child = child;
             let mut rx = rx;
             let mut shutdown_rx = shutdown_rx;
+            let mut first_command = None;
+            let mut child = match running_child {
+                Some(child) => child,
+                None => {
+                    match start_on_first_call(
+                        &mut rx,
+                        &mut shutdown_rx,
+                        &executable_path,
+                        interpreter.as_deref(),
+                    )
+                    .await
+                    {
+                        Some((child, command)) => {
+                            let _ = task_pid.set(child.id().unwrap_or_default());
+                            first_command = Some(command);
+                            child
+                        }
+                        None => return,
+                    }
+                }
+            };
 
             let mut stdin = child.stdin.take().expect("Failed to open stdin");
             let stdout = child.stdout.take().expect("Failed to open stdout");
@@ -690,7 +803,7 @@ impl PluginProcess {
                         log::warn!("Plugin shutdown grace period elapsed; terminating child");
                         break;
                     }
-                    msg = rx.recv(), if !channel_drained => {
+                    msg = next_command(&mut first_command, &mut rx), if !channel_drained => {
                         let (request, response, native) = match msg {
                             Some(PluginCommand::Call(request, response)) => (request, response, None),
                             Some(PluginCommand::NativeCall(request, response, dispatch)) => (request, response, Some(dispatch)),
@@ -875,7 +988,7 @@ impl PluginProcess {
                     {
                         Ok(value) => value,
                         Err(_) => {
-                            log::warn!("Plugin initialization is unavailable (pid {:?})", self.pid);
+                            log::warn!("Plugin initialization is unavailable (pid {:?})", self.pid());
                             Value::Null
                         }
                     }
@@ -984,8 +1097,28 @@ impl RpcDriver {
         data_types: Vec<DataTypeInfo>,
         settings: HashMap<String, serde_json::Value>,
     ) -> Result<Self, String> {
+        Self::new_with_start(
+            manifest,
+            executable_path,
+            interpreter,
+            data_types,
+            settings,
+            ProcessStart::Eager,
+        )
+        .await
+    }
+
+    pub async fn new_with_start(
+        manifest: PluginManifest,
+        executable_path: PathBuf,
+        interpreter: Option<String>,
+        data_types: Vec<DataTypeInfo>,
+        settings: HashMap<String, serde_json::Value>,
+        start: ProcessStart,
+    ) -> Result<Self, String> {
         let mut process =
-            PluginProcess::new(manifest.id.clone(), executable_path, interpreter).await?;
+            PluginProcess::new_with_start(manifest.id.clone(), executable_path, interpreter, start)
+                .await?;
         // Real SQL schemas must never be mistaken for a selected logical database.
         process.route_selected_database = !manifest.capabilities.schemas;
         // Register manifests immediately. Initialize only when this plugin is
@@ -1292,7 +1425,7 @@ impl DatabaseDriver for RpcDriver {
     }
 
     fn pid(&self) -> Option<u32> {
-        self.process.pid
+        self.process.pid()
     }
 
     fn get_data_types(&self) -> Vec<DataTypeInfo> {
@@ -2733,7 +2866,7 @@ where
             accepting_calls: std::sync::atomic::AtomicBool::new(true),
             shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
             manager_task: tokio::sync::Mutex::new(None),
-            pid: None,
+            pid: Arc::new(std::sync::OnceLock::new()),
             initialization_settings: None,
             initialized: OnceCell::new(),
             service_capabilities: OnceCell::new(),
@@ -2798,7 +2931,7 @@ where
             accepting_calls: std::sync::atomic::AtomicBool::new(true),
             shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
             manager_task: tokio::sync::Mutex::new(None),
-            pid: None,
+            pid: Arc::new(std::sync::OnceLock::new()),
             initialization_settings: None,
             initialized: OnceCell::new(),
             service_capabilities: OnceCell::new(),
@@ -4188,7 +4321,7 @@ mod tests {
                 accepting_calls: std::sync::atomic::AtomicBool::new(true),
                 shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
                 manager_task: tokio::sync::Mutex::new(None),
-                pid: None,
+                pid: Arc::new(std::sync::OnceLock::new()),
                 initialization_settings: None,
                 initialized: OnceCell::new(),
                 service_capabilities: OnceCell::new(),
@@ -4226,7 +4359,7 @@ mod tests {
                 accepting_calls: std::sync::atomic::AtomicBool::new(true),
                 shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
                 manager_task: tokio::sync::Mutex::new(None),
-                pid: None,
+                pid: Arc::new(std::sync::OnceLock::new()),
                 initialization_settings: None,
                 initialized: OnceCell::new(),
                 service_capabilities: OnceCell::new(),
@@ -4667,3 +4800,7 @@ mod ddl_context_tests;
 #[cfg(all(test, unix))]
 #[path = "process_exit_tests.rs"]
 mod process_exit_tests;
+
+#[cfg(all(test, unix))]
+#[path = "lazy_start_tests.rs"]
+mod lazy_start_tests;

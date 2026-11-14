@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use once_cell::sync::Lazy;
@@ -11,7 +12,30 @@ use crate::drivers::driver_trait::{
     PluginSettingDefinition,
 };
 use crate::models::DataTypeInfo;
-use crate::plugins::driver::RpcDriver;
+use crate::plugins::driver::{ProcessStart, RpcDriver};
+
+/// Set by the headless entry points (`--mcp`, the `service` CLI) so a driver's
+/// process starts on the first call that needs it instead of at registration.
+/// The desktop app and `tabularis web` never set it and keep spawning eagerly.
+static START_PROCESSES_ON_FIRST_CALL: AtomicBool = AtomicBool::new(false);
+
+/// Makes every plugin driver loaded from now on start its process on its first
+/// call. Its manifest is still registered at load time.
+pub fn start_driver_processes_on_first_call() {
+    set_start_processes_on_first_call(true);
+}
+
+pub(crate) fn set_start_processes_on_first_call(enabled: bool) {
+    START_PROCESSES_ON_FIRST_CALL.store(enabled, Ordering::SeqCst);
+}
+
+fn process_start_mode() -> ProcessStart {
+    if START_PROCESSES_ON_FIRST_CALL.load(Ordering::SeqCst) {
+        ProcessStart::OnFirstCall
+    } else {
+        ProcessStart::Eager
+    }
+}
 
 /// Errors that occurred during startup plugin loading, to be fetched by the frontend.
 static STARTUP_ERRORS: Lazy<Mutex<Vec<PluginLoadError>>> = Lazy::new(|| Mutex::new(Vec::new()));
@@ -345,12 +369,13 @@ pub async fn load_plugin_from_dir(
         }
     });
 
-    let driver = RpcDriver::new(
+    let driver = RpcDriver::new_with_start(
         manifest,
         exec_path,
         interpreter,
         config.data_types,
         settings,
+        process_start_mode(),
     )
     .await?
     .with_connection_metadata(config.connection_metadata);

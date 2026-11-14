@@ -390,6 +390,10 @@ async fn resolve_db_params(
 /// MCP can only reach mysql/sqlite connections — every other driver fails
 /// with "Unsupported driver".
 pub(crate) async fn register_drivers_for_mcp() {
+    // Register driver manifests now but start a driver's process only when a
+    // connection that uses it is first called: an agent session must not pay
+    // for every installed driver's runtime.
+    crate::plugins::manager::start_driver_processes_on_first_call();
     if let Err(error) = crate::runtime::bootstrap::bootstrap_application(
         crate::runtime::RuntimeContext::system(),
         crate::runtime::bootstrap::BootstrapOptions::default(),

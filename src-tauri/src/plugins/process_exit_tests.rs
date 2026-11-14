@@ -22,7 +22,7 @@ async fn spawn_eof_ignoring_plugin(id: &str) -> RpcDriver {
 
 /// Reaps `pid` if it is a finished child of this process. `false` while it
 /// still runs; `true` once it is gone, whoever reaped it.
-fn has_exited(pid: u32) -> bool {
+pub(super) fn has_exited(pid: u32) -> bool {
     let mut status = 0;
     // SAFETY: plain syscall; WNOHANG never blocks.
     unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) != 0 }
@@ -45,7 +45,7 @@ fn exits_within(pid: u32, limit: Duration) -> bool {
 fn dropping_the_runtime_kills_a_plugin_that_ignores_stdin_eof() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let driver = runtime.block_on(spawn_eof_ignoring_plugin("process-exit-runtime-drop"));
-    let pid = driver.process.pid.expect("plugin pid");
+    let pid = driver.process.pid().expect("plugin pid");
     assert!(!has_exited(pid), "the fixture plugin should be running");
 
     drop(runtime);
@@ -59,7 +59,7 @@ fn dropping_the_runtime_kills_a_plugin_that_ignores_stdin_eof() {
 #[tokio::test]
 async fn terminate_kills_a_busy_plugin_without_waiting_for_the_grace() {
     let driver = Arc::new(spawn_eof_ignoring_plugin("process-exit-terminate").await);
-    let pid = driver.process.pid.expect("plugin pid");
+    let pid = driver.process.pid().expect("plugin pid");
     let call = tokio::spawn({
         let driver = driver.clone();
         async move {
