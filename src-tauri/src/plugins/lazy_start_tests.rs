@@ -10,10 +10,28 @@ const LIMIT: Duration = Duration::from_secs(10);
 const FIXTURE_ID: &str = "lazy-manager-fixture";
 
 fn fixture_copy(dir: &std::path::Path) -> PathBuf {
-    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/marker_plugin.sh");
-    let script = dir.join("marker_plugin.sh");
+    fixture_copy_of("marker_plugin.sh", dir)
+}
+
+pub(super) fn fixture_copy_of(name: &str, dir: &std::path::Path) -> PathBuf {
+    let source = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures")
+        .join(name);
+    let script = dir.join(name);
     std::fs::copy(source, &script).expect("copy the fixture plugin");
     script
+}
+
+/// Polls `condition` until it holds or `limit` passes.
+pub(super) async fn wait_until(limit: Duration, condition: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    while std::time::Instant::now() < deadline {
+        if condition() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    condition()
 }
 
 fn start_count(dir: &std::path::Path) -> usize {

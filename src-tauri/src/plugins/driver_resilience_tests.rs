@@ -15,7 +15,7 @@ async fn crashed_plugin_process_fails_pending_calls_without_hanging() {
         sender,
         next_id: AtomicU64::new(1),
         shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
-        pid: Arc::new(std::sync::OnceLock::new()),
+        pid: Arc::new(std::sync::Mutex::new(None)),
         initialization_settings: None,
         initialized: OnceCell::new(),
         service_capabilities: OnceCell::new(),

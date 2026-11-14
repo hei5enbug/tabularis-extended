@@ -1529,6 +1529,9 @@ async fn tool_run_query(
                 .execute_read_only_query(&db_params, &effective_query, Some(max_rows), 1, schema)
                 .await
         } else {
+            // A write outside a service session can leave a transaction open
+            // inside the plugin, so its process must never stop while idle.
+            crate::plugins::idle_stop::keep_running(&conn.params.driver);
             driver
                 .execute_query(&db_params, &effective_query, Some(max_rows), 1, schema)
                 .await

@@ -9,6 +9,7 @@ pub mod extensions;
 pub mod force_install;
 #[cfg(test)]
 mod force_install_tests;
+pub mod idle_stop;
 pub mod install_cancellation;
 pub mod installer;
 pub mod integrity;

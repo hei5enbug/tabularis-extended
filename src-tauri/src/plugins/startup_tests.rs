@@ -10,7 +10,7 @@ fn process_with_settings() -> (Arc<PluginProcess>, mpsc::Receiver<PluginCommand>
         accepting_calls: std::sync::atomic::AtomicBool::new(true),
         shutdown_tx: tokio::sync::Mutex::new(None),
         manager_task: tokio::sync::Mutex::new(None),
-        pid: Arc::new(std::sync::OnceLock::new()),
+        pid: Arc::new(std::sync::Mutex::new(None)),
         initialization_settings: Some(HashMap::from([("region".into(), json!("eu"))])),
         initialized: OnceCell::new(),
         service_capabilities: OnceCell::new(),

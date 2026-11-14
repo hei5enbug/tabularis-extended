@@ -44,6 +44,8 @@ struct ReservedSession {
     database: String,
     auth_identity: String,
     _permit: tokio::sync::OwnedSemaphorePermit,
+    /// Keeps a lazily started driver process running while the session lives.
+    _idle_hold: crate::plugins::idle_stop::IdleHold,
 }
 type CachedDriver = (String, Arc<dyn DatabaseDriver>);
 
@@ -481,6 +483,7 @@ impl DriverBackend for RegistryDriverBackend {
         }
         let deadline = context_deadline(&context)?;
         let driver = self.driver(connection).await?;
+        let idle_hold = crate::plugins::idle_stop::hold(&connection.driver);
         let epoch = *self
             .auth_epochs
             .lock()
@@ -530,6 +533,7 @@ impl DriverBackend for RegistryDriverBackend {
                     context: context.clone(),
                     database: database.into(),
                     _permit: permit,
+                    _idle_hold: idle_hold,
                 });
                 Ok(())
             } else {

@@ -29,6 +29,8 @@ export interface PluginConfig {
     callTimeoutSeconds?: number;
     /** Per-plugin override of `pluginShutdownGraceSeconds`. Unset inherits the global value. */
     shutdownGraceSeconds?: number;
+    /** Per-plugin override of `pluginIdleStopSeconds`. Unset inherits the global value; 0 disables the idle stop. */
+    idleStopSeconds?: number;
 }
 
 /** One entry in the append-only driver-migration history. Kept even after an
@@ -104,6 +106,8 @@ export interface Settings {
     pluginCallTimeoutSeconds?: number;
     /** Seconds in-flight plugin calls may run after shutdown is requested. 0 waits until they finish. Default: 2. */
     pluginShutdownGraceSeconds?: number;
+    /** Seconds a driver process that was started on its first call (MCP and service mode) may idle before it is stopped; the next call starts it again. 0 disables the idle stop. Default: 0. */
+    pluginIdleStopSeconds?: number;
     editorTheme?: string;
     editorFontFamily?: string;
     editorFontSize?: number;

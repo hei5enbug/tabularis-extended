@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot, OnceCell};
 
@@ -21,9 +21,7 @@ use crate::models::{
     TableSchema, TriggerInfo, ViewInfo,
 };
 use crate::plugins::connection_metadata::{ConnectionMetadataCache, ConnectionMetadataOverrides};
-use crate::plugins::rpc::{
-    cancel_notification_line, JsonRpcRequest, JsonRpcResponse, PluginCallError,
-};
+use crate::plugins::rpc::{JsonRpcRequest, PluginCallError};
 use crate::services::{
     backend::{CancellationSignal, DriverContext, TransientAuth},
     contracts::{ErrorCode, Outcome, ServiceError, ServiceResponse, MAX_JOB_DEADLINE_MS},
@@ -243,6 +241,9 @@ struct NativeDispatch {
 struct PendingPluginRequest {
     response: oneshot::Sender<Result<Value, PluginCallError>>,
     native: Option<Arc<NativeDispatch>>,
+    /// The request itself when it is an `initialize`, to replay it to a
+    /// restarted child once the plugin has answered it successfully.
+    initialize: Option<JsonRpcRequest>,
 }
 struct NativeWaitGuard<'a> {
     process: &'a PluginProcess,
@@ -412,6 +413,9 @@ fn driver_wire(
     json!({"params":params,"driver_context":driver_context,"input":input})
 }
 
+#[path = "driver_process_task.rs"]
+mod process_task;
+
 /// When a plugin's child process is started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProcessStart {
@@ -521,9 +525,10 @@ pub struct PluginProcess {
     accepting_calls: std::sync::atomic::AtomicBool,
     shutdown_tx: tokio::sync::Mutex<Option<oneshot::Sender<Option<Duration>>>>,
     manager_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Set once the child is running: right away for an eager process, by
-    /// the manager task on the first call for a lazy one.
-    pid: Arc<std::sync::OnceLock<u32>>,
+    /// Set while the child is running: right away for an eager process, by
+    /// the manager task on the first call for a lazy one, and cleared while a
+    /// lazy process is stopped for being idle.
+    pid: process_task::SharedPid,
     initialization_settings: Option<HashMap<String, Value>>,
     initialized: OnceCell<Value>,
     service_capabilities: OnceCell<DriverServiceCapabilities>,
@@ -534,7 +539,7 @@ pub struct PluginProcess {
 impl PluginProcess {
     /// `None` while a lazily started process has not been started yet.
     pub fn pid(&self) -> Option<u32> {
-        self.pid.get().copied()
+        self.pid.lock().ok().and_then(|pid| *pid)
     }
 
     async fn send_native(
@@ -716,7 +721,7 @@ impl PluginProcess {
     ) -> Result<Self, String> {
         let (tx, rx) = mpsc::channel::<PluginCommand>(100);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<Option<Duration>>();
-        let pid = Arc::new(std::sync::OnceLock::new());
+        let pid: process_task::SharedPid = Arc::new(Mutex::new(None));
 
         // An eager process spawns in the async context so that a spawn failure
         // is immediately propagated as an error (no silent panic). A lazy one
@@ -724,184 +729,23 @@ impl PluginProcess {
         let running_child = match start {
             ProcessStart::Eager => {
                 let child = spawn_plugin_child(&executable_path, interpreter.as_deref())?;
-                let _ = pid.set(child.id().unwrap_or_default());
+                process_task::set_pid(&pid, Some(child.id().unwrap_or_default()));
                 Some(child)
             }
             ProcessStart::OnFirstCall => None,
         };
-        let task_pid = pid.clone();
-        let shutdown_plugin_id = plugin_id.clone();
+        let task = process_task::ProcessTask {
+            plugin_id: plugin_id.clone(),
+            executable_path,
+            interpreter,
+            start,
+            pid: pid.clone(),
+            rx,
+            shutdown_rx,
+        };
 
         // Hand the child (or the means to start it) to the management task.
-        let manager_task = tokio::spawn(async move {
-            let mut rx = rx;
-            let mut shutdown_rx = shutdown_rx;
-            let mut first_command = None;
-            let mut child = match running_child {
-                Some(child) => child,
-                None => {
-                    match start_on_first_call(
-                        &mut rx,
-                        &mut shutdown_rx,
-                        &executable_path,
-                        interpreter.as_deref(),
-                    )
-                    .await
-                    {
-                        Some((child, command)) => {
-                            let _ = task_pid.set(child.id().unwrap_or_default());
-                            first_command = Some(command);
-                            child
-                        }
-                        None => return,
-                    }
-                }
-            };
-
-            let mut stdin = child.stdin.take().expect("Failed to open stdin");
-            let stdout = child.stdout.take().expect("Failed to open stdout");
-            let mut reader = BufReader::new(stdout);
-
-            let mut pending_requests: HashMap<u64, PendingPluginRequest> = HashMap::new();
-            let mut line_buf = Vec::new();
-            let mut shutting_down = false;
-            let mut shutdown_deadline: Option<tokio::time::Instant> = None;
-            let mut channel_drained = false;
-
-            loop {
-                pending_requests.retain(|_, pending| !pending.response.is_closed());
-                if shutting_down && channel_drained && pending_requests.is_empty() {
-                    break;
-                }
-                tokio::select! {
-                    resolved = &mut shutdown_rx, if !shutting_down => {
-                        // Existing callers with a reserved queue slot may still
-                        // enqueue; receive those requests before deciding we are
-                        // fully drained. No fresh reservations are allowed.
-                        rx.close();
-                        shutting_down = true;
-                        // A dropped sender is not a configured "wait forever",
-                        // so use the global grace, which is always bounded.
-                        let grace = resolved.unwrap_or_else(|_| {
-                            Some(crate::plugins::shutdown_grace::dropped_signal_grace())
-                        });
-                        if let Some(grace) = grace {
-                            shutdown_deadline = Some(tokio::time::Instant::now() + grace);
-                            log::info!(
-                                "Plugin {shutdown_plugin_id} draining RPCs for {}s",
-                                grace.as_secs()
-                            );
-                        } else {
-                            log::info!(
-                                "Plugin {shutdown_plugin_id} draining RPCs until they finish"
-                            );
-                        }
-                    }
-                    _ = tokio::time::sleep_until(
-                        shutdown_deadline.unwrap_or_else(tokio::time::Instant::now)
-                    ), if shutdown_deadline.is_some() => {
-                        log::warn!("Plugin shutdown grace period elapsed; terminating child");
-                        break;
-                    }
-                    msg = next_command(&mut first_command, &mut rx), if !channel_drained => {
-                        let (request, response, native) = match msg {
-                            Some(PluginCommand::Call(request, response)) => (request, response, None),
-                            Some(PluginCommand::NativeCall(request, response, dispatch)) => (request, response, Some(dispatch)),
-                            Some(PluginCommand::DropNative(id)) => { pending_requests.remove(&id); continue; },
-                            Some(PluginCommand::Cancel(id)) => {
-                                if pending_requests.remove(&id).is_some() {
-                                    let line = cancel_notification_line(id);
-                                    if !matches!(tokio::time::timeout(PLUGIN_INIT_TIMEOUT, stdin.write_all(line.as_bytes())).await, Ok(Ok(()))) { break; }
-                                }
-                                continue;
-                            },
-                            None => {
-                                if shutting_down {
-                                    channel_drained = true;
-                                    continue;
-                                }
-                                log::warn!("Plugin process channel closed without shutdown signal");
-                                break;
-                            }
-                        };
-                        if response.is_closed() { continue; }
-                        if pending_requests.len() >= MAX_PENDING_REQUESTS {
-                            let _ = response.send(Err(PluginCallError::Transport("native_pending_limit".into()))); continue;
-                        }
-                        if let Some(dispatch) = &native {
-                            if dispatch.abandoned.load(Ordering::SeqCst) || dispatch.signal.is_cancelled() {
-                                let _ = response.send(Err(PluginCallError::Transport("native_cancelled".into()))); continue;
-                            }
-                            if tokio::time::Instant::now() >= dispatch.deadline {
-                                let _ = response.send(Err(PluginCallError::Transport("native_deadline".into()))); continue;
-                            }
-                        }
-                        let mut encoded = match serde_json::to_vec(&request) {
-                            Ok(encoded) if encoded.len() <= MAX_RPC_FRAME_BYTES => encoded,
-                            _ => { let _ = response.send(Err(PluginCallError::Transport("native_frame_limit".into()))); continue; },
-                        };
-                        encoded.push(b'\n');
-                        let id = request.id;
-                        pending_requests.insert(id, PendingPluginRequest { response, native: native.clone() });
-                        let written = if let Some(dispatch) = &native {
-                            dispatch.attempted.store(true, Ordering::SeqCst);
-                            tokio::select! {
-                                result = stdin.write_all(&encoded) => result.is_ok(),
-                                _ = tokio::time::sleep_until(dispatch.deadline) => false,
-                                _ = dispatch.signal.cancelled() => false,
-                            }
-                        } else { matches!(tokio::time::timeout(PLUGIN_INIT_TIMEOUT, stdin.write_all(&encoded)).await, Ok(Ok(()))) };
-                        if !written { break; }
-                    }
-                    frame = read_plugin_frame(&mut reader, &mut line_buf) => {
-                        match frame {
-                            Ok(0) | Err(_) => break,
-                            Ok(_) => {
-                                if line_buf.last() == Some(&b'\n') { line_buf.pop(); }
-                                if line_buf.len() > MAX_RPC_FRAME_BYTES { break; }
-                                let response = match serde_json::from_slice::<JsonRpcResponse>(&line_buf) { Ok(response) => response, Err(_) => break };
-                                line_buf.clear();
-                                let (id, outcome) = match response {
-                                    JsonRpcResponse::Success { jsonrpc, result, id } if jsonrpc == "2.0" => (id, Ok(result)),
-                                    JsonRpcResponse::Error { jsonrpc, error, id } if jsonrpc == "2.0" => (id, Err(PluginCallError::Remote(error))),
-                                    _ => break,
-                                };
-                                match id {
-                                    Some(id) => {
-                                        if let Some(pending) = pending_requests.remove(&id) {
-                                            let _ = pending.response.send(outcome);
-                                        }
-                                    }
-                                    None => {
-                                        if let Err(PluginCallError::Remote(error)) = outcome {
-                                            log::error!(
-                                                "Plugin returned an error without a request id ({}): {}",
-                                                error.code,
-                                                error.message
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            // Give remaining callers a specific shutdown failure instead of
-            // an ambiguous dropped-channel/no-response error.
-            for (_, pending) in pending_requests.drain() {
-                let _ = pending.native;
-                let message = if shutting_down {
-                    "Plugin shutdown grace period elapsed before RPC completed"
-                } else {
-                    "Plugin transport stopped"
-                };
-                let _ = pending
-                    .response
-                    .send(Err(PluginCallError::Transport(message.into())));
-            }
-            let _ = child.kill().await;
-        });
+        let manager_task = tokio::spawn(process_task::run(task, running_child));
 
         Ok(Self {
             plugin_id,
@@ -2866,7 +2710,7 @@ where
             accepting_calls: std::sync::atomic::AtomicBool::new(true),
             shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
             manager_task: tokio::sync::Mutex::new(None),
-            pid: Arc::new(std::sync::OnceLock::new()),
+            pid: Arc::new(Mutex::new(None)),
             initialization_settings: None,
             initialized: OnceCell::new(),
             service_capabilities: OnceCell::new(),
@@ -2931,7 +2775,7 @@ where
             accepting_calls: std::sync::atomic::AtomicBool::new(true),
             shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
             manager_task: tokio::sync::Mutex::new(None),
-            pid: Arc::new(std::sync::OnceLock::new()),
+            pid: Arc::new(Mutex::new(None)),
             initialization_settings: None,
             initialized: OnceCell::new(),
             service_capabilities: OnceCell::new(),
@@ -4321,7 +4165,7 @@ mod tests {
                 accepting_calls: std::sync::atomic::AtomicBool::new(true),
                 shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
                 manager_task: tokio::sync::Mutex::new(None),
-                pid: Arc::new(std::sync::OnceLock::new()),
+                pid: Arc::new(Mutex::new(None)),
                 initialization_settings: None,
                 initialized: OnceCell::new(),
                 service_capabilities: OnceCell::new(),
@@ -4359,7 +4203,7 @@ mod tests {
                 accepting_calls: std::sync::atomic::AtomicBool::new(true),
                 shutdown_tx: tokio::sync::Mutex::new(Some(shutdown_tx)),
                 manager_task: tokio::sync::Mutex::new(None),
-                pid: Arc::new(std::sync::OnceLock::new()),
+                pid: Arc::new(Mutex::new(None)),
                 initialization_settings: None,
                 initialized: OnceCell::new(),
                 service_capabilities: OnceCell::new(),
@@ -4804,3 +4648,7 @@ mod process_exit_tests;
 #[cfg(all(test, unix))]
 #[path = "lazy_start_tests.rs"]
 mod lazy_start_tests;
+
+#[cfg(all(test, unix))]
+#[path = "idle_stop_tests.rs"]
+mod idle_stop_tests;

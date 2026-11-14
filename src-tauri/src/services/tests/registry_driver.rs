@@ -151,6 +151,55 @@ async fn 예약된_물리_세션은_DB와_auth_revision을_고정하고_확인�
     assert!(rollback.is_ok());
     assert!(backend.sessions.lock().unwrap().is_empty());
 }
+#[tokio::test]
+async fn 열린_세션은_드라이버_프로세스의_유휴_중지를_막고_rollback_뒤에_푼다() {
+    // given
+    let (backend, connection) = registered("native", json!({})).await;
+    assert!(!crate::plugins::idle_stop::is_held(&connection.driver));
+    // when
+    let handle = backend
+        .reserve_session(&connection, "db", context("conn", "open"))
+        .await
+        .unwrap();
+    // then
+    assert!(crate::plugins::idle_stop::is_held(&connection.driver));
+    // when
+    backend
+        .finish_session(
+            &connection,
+            &handle,
+            SessionFinish::Rollback,
+            context("conn", "rollback"),
+        )
+        .await
+        .unwrap();
+    // then
+    assert!(!crate::plugins::idle_stop::is_held(&connection.driver));
+}
+#[tokio::test]
+async fn 폐기된_세션과_정리된_백엔드는_드라이버_프로세스의_유휴_중지_보류를_푼다() {
+    // given
+    let (backend, connection) = registered("native", json!({})).await;
+    let handle = backend
+        .reserve_session(&connection, "db", context("conn", "open"))
+        .await
+        .unwrap();
+    assert!(crate::plugins::idle_stop::is_held(&connection.driver));
+    // when
+    backend.discard_session("conn", &handle).await;
+    // then
+    assert!(!crate::plugins::idle_stop::is_held(&connection.driver));
+    // given
+    backend
+        .reserve_session(&connection, "db", context("conn", "open-2"))
+        .await
+        .unwrap();
+    assert!(crate::plugins::idle_stop::is_held(&connection.driver));
+    // when
+    drop(backend);
+    // then
+    assert!(!crate::plugins::idle_stop::is_held(&connection.driver));
+}
 async fn rollback_unconfirmed(
     backend: &RegistryDriverBackend,
     connection: &SavedConnection,
@@ -1121,4 +1170,45 @@ async fn 첫_호출에_시작된_실제_PostgreSQL_Plus_드라이버도_첫_읽�
         .expect("a snapshot");
     assert_eq!(snapshot.sets[0].rows, [json!([1]), json!([2]), json!([3])]);
     assert!(!snapshot.limits.truncated);
+}
+// Catches a real plugin process that, once stopped while idle, cannot serve the next read.
+#[tokio::test]
+#[ignore = "needs TABULARIS_TEST_PG_PLUGIN and TABULARIS_TEST_PG_PORT"]
+async fn 유휴로_멈춘_실제_PostgreSQL_Plus_드라이버는_다음_읽기에_다시_시작한다() {
+    // given
+    let _guard = registry::REGISTRY_TEST_LOCK.lock().await;
+    let (id, resolver) =
+        register_live_postgres(crate::plugins::driver::ProcessStart::OnFirstCall).await;
+    let _idle = crate::plugins::idle_stop::test_support::force(
+        &id,
+        Some(std::time::Duration::from_millis(500)),
+    );
+    let backend = RegistryDriverBackend::new(Arc::new(resolver));
+    let (query, read) = live_read("select g as id from generate_series(1, 3) g");
+    let first = backend.execute(&saved(&id), &query, read.clone()).await;
+    let first_pid = registry::get_driver(&id).await.unwrap().pid();
+    let mut stopped_pid = first_pid;
+    for _ in 0..100 {
+        stopped_pid = registry::get_driver(&id).await.unwrap().pid();
+        if stopped_pid.is_none() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    // when
+    let second = backend.execute(&saved(&id), &query, read).await;
+    let second_pid = registry::get_driver(&id).await.unwrap().pid();
+    registry::unregister_driver(&id).await;
+    // then
+    assert!(first_pid.is_some());
+    assert_eq!(stopped_pid, None);
+    assert!(second_pid.is_some());
+    assert_ne!(first_pid, second_pid);
+    for actual in [first, second] {
+        let snapshot = actual
+            .expect("the read succeeds")
+            .snapshot
+            .expect("a snapshot");
+        assert_eq!(snapshot.sets[0].rows, [json!([1]), json!([2]), json!([3])]);
+    }
 }

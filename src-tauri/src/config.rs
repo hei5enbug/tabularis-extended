@@ -60,6 +60,10 @@ pub struct PluginConfig {
     /// `None` inherits the global value; values below 1 are clamped at runtime.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shutdown_grace_seconds: Option<u32>,
+    /// Per-plugin override of `AppConfig::plugin_idle_stop_seconds`.
+    /// `None` inherits the global value; `0` disables the idle stop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_stop_seconds: Option<u32>,
 }
 
 /// Per-connection column masking overrides (`table.column` entries).
@@ -162,6 +166,10 @@ pub struct AppConfig {
     /// Seconds in-flight plugin calls may run after shutdown is requested.
     /// Values below 1 are clamped at runtime. Default: 2. Overridable per plugin.
     pub plugin_shutdown_grace_seconds: Option<u32>,
+    /// Seconds a driver process that was started on its first call (headless
+    /// MCP and service mode) may sit idle before it is stopped; the next call
+    /// starts it again. `0` disables the idle stop. Default: 0. Overridable per plugin.
+    pub plugin_idle_stop_seconds: Option<u32>,
     pub editor_theme: Option<String>,
     /// Font for query result cells ("inherit" follows the interface font). Default: JetBrains Mono.
     pub result_font_family: Option<String>,
@@ -355,6 +363,7 @@ static CONFIG_CACHE: Lazy<RwLock<AppConfig>> = Lazy::new(|| RwLock::new(AppConfi
 pub(crate) fn cache_config(config: &AppConfig) {
     crate::plugins::call_timeout::apply_config(config);
     crate::plugins::shutdown_grace::apply_config(config);
+    crate::plugins::idle_stop::apply_config(config);
     if let Ok(mut cached) = CONFIG_CACHE.write() {
         *cached = config.clone();
     }
@@ -394,6 +403,7 @@ pub fn load_config_from_disk() -> AppConfig {
     if trusted {
         crate::plugins::call_timeout::apply_config(&config);
         crate::plugins::shutdown_grace::apply_config(&config);
+        crate::plugins::idle_stop::apply_config(&config);
     }
     config
 }

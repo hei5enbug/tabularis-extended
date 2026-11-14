@@ -330,6 +330,7 @@ fn merge_config(existing: &mut AppConfig, update: AppConfig) {
         release_channel,
         plugins,
         plugin_call_timeout_seconds,
+        plugin_idle_stop_seconds,
         editor_theme,
         result_font_family,
         editor_font_family,

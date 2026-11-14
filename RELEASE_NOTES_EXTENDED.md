@@ -66,6 +66,14 @@ explicit `sql_password`.
 - `server_activity` lists the queries running on the server, from any client. `server_cancel` stops one of them by
   its process id. On PostgreSQL it cancels only the query and the session stays. On SQL Server it runs `KILL`, which
   ends the session and rolls back its open transaction.
+- A driver process starts when a connection that uses it is first called, not when the server starts. It stays
+  running by default. To stop an idle one, set `pluginIdleStopSeconds` in `config.json`, or
+  `plugins.<id>.idleStopSeconds` for one driver, which overrides the global value. `0` turns it off. After that
+  many seconds without a call, the driver process is stopped, and the next call starts it again and repeats its
+  `initialize` request. A process with a call in progress or an open session is never stopped. Once `run_query`
+  sends a write outside a service session, such as with approval mode `all`, that driver is never stopped until the
+  MCP server exits, because the write may have left a transaction open. The desktop app and
+  `tabularis web` start their drivers at launch and never stop them for being idle.
 
 ## Write policy
 
