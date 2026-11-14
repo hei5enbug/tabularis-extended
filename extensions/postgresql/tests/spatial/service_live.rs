@@ -693,8 +693,20 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
     let operator = fixture.describe("===", Some("operator")).await;
     let class = fixture.describe("cls", Some("operator_class")).await;
     let family = fixture.describe("fam", Some("operator_family")).await;
-    let missing = fixture.describe("absent", Some("routine")).await;
-    let row_type = fixture.describe("child", Some("type")).await;
+    let missing = fixture
+        .call(
+            "service_catalog",
+            json!({"operation":"catalog.describe","table":fixture.table("absent"),"kind":"routine"}),
+            true,
+        )
+        .await;
+    let row_type = fixture
+        .call(
+            "service_catalog",
+            json!({"operation":"catalog.describe","table":fixture.table("child"),"kind":"type"}),
+            true,
+        )
+        .await;
     let _ = fixture
         .client
         .batch_execute(&format!(
@@ -863,18 +875,15 @@ async fn postgis없는_db에서도_모든_지원_종류를_목록으로_보이�
     );
     assert_eq!(family["properties"], json!({"access_method":"btree"}));
 
-    for response in [&missing, &row_type] {
-        assert_eq!(response["columns"], json!([]));
-        assert_eq!(
-            (
-                &response["foreign_keys"],
-                &response["definition"],
-                &response["properties"]
-            ),
-            (&json!([]), &Value::Null, &json!({}))
-        );
+    for (response, prefix) in [
+        (&missing, "No routine named "),
+        (&row_type, "No type named "),
+    ] {
+        assert_eq!(response["error"]["data"]["code"], "INVALID_ARGUMENT");
+        let message = response["error"]["data"]["message"].as_str().unwrap();
+        assert!(message.starts_with(prefix), "{message}");
     }
-    for response in [&child, &trigger, &aggregate, &missing] {
+    for response in [&child, &trigger, &aggregate] {
         assert_eq!(response["limits"]["truncated"], false);
         for key in [
             "columns",

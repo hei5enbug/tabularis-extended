@@ -62,6 +62,19 @@ impl Catalog {
         actual["result"].clone()
     }
 
+    fn describe_error(&mut self, name: &str, kind: Option<&str>) -> Value {
+        let mut input = json!({"operation":"catalog.describe","table":{"database":self.database,"schema":self.schema,"table":name}});
+        if let Some(kind) = kind {
+            input["kind"] = json!(kind);
+        }
+        let actual = self.request("service_catalog", input, true);
+        assert!(
+            actual.get("result").is_none(),
+            "describe succeeded: {actual}"
+        );
+        actual["error"]["data"].clone()
+    }
+
     fn objects(&mut self) -> Vec<(String, String)> {
         let input =
             json!({"operation":"catalog.objects","database":self.database,"schema":self.schema});
@@ -409,25 +422,27 @@ fn rule과_security_policy를_설명하면_정의와_조건자가_온다() {
 }
 
 #[test]
-fn 없는_객체를_설명하면_오류_없이_모든_키가_빈_값으로_온다() {
+fn 없는_객체를_설명하면_종류를_밝힌_invalid_argument로_실패한다() {
     // given
     let mut catalog = Catalog::new();
+    let kinds = [
+        (None, "table"),
+        (Some("routine"), "routine"),
+        (Some("type"), "type"),
+        (Some("security_policy"), "security_policy"),
+        (Some("trigger"), "trigger"),
+    ];
 
     // when
-    let actual = [
-        None,
-        Some("routine"),
-        Some("type"),
-        Some("security_policy"),
-        Some("trigger"),
-    ]
-    .map(|kind| catalog.describe("missing", kind));
+    let actual = kinds.map(|(kind, _)| catalog.describe_error("missing", kind));
 
     // then
-    for response in actual {
-        assert_eq!(
-            response,
-            json!({"columns":[],"foreign_keys":[],"indexes":[],"keys":[],"check_constraints":[],"definition":null,"properties":{}})
+    for (error, (_, label)) in actual.iter().zip(kinds) {
+        assert_eq!(error["code"], "INVALID_ARGUMENT");
+        let message = error["message"].as_str().unwrap();
+        assert!(
+            message.starts_with(&format!("The {label} to describe does not exist")),
+            "{message}"
         );
     }
 }
