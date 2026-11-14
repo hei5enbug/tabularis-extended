@@ -5,6 +5,7 @@ import * as explainApi from '@tabularis/explain';
 import {pluginGuestThemeVariables} from '../../web-ui/src/utils/pluginGuestTheme';
 import {RpcPort} from '../../web-ui/src/plugins/sandbox/rpc';
 import {hydratePluginSlotContext} from '../../web-ui/src/plugins/sandbox/slotContext';
+import {GUEST_API_VERSION} from '../../web-ui/src/plugins/sandbox/guestApiVersion';
 
 type PluginComponent = React.ComponentType<{context: Record<string, unknown>; pluginId: string}>;
 type GuestGlobal = Window & Record<string, unknown>;
@@ -323,7 +324,7 @@ Object.assign(guestWindow, {
     ReactJSXRuntime,
     __TABULARIS_EXPLAIN__: explainApi,
     __TABULARIS_API__: guestApi,
-    __TABULARIS_API_VERSION__: '0.4.0',
+    __TABULARIS_API_VERSION__: GUEST_API_VERSION,
 });
 
 function loadExplainModule(): Promise<Record<string, unknown>[]> {

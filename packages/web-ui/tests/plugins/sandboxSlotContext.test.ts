@@ -64,4 +64,22 @@ describe('sandbox slot callback bridge', () => {
             '{"type":"service_account"}',
         );
     });
+
+    // Catches a sandboxed SQL Server Plus UI losing Entra password-only hiding.
+    it('비밀번호만 숨기는 콜백도 host로 전달된다', () => {
+        // given
+        const setPasswordFieldHidden = vi.fn();
+        const callHost = vi.fn();
+        const context = serializePluginSlotContext({
+            driver: 'sqlserver-plus',
+            passwordFieldHidden: false,
+            setPasswordFieldHidden,
+        });
+        // when
+        const hydrated = hydratePluginSlotContext(context, callHost);
+        (hydrated.setPasswordFieldHidden as (hidden: boolean) => void)(true);
+        // then
+        expect(context.__tabularisHostCallbacks).toEqual(['setPasswordFieldHidden']);
+        expect(callHost).toHaveBeenCalledWith('slot.setPasswordFieldHidden', true);
+    });
 });

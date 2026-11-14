@@ -92,6 +92,7 @@ describe('plugin isolation acceptance contract', () => {
             'slot.onDatabaseChange',
             'slot.setExtraField',
             'slot.setCredentialFieldsHidden',
+            'slot.setPasswordFieldHidden',
             'slot.setSecretField',
             'ui.modal',
         ]) {

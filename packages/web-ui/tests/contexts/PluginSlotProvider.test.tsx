@@ -132,6 +132,52 @@ describe('PluginSlotProvider', () => {
         );
     });
 
+    // Catches the host's 0.2 check rejecting a bundle scaffolded for the 0.4 sandbox guest.
+    it('sandbox guest API 0.4.0용 번들은 sandbox 슬롯으로 등록된다', async () => {
+        // given
+        let registry: PluginSlotRegistryType | undefined;
+        clientMock.call.mockResolvedValue({
+            id: 'scaffolded-plugin',
+            name: 'Scaffolded Plugin',
+            version: '1.0.0',
+            description: 'Fixture',
+            default_port: null,
+            capabilities: {},
+            ui_extensions: [
+                {
+                    slot: 'sidebar.footer.actions',
+                    module: 'ui/index.js',
+                    api_version: '0.4.0',
+                },
+            ],
+        });
+        clientMock.readPluginAsset.mockRejectedValue(new Error('missing locale'));
+        const activeSettings = {
+            ...settingsValue,
+            settings: {
+                ...DEFAULT_SETTINGS,
+                activeExternalDrivers: ['scaffolded-plugin'],
+            },
+        };
+        // when
+        renderWithSettings(
+            <PluginSlotProvider>
+                <RegistryConsumer
+                    onRegistry={(value) => {
+                        registry = value;
+                    }}
+                />
+            </PluginSlotProvider>,
+            activeSettings,
+        );
+        // then
+        await waitFor(() => expect(registry?.contributions).toHaveLength(1));
+        expect(clientMock.readPluginAsset).not.toHaveBeenCalledWith(
+            'scaffolded-plugin',
+            'ui/index.js',
+        );
+    });
+
     it('should skip bundles that require an incompatible plugin API', async () => {
         let registry: PluginSlotRegistryType | undefined;
         clientMock.call.mockResolvedValue({

@@ -8,6 +8,7 @@ import type {SlotContribution, SlotName, SlotContext} from '@/types/pluginSlots'
 import {VALID_SLOTS} from '@/types/pluginSlots';
 import type {PluginManifest} from '@/types/plugins';
 import {SandboxedPluginFrame} from '@/plugins/sandbox/SandboxedPluginFrame';
+import {GUEST_API_VERSION} from '@/plugins/sandbox/guestApiVersion';
 import {loadInProcessComponent, runsInProcess} from '@/plugins/inProcessPlugins';
 import type {TabularisClient} from '@/api/client';
 import {API_VERSION} from '@/pluginApiVersion';
@@ -53,7 +54,12 @@ async function loadExternalPluginContributions(
     // except for the fork-owned extensions that runsInProcess names.
     const byModule = new Map<string, typeof manifest.ui_extensions>();
     for (const entry of manifest.ui_extensions) {
-        if (!isPluginApiCompatible(API_VERSION, entry.api_version)) {
+        // A sandboxed bundle runs on the guest runtime, so the guest's API also counts.
+        const compatible =
+            isPluginApiCompatible(API_VERSION, entry.api_version) ||
+            (!runsInProcess(manifest.id) &&
+                isPluginApiCompatible(GUEST_API_VERSION, entry.api_version));
+        if (!compatible) {
             console.warn(
                 `[PluginSlot] Plugin "${manifest.id}" requires incompatible plugin API ${entry.api_version ?? 'unknown'}; host is ${API_VERSION}. Skipping.`,
             );

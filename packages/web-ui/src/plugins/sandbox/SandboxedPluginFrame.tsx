@@ -242,6 +242,14 @@ export function SandboxedPluginFrame({pluginId, module, context}: Props) {
                     throw new Error('Credential fields are unavailable in this slot');
                 callback(hidden);
             },
+            'slot.setPasswordFieldHidden': (hidden: unknown) => {
+                if (typeof hidden !== 'boolean')
+                    throw new Error('Password visibility must be a boolean');
+                const callback = contextRef.current.setPasswordFieldHidden;
+                if (typeof callback !== 'function')
+                    throw new Error('The password field is unavailable in this slot');
+                callback(hidden);
+            },
             'slot.setSecretField': (key: unknown, value: unknown) => {
                 const normalizedKey = typeof key === 'string' ? key.trim() : '';
                 if (
