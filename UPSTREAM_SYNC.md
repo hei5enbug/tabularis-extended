@@ -67,9 +67,18 @@ list is based on how many lines changed, not on a tested merge.
 - `src-tauri/src/transport/desktop/commands.rs`
 - `packages/web-ui/src/components/modals/AiApprovalModal.tsx`
 
-`pnpm-workspace.yaml` has a fork-only `overrides` entry that moves the `dompurify` copy inside `monaco-editor` to a
-patched release. When `pnpm-lock.yaml` conflicts, take upstream's lockfile, run `pnpm install`, and check
-`pnpm audit --prod`. Drop the override once upstream's `monaco-editor` no longer pins a vulnerable `dompurify`.
+`monaco-editor` ships its own copy of DOMPurify inside its code, and `pnpm audit` cannot see that copy. The fork
+replaces it in two fork-only places:
+
+- `patches/monaco-editor@0.55.1.patch` makes monaco's bundled copy re-export the installed DOMPurify package.
+- The `overrides` entry in `pnpm-workspace.yaml` makes that package a patched release.
+
+`packages/web-ui/tests/monacoDompurify.test.ts` fails when monaco uses its own copy again.
+
+When `pnpm-lock.yaml` conflicts, take upstream's lockfile, run `pnpm install`, and check `pnpm audit --prod`. When
+upstream moves `monaco-editor` to another version, `pnpm install` stops because the patch names the old version.
+Then recreate the patch with `pnpm patch monaco-editor@<version>` and check the version of DOMPurify that the new
+monaco bundles. Drop the patch and the override only when that bundled copy is no longer vulnerable.
 
 Rule: keep fork logic in new files and keep edits to upstream files as small hooks. A one-line call into a new
 fork file is easy to merge. A rewritten function in an upstream file conflicts on every release.
