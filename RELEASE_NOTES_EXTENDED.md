@@ -1,6 +1,6 @@
-# Tabularis Extended 0.27.0+extended.1
+# Tabularis Extended 0.32.0+extended.1
 
-Tabularis Extended is a personal fork of Tabularis 0.27.0. It runs beside the official app and gives its MCP
+Tabularis Extended is a personal fork of Tabularis 0.32.0. It runs beside the official app and gives its MCP
 server the database features that coding agents expect from a database IDE.
 
 ## Coexistence with the official app
@@ -38,6 +38,14 @@ feature is not copied.
 |---|---|---|---|
 | PostgreSQL Plus | `postgresql-plus` | `1.0.0-rc.6+plus.1` | Service protocol; reads run in read-only transactions |
 | SQL Server Plus | `sqlserver-plus` | `1.0.0-beta.3+plus.1` | Service protocol; Entra users through Azure CLI |
+| Cosmos DB for NoSQL | `cosmos-nosql` | `0.1.0` | Documents, paged queries, and connection metadata |
+| Spatial | `spatial` | `0.1.0` | UI plugin for PostGIS maps; it has no driver process |
+
+Plugin UIs run in the upstream sandbox frame. Spatial and Cosmos DB for NoSQL run in the main window instead,
+because they need host hooks, assets, and workers that the sandbox does not offer. Sandboxed UIs built for the
+`0.4.0` guest API also load, and they can hide the password field when a connection needs no password.
+
+Spatial finds the schema that holds the PostGIS extension, so PostGIS installed outside `public` also works.
 
 SQL Server Plus acquires Entra tokens itself with `az` for each new physical connection. Run `az login` outside the
 app. The host never handles Entra tokens for this driver.
@@ -48,17 +56,27 @@ explicit `sql_password`.
 
 ## MCP server
 
-`tabularis-extended --mcp` serves 57 tools: the five legacy tools with unchanged output, 48 service tools, and
-`table_preview`, `job_list`, `server_activity`, and `server_cancel`.
+`tabularis-extended --mcp` serves 58 tools: the five legacy tools and 53 service tools. The service tools cover
+connections, the catalog, queries and stored results, single-row and document writes, sessions, jobs, spatial
+features and saved maps, Entra sign-in, and server activity.
 
-- `query_execute` returns a job ID right away. A job that finishes within `wait_ms` returns its first page.
-- `result_get` pages a stored result of up to 10,000 rows without running the SQL again. Each reply stays within
-  64 KiB.
+- `query_execute` returns a job ID right away. A job that finishes within `wait_ms` returns its first page. A job
+  may run for up to one hour, and time spent waiting for approval in the app does not count against it.
+- One stored result keeps at most 10,000 rows. A longer read is cut there and reported with `truncated: true` and
+  `truncation_reason: row_limit` (`byte_limit` for the size cap), and the app shows the cut in the result header.
+  A write whose result is longer fails with `RESOURCE_LIMIT`, and the message names the limit.
+- `result_get` pages a stored result without running the SQL again. Each reply stays within 64 KiB.
+- Database errors come back with the code `DATABASE_ERROR` and keep the database's own message.
 - `job_cancel` reports `cancelled` only when the driver confirms it. Otherwise it reports `CANCEL_NOT_CONFIRMED`.
 - `job_list` returns running jobs and the query history. The history keeps SQL text and status, never rows or
   credentials.
-- Catalog tools list databases, schemas, tables, views, materialized views, routines, and triggers, and accept
-  `offset` for long lists.
+- Catalog tools list databases, schemas, and objects such as tables, views, materialized views, foreign tables,
+  routines, aggregates, triggers, sequences, synonyms, types, collations, operators, rules, and security policies,
+  and accept `offset` for long lists. `catalog_object_kinds` tells which kinds a connection's driver offers.
+- `catalog_describe` returns columns, keys, foreign keys, indexes, check constraints, the definition, and
+  kind-specific properties. An object that does not exist fails with `INVALID_ARGUMENT`.
+- A trigger can be picked by its owning table with `owner_table`. Sequence values outside JavaScript's safe integer
+  range come back as text.
 - `query_explain` returns the estimated plan of one statement and never runs it. PostgreSQL Plus runs
   `EXPLAIN (FORMAT JSON)` in a read-only transaction. SQL Server Plus uses `SHOWPLAN_XML` on a connection that is
   thrown away afterwards. The reply sums up the total cost, estimated rows, operators, full scans, warnings, and
@@ -74,13 +92,32 @@ explicit `sql_password`.
   sends a write outside a service session, such as with approval mode `all`, that driver is never stopped until the
   MCP server exits, because the write may have left a transaction open. The desktop app and
   `tabularis web` start their drivers at launch and never stop them for being idle.
+- `run_query` cancels a read on the database server when `timeout_ms` passes, keeps the database's error text, and
+  pages UNION queries.
+- Calls whose params carry a `_meta` object, as Claude Code sends them, are accepted.
 
 ## Write policy
 
 - Read-only mode (`mcp_readonly_default`, `mcp_readonly_connections`) and the approval mode (`mcp_approval_mode`)
   apply to both `run_query` and the service tools.
 - A statement counts as a read only when the classifier proves it is one read. `SELECT … INTO`, `EXEC`, `CALL`,
-  several statements, and a write keyword after a read without a semicolon count as writes.
+  and a write keyword after a read without a semicolon count as writes. A keyword right after AS is read as an
+  alias. When read-only mode refuses a query that could not be proven a read, the message suggests quoting
+  identifiers that are SQL keywords.
+- Two kinds of read batch also count as reads. The `query_execute` description lists the exact rules.
+  - PostgreSQL Plus: one read wrapped in BEGIN, SET [LOCAL] of a listed setting such as `statement_timeout`, and
+    COMMIT or ROLLBACK, outside a session.
+  - SQL Server Plus: a T-SQL batch of reads that may use DECLARE, SET, IF, WHILE, TRY…CATCH, THROW, PRINT, and
+    WAITFOR DELAY.
+- Apart from that PostgreSQL Plus wrapper, text that begins with transaction control, such as BEGIN TRAN, COMMIT,
+  ROLLBACK, or SAVE TRAN, fails with `UNSUPPORTED_OPERATION`.
+- A write that must run as one transaction uses a session:
+  - `session_open` returns a `session_id`.
+  - Each `query_execute` call passes that `session_id`.
+  - `session_commit` or `session_rollback` ends the session.
+- Inside a write session, a proven read needs no `write: true`. SQL Server Plus keeps the session's temporary
+  tables and `SET` options and reports affected rows. When user SQL ends or replaces the session's transaction,
+  SQL Server Plus closes the session without committing and says so in the reply.
 - A `SELECT` that calls a function that changes server or session state, such as `pg_cancel_backend`,
   `set_config`, `nextval`, advisory locks, or `dblink`, counts as a write. A statement with a MySQL executable
   comment (`/*! … */`) never counts as a read.
@@ -89,6 +126,7 @@ explicit `sql_password`.
 - When a driver gives no database-level read-only guarantee, reads run on the classifier's result and report
   `readonly_guarantee: classification_only`.
 - After an approval, the host checks read-only mode and the connection revision again before it runs the request.
+- A refused write names the setting or check that refused it, such as read-only mode or a denied approval.
 - `connection_create` and `connection_update` reject secrets with `SECRET_NOT_ACCEPTED` and always wait for GUI
   approval. `credential_import` and `connection_delete` are not available through MCP.
 
@@ -100,6 +138,24 @@ conflict on, without touching the work tree. `sync` merges it on a new branch an
 name, identifiers, and version.
 
 ## Verification status
+
+### 0.32.0+extended.1
+
+Checks on 2026-11-15, macOS arm64:
+
+- GitHub CI passed on commit `beccc3ee` of the main branch: CI, Format, Packages, Design & Accessibility, MySQL
+  and PostgreSQL integration, and Extended checks.
+- The PostgreSQL Plus and SQL Server Plus extension CI passed on commit `f7782149`.
+- Host: 3,243 Rust library tests and 8,846 frontend tests passed.
+- A live test with the real PostgreSQL Plus driver and PostgreSQL 17 read 10,001 rows, started the driver on the
+  first call, stopped it when idle, and read the same rows again from a new process.
+- The installed app ran with `--mcp` in a separate profile against a local PostgreSQL. No driver process ran at
+  start, one ran after the first `query_execute`, none ran after the idle period, and the second query returned the
+  same rows from a new process.
+
+Not checked: the Cosmos DB driver restarting after an idle stop against a real Cosmos DB account.
+
+### 0.27.0+extended.1
 
 Automated checks ran on macOS arm64 with deterministic fake drivers and fixtures. The Spatial and Azure suites and
 the frontend tests ran on 2026-10-21; the others ran on 2026-10-22.

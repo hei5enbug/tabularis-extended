@@ -55,17 +55,21 @@ To give up, run `git merge --abort`. The `sync/upstream-<tag>` branch stays, so 
 
 ## Conflict hotspots
 
-These files carry the most fork changes against `v0.27.0`, so they are the most likely to conflict. The list is
-based on how many lines changed, not on a tested merge.
+These upstream files carry the most fork changes against `v0.32.0`, so they are the most likely to conflict. The
+list is based on how many lines changed, not on a tested merge.
 
-- `src-tauri/src/commands.rs` (about 1,400 changed lines)
-- `src-tauri/src/plugins/driver.rs`
-- `src-tauri/src/persistence.rs`
-- `src-tauri/src/ai_activity.rs`
-- `src-tauri/src/mcp/mod.rs`
-- `packages/web-ui/src/components/modals/NewConnectionModal.tsx` and its test
-- `packages/web-ui/src/components/modals/AiApprovalModal.tsx`
+- `src-tauri/src/plugins/driver.rs` (about 930 changed lines)
+- `src-tauri/src/application/connections.rs`
 - `packages/web-ui/src/pages/Editor.tsx`
+- `src-tauri/src/persistence.rs`
+- `packages/web-ui/src/components/modals/NewConnectionModal.tsx`
+- `src-tauri/src/mcp/mod.rs`
+- `src-tauri/src/transport/desktop/commands.rs`
+- `packages/web-ui/src/components/modals/AiApprovalModal.tsx`
+
+`pnpm-workspace.yaml` has a fork-only `overrides` entry that moves the `dompurify` copy inside `monaco-editor` to a
+patched release. When `pnpm-lock.yaml` conflicts, take upstream's lockfile, run `pnpm install`, and check
+`pnpm audit --prod`. Drop the override once upstream's `monaco-editor` no longer pins a vulnerable `dompurify`.
 
 Rule: keep fork logic in new files and keep edits to upstream files as small hooks. A one-line call into a new
 fork file is easy to merge. A rewritten function in an upstream file conflicts on every release.
