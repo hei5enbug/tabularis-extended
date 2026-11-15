@@ -5,4 +5,4 @@ ignoredBuiltDependencies:
   - esbuild
 
 overrides:
-  "monaco-editor>dompurify": ">=3.4.17 <4"
+  'monaco-editor>dompurify': '>=3.4.17 <4'
