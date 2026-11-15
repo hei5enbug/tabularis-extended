@@ -5,4 +5,7 @@ ignoredBuiltDependencies:
   - esbuild
 
 overrides:
-  'monaco-editor>dompurify': '>=3.4.17 <4'
+  monaco-editor>dompurify: '>=3.4.17 <4'
+
+patchedDependencies:
+  monaco-editor@0.55.1: patches/monaco-editor@0.55.1.patch

@@ -5,6 +5,7 @@
 !roadmap.json
 !pnpm-lock.yaml
 !pnpm-workspace.yaml
+!patches/
 !.node-version
 !packages/
 !plugins/manifest.schema.json
